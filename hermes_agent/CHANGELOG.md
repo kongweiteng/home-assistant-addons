@@ -6,6 +6,8 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-06-15
+
 ### Added
 
 - Add `profiles_base` so bare multi-profile names can default to upstream-style `.hermes/profiles/<name>` storage.
@@ -19,6 +21,16 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 - Fix the shared-install dashboard patch helper call so startup uses the shared `SRC_DIR` instead of removed per-profile variables.
 - Correct Home Assistant option text and storage documentation for the shared install and `profiles_base` behavior.
+- Fix the README OpenAI-compatible API authentication example formatting.
+
+### Verified
+
+- `git diff --check` - OK.
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -q` - 53 tests OK, 1 skipped.
+- `PYTHONDONTWRITEBYTECODE=1 /amy/hermes-agent/.venv/bin/python -m pytest -q` - 52 passed, 1 skipped.
+- `bash -n hermes_agent/run.sh hermes_agent/profile-init.sh hermes_agent/nginx-render.sh` - OK.
+- YAML parse checks for `repository.yaml`, `hermes_agent/build.yaml`, `hermes_agent/config.yaml`, and `hermes_agent/translations/en.yaml` - OK.
+- Live Home Assistant local DEV add-on smoke - two profiles started, `nginx -t` passed, one shared Hermes clone/venv was reused, restart reused the shared install marker, primary and secondary Dashboard/Terminal/API routes returned HTTP 200, HA Ingress Dashboard WebSockets returned `HTTP/1.1 101 Switching Protocols` for `/api/pty`, `/api/ws`, and `/api/events` on both root and `/profile/amy`, and legacy flat profile preservation passed.
 
 ## [1.1.2] - 2026-06-15
 

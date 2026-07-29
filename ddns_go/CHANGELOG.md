@@ -1,6 +1,6 @@
 # Changelog
 
-## 6.17.2.1
+## 6.17.3
 
 - Keep `curl` in the runtime image because `bashio::config` needs it to read
   application options from the Home Assistant Supervisor API.

@@ -1,0 +1,11 @@
+configuration:
+  admin_password:
+    name: Initial administrator password
+    description: >-
+      Password assigned to admin@wiz.cn during the first initialization only.
+      After the first successful start, clear this option and manage the password
+      in WizNote. If left empty, the upstream default password is used.
+  timezone:
+    name: Time zone
+    description: >-
+      IANA time zone used by WizNote, for example Asia/Shanghai.

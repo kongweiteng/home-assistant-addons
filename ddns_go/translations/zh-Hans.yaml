@@ -1,0 +1,7 @@
+configuration:
+  frequency:
+    name: 更新间隔
+    description: 检查公网 IP 的间隔秒数。
+  custom_dns:
+    name: 自定义 DNS 服务器
+    description: 可选的 host:port 格式 DNS 服务器；留空则使用系统 DNS。

@@ -28,8 +28,7 @@ RUN apk add --no-cache ca-certificates curl tzdata \
     && echo "${asset_sha256}  /tmp/${asset}" | sha256sum -c - \
     && tar --extract --gzip --file "/tmp/${asset}" --directory /usr/local/bin ddns-go \
     && chmod 0755 /usr/local/bin/ddns-go \
-    && rm -f "/tmp/${asset}" \
-    && apk del curl
+    && rm -f "/tmp/${asset}"
 
 COPY rootfs /
 

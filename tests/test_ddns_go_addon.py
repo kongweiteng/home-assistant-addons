@@ -25,9 +25,15 @@ class DdnsGoAddonTests(unittest.TestCase):
         config = (ADDON / "config.yaml").read_text()
         build = (ADDON / "build.yaml").read_text()
 
-        version = re.search(r'^version: "([0-9]+\.[0-9]+\.[0-9]+)"$', config, re.M)
-        self.assertIsNotNone(version)
-        self.assertIn(f'DDNS_GO_VERSION: "{version.group(1)}"', build)
+        addon_version = re.search(
+            r'^version: "([0-9]+(?:\.[0-9]+){2,3})"$', config, re.M
+        )
+        upstream_version = re.search(
+            r'^\s*DDNS_GO_VERSION: "([0-9]+\.[0-9]+\.[0-9]+)"$', build, re.M
+        )
+        self.assertIsNotNone(addon_version)
+        self.assertIsNotNone(upstream_version)
+        self.assertTrue(addon_version.group(1).startswith(upstream_version.group(1)))
 
         checksums = re.findall(r'DDNS_GO_SHA256_[A-Z0-9]+: "([0-9a-f]{64})"', build)
         self.assertEqual(2, len(checksums))
@@ -41,6 +47,12 @@ class DdnsGoAddonTests(unittest.TestCase):
         self.assertIn("chmod 0755 /etc/services.d/ddns-go/run", dockerfile)
         self.assertIn('"/config/ddns-go.yaml"', service)
         self.assertNotIn("AccessKey", service)
+
+    def test_bashio_runtime_dependency_is_not_removed(self) -> None:
+        dockerfile = (ADDON / "Dockerfile").read_text()
+
+        self.assertRegex(dockerfile, r"apk add --no-cache[^\n]*\bcurl\b")
+        self.assertNotIn("apk del curl", dockerfile)
 
 
 if __name__ == "__main__":

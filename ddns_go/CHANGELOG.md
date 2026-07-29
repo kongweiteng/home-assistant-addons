@@ -1,5 +1,12 @@
 # Changelog
 
+## 6.17.2.1
+
+- Keep `curl` in the runtime image because `bashio::config` needs it to read
+  application options from the Home Assistant Supervisor API.
+- Fix the empty update frequency that caused DDNS-GO to exit with
+  `invalid value "" for flag -f` and restart continuously.
+
 ## 6.17.2
 
 - Initial version in the Kongweiteng Home Assistant Add-ons repository.

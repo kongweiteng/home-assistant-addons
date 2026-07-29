@@ -1,4 +1,26 @@
-# Hermes Agent Home Assistant Add-on
+# Kongweiteng Home Assistant Add-ons
+
+Personal Home Assistant add-on repository for applications maintained and reviewed by Kongweiteng.
+
+## Available add-ons
+
+| Add-on | Purpose | Architectures | Upstream |
+| --- | --- | --- | --- |
+| [DDNS-GO](ddns_go/) | Update Aliyun DNS and other providers with the current public IP | `amd64`, `aarch64` | [jeessy2/ddns-go](https://github.com/jeessy2/ddns-go) |
+| [Hermes Agent](hermes_agent/) | Persistent AI agent, dashboard, terminal and API | `amd64`, `aarch64` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
+
+## Add this repository to Home Assistant
+
+1. Open **Settings > Apps > Install app**.
+2. Open the top-right menu and select **Repositories**.
+3. Add `https://github.com/kongweiteng/home-assistant-addons`.
+4. Refresh the app store.
+
+Secrets and service credentials must never be committed to this repository.
+
+---
+
+## Hermes Agent
 
 > The self-improving AI agent built by Nous Research. Home Assistant add-on by Wolfram Ravenwolf.
 

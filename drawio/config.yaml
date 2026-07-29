@@ -1,0 +1,15 @@
+name: DrawIO
+version: "30.3.14"
+slug: drawio
+description: "Browser-based diagram editor available through Home Assistant Ingress."
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/drawio"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+stage: experimental
+ingress: true
+ingress_port: 8080
+panel_icon: mdi:vector-square

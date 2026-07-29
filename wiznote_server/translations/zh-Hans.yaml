@@ -1,0 +1,10 @@
+configuration:
+  admin_password:
+    name: 初始管理员密码
+    description: >-
+      仅在第一次初始化时设置 admin@wiz.cn 的密码。首次成功启动后，请清除此选项，
+      后续在为知笔记中管理密码。留空时将使用上游默认密码。
+  timezone:
+    name: 时区
+    description: >-
+      为知笔记使用的 IANA 时区，例如 Asia/Shanghai。

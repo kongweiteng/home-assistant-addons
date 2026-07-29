@@ -1,0 +1,3 @@
+build_from:
+  amd64: "jgraph/drawio@sha256:bcc1359c7e4b509aff0733fe36450ec885462f962dff8c5d5f94b2fbf5635dcc"
+  aarch64: "jgraph/drawio@sha256:cc0ba7da584ea925e0d8be4c48bb89db9584e865a0c92478ad3ffd9caa7ddf28"

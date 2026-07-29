@@ -1,5 +1,5 @@
 name: DDNS-GO
-version: "6.17.2"
+version: "6.17.2.1"
 slug: ddns_go
 description: "Update Aliyun DNS and other DNS providers with the current public IPv4 or IPv6 address."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ddns_go"

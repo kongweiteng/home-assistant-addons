@@ -1,0 +1,30 @@
+name: WizNote Server
+version: "1.0.0"
+slug: wiznote_server
+description: "Self-hosted WizNote server for x86-64 HAOS with persistent storage and cold-backup support."
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/wiznote_server"
+arch:
+  - amd64
+init: false
+startup: services
+boot: auto
+stage: experimental
+backup: cold
+timeout: 60
+webui: "http://[HOST]:[PORT:80]"
+ports:
+  80/tcp: 8088
+  9269/udp: 9269
+ports_description:
+  80/tcp: "WizNote web interface and client API"
+  9269/udp: "WizNote UDP service port required by the upstream server"
+map:
+  - type: data
+    read_only: false
+    path: /wiz/storage
+options:
+  admin_password: ""
+  timezone: Asia/Shanghai
+schema:
+  admin_password: "password?"
+  timezone: "str"

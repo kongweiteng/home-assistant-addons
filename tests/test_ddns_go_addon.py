@@ -34,9 +34,11 @@ class DdnsGoAddonTests(unittest.TestCase):
 
     def test_service_uses_private_addon_config(self) -> None:
         config = (ADDON / "config.yaml").read_text()
+        dockerfile = (ADDON / "Dockerfile").read_text()
         service = (ADDON / "rootfs/etc/services.d/ddns-go/run").read_text()
 
         self.assertIn("addon_config:rw", config)
+        self.assertIn("chmod 0755 /etc/services.d/ddns-go/run", dockerfile)
         self.assertIn('"/config/ddns-go.yaml"', service)
         self.assertNotIn("AccessKey", service)
 

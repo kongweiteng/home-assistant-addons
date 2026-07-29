@@ -1,6 +1,6 @@
 # Kongweiteng Home Assistant Add-ons
 
-Personal Home Assistant add-on repository for applications maintained and reviewed by Kongweiteng.
+Canonical Home Assistant add-on repository for every application maintained and reviewed by Kongweiteng. Home Assistant instances should add this single repository instead of registering separate repositories for each self-maintained application.
 
 ## Available add-ons
 
@@ -18,6 +18,15 @@ Personal Home Assistant add-on repository for applications maintained and review
 4. Refresh the app store.
 
 Secrets and service credentials must never be committed to this repository.
+
+## Maintenance policy
+
+- Each maintained add-on lives in its own directory with a stable slug.
+- Upstream releases are pinned to an explicit version and checksum when external artifacts are downloaded during the build.
+- Supported architectures must be declared and build-checked before release.
+- Version changes must update the add-on metadata and changelog together.
+- Official or community add-ons stay in their upstream repositories unless this repository intentionally takes over maintenance or carries a required patch.
+- Runtime passwords, API tokens, cloud credentials and Home Assistant instance data are never committed here.
 
 ---
 

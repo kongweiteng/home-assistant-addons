@@ -7,6 +7,7 @@ Canonical Home Assistant add-on repository for every application maintained and 
 | Add-on | Purpose | Architectures | Upstream |
 | --- | --- | --- | --- |
 | [DDNS-GO](ddns_go/) | Update Aliyun DNS and other providers with the current public IP | `amd64`, `aarch64` | [jeessy2/ddns-go](https://github.com/jeessy2/ddns-go) |
+| [DrawIO](drawio/) | Browser-based diagram editor through Home Assistant Ingress | `amd64`, `aarch64` | [jgraph/docker-drawio](https://github.com/jgraph/docker-drawio) |
 | [Hermes Agent](hermes_agent/) | Persistent AI agent, dashboard, terminal and API | `amd64`, `aarch64` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
 | [WizNote Server](wiznote_server/) | Self-hosted notes with persistent storage, OSS guidance and cold backups | `amd64` | [wiznote/wizserver](https://hub.docker.com/r/wiznote/wizserver) |
 

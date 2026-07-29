@@ -32,3 +32,5 @@ RUN apk add --no-cache ca-certificates curl tzdata \
     && apk del curl
 
 COPY rootfs /
+
+RUN chmod 0755 /etc/services.d/ddns-go/run

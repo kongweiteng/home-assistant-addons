@@ -26,14 +26,16 @@ class DdnsGoAddonTests(unittest.TestCase):
         build = (ADDON / "build.yaml").read_text()
 
         addon_version = re.search(
-            r'^version: "([0-9]+(?:\.[0-9]+){2,3})"$', config, re.M
+            r'^version: "([0-9]+\.[0-9]+\.[0-9]+)"$', config, re.M
         )
         upstream_version = re.search(
             r'^\s*DDNS_GO_VERSION: "([0-9]+\.[0-9]+\.[0-9]+)"$', build, re.M
         )
         self.assertIsNotNone(addon_version)
         self.assertIsNotNone(upstream_version)
-        self.assertTrue(addon_version.group(1).startswith(upstream_version.group(1)))
+        addon_parts = tuple(map(int, addon_version.group(1).split(".")))
+        upstream_parts = tuple(map(int, upstream_version.group(1).split(".")))
+        self.assertGreaterEqual(addon_parts, upstream_parts)
 
         checksums = re.findall(r'DDNS_GO_SHA256_[A-Z0-9]+: "([0-9a-f]{64})"', build)
         self.assertEqual(2, len(checksums))

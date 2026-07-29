@@ -1,0 +1,7 @@
+configuration:
+  frequency:
+    name: Update interval
+    description: Number of seconds between public-IP checks.
+  custom_dns:
+    name: Custom DNS server
+    description: Optional DNS server in host:port form. Leave empty to use the system resolver.

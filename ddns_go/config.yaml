@@ -1,0 +1,25 @@
+name: DDNS-GO
+version: "6.17.2"
+slug: ddns_go
+description: "Update Aliyun DNS and other DNS providers with the current public IPv4 or IPv6 address."
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ddns_go"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+boot: auto
+map:
+  - addon_config:rw
+ports:
+  9876/tcp: 9876
+ports_description:
+  9876/tcp: "DDNS-GO local management interface"
+webui: "http://[HOST]:[PORT:9876]/"
+watchdog: "http://[HOST]:[PORT:9876]/"
+options:
+  frequency: 300
+  custom_dns: ""
+schema:
+  frequency: "int(10,)"
+  custom_dns: "str?"

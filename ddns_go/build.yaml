@@ -1,0 +1,7 @@
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base:3.22
+  aarch64: ghcr.io/home-assistant/aarch64-base:3.22
+args:
+  DDNS_GO_VERSION: "6.17.2"
+  DDNS_GO_SHA256_AMD64: "e847a748aabe10e1a8c21d3fc2d65cb7c6a4c5f1d4a850a178008a2eb2974319"
+  DDNS_GO_SHA256_AARCH64: "157a2ac273ddc0008cb94822e7d7b1b3932c80125b6fba3fd942f817907d14ac"

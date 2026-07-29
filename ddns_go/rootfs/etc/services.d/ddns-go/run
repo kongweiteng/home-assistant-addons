@@ -1,0 +1,19 @@
+#!/usr/bin/with-contenv bashio
+
+set -euo pipefail
+
+frequency="$(bashio::config 'frequency')"
+custom_dns="$(bashio::config 'custom_dns')"
+
+arguments=(
+  -l ":9876"
+  -f "${frequency}"
+  -c "/config/ddns-go.yaml"
+)
+
+if [[ -n "${custom_dns}" ]]; then
+  arguments+=( -dns "${custom_dns}" )
+fi
+
+bashio::log.info "Starting DDNS-GO with a ${frequency}-second update interval"
+exec /usr/local/bin/ddns-go "${arguments[@]}"

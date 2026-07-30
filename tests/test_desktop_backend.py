@@ -310,7 +310,12 @@ class DesktopBackendShellTests(unittest.TestCase):
                 desktop_backend_validate_options
                 desktop_backend_validate_runtime
                 desktop_backend_start
-                sleep 0.2
+                for _ in $(seq 1 100); do
+                    if [ -f {capture_args!s} ] && [ -f {capture_stdin!s} ]; then break; fi
+                    sleep 0.02
+                done
+                test -f {capture_args!s}
+                test -f {capture_stdin!s}
                 test -n "$DESKTOP_BACKEND_PID"
                 kill -0 "$DESKTOP_BACKEND_PID"
                 desktop_backend_stop

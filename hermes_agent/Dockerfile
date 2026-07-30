@@ -32,6 +32,7 @@ ENV LANG=C.UTF-8 \
 # ── uv (Astral) ─────────────────────────────────────────────────────
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_LINK_MODE=copy
+RUN uv pip install --system paho-mqtt==2.1.0
 
 # ── Node.js 22 ──────────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -77,7 +78,10 @@ RUN su - linuxbrew -c \
 
 # ── Addon files ──────────────────────────────────────────────────────
 COPY run.sh /
+COPY config.yaml /usr/local/share/hermes-addon/config.yaml
 COPY homeassistant_tool.py /usr/local/share/hermes-addon/homeassistant_tool.py
+COPY notification_bridge.py /usr/local/bin/hermes-notification-bridge
+COPY notification-bridge.sh /usr/local/lib/hermes-notification-bridge.sh
 COPY nginx-render.sh /usr/local/lib/hermes-nginx-render.sh
 COPY profile-init.sh /usr/local/lib/hermes-profile-init.sh
 COPY desktop-backend.sh /usr/local/lib/hermes-desktop-backend.sh
@@ -88,7 +92,7 @@ COPY landing.html.tpl /var/www/landing.html.tpl
 COPY loading.html /var/www/loading.html
 COPY brew-wrapper.sh /usr/local/bin/brew-wrapper
 COPY dashboard-patches.py /usr/local/bin/hermes-dashboard-patches
-RUN chmod +x /run.sh /usr/local/bin/brew-wrapper /usr/local/bin/hermes-dashboard-patches /usr/local/bin/hermes-desktop-backend
+RUN chmod +x /run.sh /usr/local/bin/brew-wrapper /usr/local/bin/hermes-dashboard-patches /usr/local/bin/hermes-desktop-backend /usr/local/bin/hermes-notification-bridge
 
 # ── nginx dirs ───────────────────────────────────────────────────────
 RUN mkdir -p /var/www /var/log/nginx /run/nginx

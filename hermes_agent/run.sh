@@ -23,6 +23,13 @@ HASS_URL=$(opt hass_url)
 HASS_TOKEN=$(opt homeassistant_token)
 HASS_ALLOWED_DOMAINS=$(jq -r 'if has("ha_control_allowed_domains") then (.ha_control_allowed_domains // []) else ["light"] end | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
 HASS_ALLOWED_ENTITIES=$(jq -r '(.ha_control_allowed_entities // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
+NOTIFICATION_BRIDGE_ENABLED=$(opt_bool notification_bridge_enabled)
+NOTIFICATION_MQTT_HOST=$(opt notification_mqtt_host)
+NOTIFICATION_MQTT_PORT=$(jq -r '.notification_mqtt_port // 1883' "$OPTIONS_FILE")
+NOTIFICATION_MQTT_USERNAME=$(opt notification_mqtt_username)
+NOTIFICATION_MQTT_PASSWORD=$(opt notification_mqtt_password)
+NOTIFICATION_MQTT_TLS=$(opt_bool notification_mqtt_tls)
+NOTIFICATION_ALLOWED_AUDIENCES=$(jq -r '(.notification_allowed_audiences // ["owner"]) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
 HASS_AUTH_SOURCE="configured token"
 if [ -z "$HASS_TOKEN" ] && [ -n "${SUPERVISOR_TOKEN:-}" ]; then
     HASS_TOKEN="$SUPERVISOR_TOKEN"
@@ -101,6 +108,7 @@ INGRESS_PORT=49169
 HTTP_PORT=8080
 HTTPS_PORT=8443
 DESKTOP_BACKEND_PORT=9119
+ADDON_VERSION=$(jq -r '.version // "unknown"' /usr/local/share/hermes-addon/config.yaml 2>/dev/null || echo "unknown")
 
 # Desktop backend lifecycle helpers. The feature is opt-in and validation runs
 # before nginx or any Hermes service starts.
@@ -120,6 +128,24 @@ fi
 # shellcheck source=desktop-backend.sh
 source "$DESKTOP_BACKEND_LIB"
 desktop_backend_validate_options || exit 1
+
+# Optional MQTT notification bridge lifecycle helpers.
+NOTIFICATION_BRIDGE_LIB=""
+for _candidate in \
+    "/usr/local/lib/hermes-notification-bridge.sh" \
+    "$(dirname "${BASH_SOURCE[0]}")/notification-bridge.sh"; do
+    if [ -f "$_candidate" ]; then
+        NOTIFICATION_BRIDGE_LIB="$_candidate"
+        break
+    fi
+done
+if [ -z "$NOTIFICATION_BRIDGE_LIB" ]; then
+    echo "[run] FATAL: notification-bridge.sh not found"
+    exit 1
+fi
+# shellcheck source=notification-bridge.sh
+source "$NOTIFICATION_BRIDGE_LIB"
+notification_bridge_validate_options || exit 1
 
 # Start nginx early with loading page (replaced with full config after setup)
 cat > /etc/nginx/nginx.conf << LOADCONF
@@ -652,6 +678,7 @@ TTYD_HERMES_PIDS=()
 TTYD_TERMINAL_PIDS=()
 DASHBOARD_PIDS=()
 DESKTOP_BACKEND_PID=""
+NOTIFICATION_BRIDGE_PID=""
 
 start_gateway_for_profile() {
     local i="$1"
@@ -796,6 +823,7 @@ shutdown() {
     echo "[run] Shutting down..."
     nginx -s quit 2>/dev/null || true
     echo "[run] nginx stopped"
+    notification_bridge_stop
     desktop_backend_stop
     for i in "${!PROFILE_DIRS[@]}"; do
         for pid in "${TTYD_TERMINAL_PIDS[$i]:-}" "${TTYD_HERMES_PIDS[$i]:-}" "${DASHBOARD_PIDS[$i]:-}"; do
@@ -837,6 +865,7 @@ for i in "${!PROFILE_DIRS[@]}"; do
 done
 
 desktop_backend_start
+notification_bridge_start
 
 for i in "${!PROFILE_DIRS[@]}"; do
     inject_dashboard_token_for_profile "$i"
@@ -875,6 +904,7 @@ echo "────────────────────────�
 # ── Section 12: Supervisor loop ──────────────────────────────────────
 while true; do
     desktop_backend_supervise
+    notification_bridge_supervise
     for i in "${!PROFILE_DIRS[@]}"; do
         pid="${GATEWAY_PIDS[$i]:-}"
         if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then

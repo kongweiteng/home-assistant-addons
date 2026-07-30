@@ -44,6 +44,7 @@ Secrets and service credentials must never be committed to this repository.
 - **Persistent memory** -- SQLite FTS5 long-term memory that survives restarts
 - **Self-improving skills** -- agent learns and creates new capabilities over time
 - **Multi-platform messaging** -- Telegram, Discord, WhatsApp, and more via the gateway
+- **MQTT notification bridge** -- optional model-free Home Assistant notifications through the primary Weixin Home Channel
 - **OpenAI-compatible API** -- connect any chat frontend ([Open WebUI](https://github.com/open-webui/open-webui), [SillyTavern](https://github.com/SillyTavern/SillyTavern), etc.) via `/v1/`
 - **Hermes Desktop backend** -- opt-in remote backend for the official Hermes Desktop app on a dedicated port
 - **Plugin architecture** -- custom tools, commands, and hooks without forking
@@ -75,6 +76,13 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 | `homeassistant_token` |                                                    | Optional long-lived token; blank uses the add-on's short-lived Supervisor token |
 | `ha_control_allowed_domains` | `light`                                      | Write-enabled domains; only `light` and `switch` are supported                  |
 | `ha_control_allowed_entities` | empty                                       | Optional exact entity allowlist; empty permits entities in enabled domains      |
+| `notification_bridge_enabled` | `false`                                     | Enable the versioned MQTT-to-Weixin notification bridge                         |
+| `notification_mqtt_host` | `core-mosquitto`                                  | MQTT broker hostname on the internal app network                                |
+| `notification_mqtt_port` | `1883`                                             | MQTT broker port                                                                |
+| `notification_mqtt_username` | empty                                         | Dedicated least-privilege MQTT username                                         |
+| `notification_mqtt_password` | empty                                         | Password for the dedicated notification MQTT user                               |
+| `notification_mqtt_tls` | `false`                                             | Use TLS with broker certificate validation                                      |
+| `notification_allowed_audiences` | `owner`                                    | Accepted logical audience aliases; no Weixin IDs are stored in MQTT             |
 | `enable_dashboard`    | `false`                                            | Enable web dashboard on direct HTTP/HTTPS ports                                 |
 | `enable_terminal`     | `false`                                            | Enable web terminal on direct HTTP/HTTPS ports                                  |
 | `enable_api`          | `false`                                            | Enable the OpenAI-compatible API server on direct HTTP/HTTPS ports              |
@@ -89,6 +97,25 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 API keys can be configured in two places: `env_vars` above (convenient, via Home Assistant UI) or each profile's `.env` directly (full list, via terminal or `hermes setup`). Non-empty top-level `env_vars` are written to every profile's `.env` on each start, overriding existing entries. `profile_env_vars` entries layer on top of the top-level set for the profile whose directory matches `profile`.
 
 Home Assistant access uses the add-on's short-lived Supervisor credential by default, so no long-lived HA token is required. The explicit `homeassistant_token` and `hass_url` options remain available for nonstandard deployments. Home Assistant does not provide service-level token permissions, so the add-on replaces upstream Hermes' broad service caller with a restricted implementation: ordinary device states are readable, security-sensitive domains are hidden, every write targets one exact entity, target expansion is rejected, and success is reported only after the entity's real HA state is re-read and verified.
+
+### MQTT notification bridge
+
+The optional bridge subscribes to `home/notification/v1/request` at QoS 1 and invokes the primary profile with:
+
+```bash
+hermes send -q --to weixin --file -
+```
+
+This path does not call a model. It validates the request schema, TTL and audience, then applies message-ID idempotency, a deduplication window, source/global rate limits, bounded retries, and a persistent SQLite delivery ledger. Only routing metadata and status are stored; notification bodies and Weixin identities are not written to the ledger. The bridge removes all `NOTIFICATION_*` variables before launching `hermes send`, so its MQTT credentials are not inherited by the Hermes subprocess.
+
+Results are published to `home/notification/v1/result` without retain. The retained `home/notification/v1/status` topic contains only bridge health. MQTT Discovery creates diagnostic entities for bridge connectivity and the latest result. Discovery payloads are retained and are re-published after Home Assistant's `homeassistant/status` birth message.
+
+Use an individual MQTT user for the bridge and restrict it to:
+
+- read: `home/notification/v1/request`, `homeassistant/status`
+- write: `home/notification/v1/result`, `home/notification/v1/status`, `homeassistant/binary_sensor/hermes_notification_bridge_online/config`, `homeassistant/sensor/hermes_notification_last_result/config`
+
+Home Assistant's built-in `homeassistant` and `addons` MQTT users must retain their required unrestricted access if broker ACLs are enabled. Keep the bridge disabled until its dedicated MQTT credentials and ACL have been configured. The credential fields remain optional while the bridge is disabled and startup fails closed if it is enabled without both values. Version 1 routes accepted audiences to the primary Weixin Home Channel; an audience alias is not a Weixin account or user ID.
 
 ### Running multiple profiles concurrently
 
@@ -231,18 +258,20 @@ Authentication layers differ by access path:
 - **OpenAI-compatible API** (`/v1/*`): Bearer token authentication. The `access_password` doubles as the API key, passed as `Authorization: Bearer <api-key>`.
 - **Hermes Desktop backend** (`:9119` when enabled and mapped): Hermes Basic-auth login using username `hermes` and `access_password`. This endpoint exposes the full Desktop backend contract, including chat, WebSockets, PTY, events, profiles, and agent control. It is disabled and unmapped by default. Enabling it is an explicit risk decision; keep it on a trusted LAN/VPN/Tailscale path and do not expose it directly to the internet.
 - **Home Assistant device control**: the add-on requests Core API access and converts its short-lived Supervisor credential into the `HASS_TOKEN` expected by Hermes. Read tools exclude locks, alarms, cameras, people, device trackers, automations, scripts, scenes, and other sensitive/action domains. Write tools default to `light.turn_on` and `light.turn_off`; `switch` must be explicitly enabled and also requires an exact entity allowlist. Calls require one exact entity, accept only restricted parameters, and verify the resulting HA state before returning success. Use `ha_control_allowed_entities` when control must be narrower than the enabled domain.
+- **MQTT notification bridge**: disabled by default. When enabled, it uses separate broker credentials, subscribes only to the versioned request contract, rejects unknown audiences, persists no notification body, and sends through `hermes send` without model execution. Request/result messages are never retained.
 
 If you expose direct ports to the internet, place a network-perimeter gate (firewall, VPN, reverse proxy with stronger auth) in front — Basic Auth alone is not brute-force resistant.
 
 ## Architecture
 
-Five service families in a Debian Bookworm container:
+Six service families in a Debian Bookworm container:
 
 1. **Hermes Gateway** (`hermes gateway run`) -- persistent AI agent daemon with OpenAI-compatible API server and messaging platform connectors. Logs visible in the Home Assistant add-on log and in `~/.hermes/logs/gateway.log`.
 2. **Hermes Dashboard** (`hermes dashboard`) -- browser-based management UI (FastAPI + React) for config, API keys, sessions, analytics, logs, cron jobs, and skills.
 3. **ttyd** (×2 per profile) -- web terminals backed by persistent tmux sessions (`hermes-<name>` + `terminal-<name>`)
 4. **nginx** -- HTTP, HTTPS, and Home Assistant ingress proxy routing to dashboard + terminal + API. Multi-profile setups serve `/profile/<name>/...` for non-primary profiles.
 5. **Hermes Desktop backend** (`hermes serve`, optional) -- official root-level HTTP/WebSocket backend on container port 9119, using the primary Hermes machine root and Basic-auth login.
+6. **MQTT notification bridge** (optional) -- a standalone Python process with MQTT v5 persistent sessions, manual QoS acknowledgements, SQLite idempotency, MQTT Discovery, and deterministic Weixin delivery.
 
 ### Shell Environment
 
@@ -283,6 +312,7 @@ The default single-profile layout after a successful first start is:
 │   ├── hermes-agent/          # Git clone (source code, agent-modifiable)
 │   │   └── venv/              # Python venv (editable install)
 │   ├── logs/                  # Gateway logs
+│   ├── notification-bridge/   # Delivery ledger + notification bridge log state
 │   ├── memories/              # Long-term memory (MEMORY.md, USER.md)
 │   ├── sessions/              # Conversation state
 │   ├── skills/                # Auto-created + installed skills

@@ -21,6 +21,14 @@ GIT_TOKEN=$(opt git_token)
 AUTO_UPDATE=$(opt_bool auto_update)
 HASS_URL=$(opt hass_url)
 HASS_TOKEN=$(opt homeassistant_token)
+HASS_ALLOWED_DOMAINS=$(jq -r 'if has("ha_control_allowed_domains") then (.ha_control_allowed_domains // []) else ["light"] end | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
+HASS_ALLOWED_ENTITIES=$(jq -r '(.ha_control_allowed_entities // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
+HASS_AUTH_SOURCE="configured token"
+if [ -z "$HASS_TOKEN" ] && [ -n "${SUPERVISOR_TOKEN:-}" ]; then
+    HASS_TOKEN="$SUPERVISOR_TOKEN"
+    HASS_URL="http://supervisor/core"
+    HASS_AUTH_SOURCE="Home Assistant Supervisor"
+fi
 # shellcheck disable=SC2034  # consumed by resolve_profiles in profile-init.sh
 HERMES_HOME_DIR=$(opt hermes_home)
 # shellcheck disable=SC2034  # consumed by resolve_profiles in profile-init.sh
@@ -366,6 +374,17 @@ install_hermes_core() {
 
 install_hermes_core
 
+# Replace upstream's broad HA service caller with the add-on's restricted,
+# auditable implementation after every clone/update. Fail closed if the
+# expected upstream module is absent.
+HASS_TOOL_OVERRIDE="/usr/local/share/hermes-addon/homeassistant_tool.py"
+if [ ! -f "$HASS_TOOL_OVERRIDE" ] || [ ! -f "$SRC_DIR/tools/homeassistant_tool.py" ]; then
+    echo "[run] FATAL: Home Assistant tool override cannot be installed"
+    exit 1
+fi
+install -m 0644 "$HASS_TOOL_OVERRIDE" "$SRC_DIR/tools/homeassistant_tool.py"
+echo "[run] Restricted Home Assistant tool installed"
+
 # Activate the shared venv for any tooling (e.g. dashboard module probe).
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
@@ -436,7 +455,14 @@ done
 # HA integration: pass through if set (shared across profiles)
 if [ -n "$HASS_TOKEN" ]; then
     export HASS_TOKEN
-    echo "[run] HASS_TOKEN injected"
+    echo "[run] HASS authentication: $HASS_AUTH_SOURCE"
+fi
+export HASS_ALLOWED_DOMAINS HASS_ALLOWED_ENTITIES
+echo "[run] HA control domains: ${HASS_ALLOWED_DOMAINS:-none}"
+if [ -n "$HASS_ALLOWED_ENTITIES" ]; then
+    echo "[run] HA control entity allowlist enabled"
+else
+    echo "[run] HA control entity allowlist: all entities in allowed domains"
 fi
 if [ -n "$GIT_TOKEN" ]; then
     export GITHUB_TOKEN="$GIT_TOKEN"
@@ -468,12 +494,15 @@ export GOBIN="$GO_DIR/bin"
 export GOPATH="$GO_DIR"
 $([ -n "$HASS_TOKEN" ] && echo "export HASS_TOKEN=\"$HASS_TOKEN\"")
 $([ -n "$HASS_URL" ] && echo "export HASS_URL=\"$HASS_URL\"")
+export HASS_ALLOWED_DOMAINS="$HASS_ALLOWED_DOMAINS"
+export HASS_ALLOWED_ENTITIES="$HASS_ALLOWED_ENTITIES"
 export HOMEBREW_CELLAR="$BREW_DIR/Cellar"
 export HOMEBREW_PREFIX="$BREW_DIR"
 export HOMEBREW_REPOSITORY="$BREW_DIR/Homebrew"
 export NPM_CONFIG_PREFIX="$NODE_DIR"
 export PATH="$VENV_DIR/bin:$BREW_DIR/sbin:$BREW_DIR/bin:$GO_DIR/bin:/usr/local/go/bin:$NODE_DIR/bin:\$PATH"
 ENVSH
+chmod 600 /config/.hermes_profile
 
 # ── Section 8: TLS certificates (shared) ─────────────────────────────
 if [ ! -f "$CERTS_DIR/server.crt" ]; then

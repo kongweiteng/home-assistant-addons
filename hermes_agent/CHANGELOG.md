@@ -6,6 +6,16 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-07-30
+
+### Changed
+
+- Move the pinned MQTT client installation after the stable heavyweight toolchain layers so upgrades can reuse existing Docker cache instead of downloading Node.js, GitHub CLI, Go, ttyd, and Homebrew again.
+
+### Verified
+
+- Preserve the `paho-mqtt==2.1.0` PEP 668 override and cover the cache-friendly layer order with a packaging regression test.
+
 ## [1.5.1] - 2026-07-30
 
 ### Fixed

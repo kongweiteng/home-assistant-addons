@@ -32,7 +32,6 @@ ENV LANG=C.UTF-8 \
 # ── uv (Astral) ─────────────────────────────────────────────────────
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 ENV UV_LINK_MODE=copy
-RUN uv pip install --system --break-system-packages paho-mqtt==2.1.0
 
 # ── Node.js 22 ──────────────────────────────────────────────────────
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
@@ -75,6 +74,11 @@ RUN useradd -r -m -s /bin/bash -d /home/linuxbrew linuxbrew \
 RUN su - linuxbrew -c \
     'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' \
     && /home/linuxbrew/.linuxbrew/bin/brew --version
+
+# ── MQTT notification bridge dependency ────────────────────────────
+# Keep this after the stable, heavyweight toolchain layers so existing
+# installations can reuse their build cache for small bridge-only updates.
+RUN uv pip install --system --break-system-packages paho-mqtt==2.1.0
 
 # ── Addon files ──────────────────────────────────────────────────────
 COPY run.sh /

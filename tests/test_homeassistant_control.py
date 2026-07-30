@@ -66,7 +66,7 @@ class AddonContractTests(unittest.TestCase):
     def test_addon_uses_supervisor_core_api_permission(self):
         config = CONFIG_PATH.read_text()
         self.assertIn("homeassistant_api: true", config)
-        self.assertIn('version: "1.4.0"', config)
+        self.assertIn('version: "1.5.0"', config)
         self.assertRegex(
             config,
             r'(?ms)ha_control_allowed_domains:\n\s+- "light"\n\s+ha_control_allowed_entities: \[\]',

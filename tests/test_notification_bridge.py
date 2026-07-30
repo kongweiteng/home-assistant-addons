@@ -53,7 +53,7 @@ def _config(tmp: Path):
         hermes_bin="/usr/local/bin/hermes",
         hermes_home=str(tmp / "profile"),
         ledger_path=tmp / "notification-ledger.sqlite3",
-        addon_version="1.5.0",
+        addon_version="1.5.1",
     )
 
 
@@ -81,7 +81,7 @@ def _payload(
 class AddonPackagingTests(unittest.TestCase):
     def test_feature_is_opt_in_and_versioned(self):
         config = CONFIG.read_text()
-        self.assertIn('version: "1.5.0"', config)
+        self.assertIn('version: "1.5.1"', config)
         self.assertIn("notification_bridge_enabled: false", config)
         self.assertIn('notification_mqtt_host: "core-mosquitto"', config)
         self.assertIn('notification_mqtt_username: "str?"', config)
@@ -94,6 +94,7 @@ class AddonPackagingTests(unittest.TestCase):
     def test_container_pins_runtime_and_copies_bridge_files(self):
         dockerfile = DOCKERFILE.read_text()
         self.assertIn("paho-mqtt==2.1.0", dockerfile)
+        self.assertIn("--break-system-packages", dockerfile)
         self.assertIn(
             "COPY notification_bridge.py /usr/local/bin/hermes-notification-bridge",
             dockerfile,
@@ -195,7 +196,7 @@ class ContractTests(unittest.TestCase):
                 )
 
     def test_discovery_contains_only_diagnostic_state_topics(self):
-        messages = BRIDGE.discovery_messages("1.5.0")
+        messages = BRIDGE.discovery_messages("1.5.1")
         self.assertEqual(len(messages), 2)
         self.assertIn(
             "homeassistant/binary_sensor/hermes_notification_bridge_online/config",

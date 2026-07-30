@@ -6,6 +6,16 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-07-30
+
+### Fixed
+
+- Allow the pinned `paho-mqtt==2.1.0` package to be installed into the Home Assistant Debian base image despite its PEP 668 externally-managed marker.
+
+### Verified
+
+- Build an `amd64` smoke image from the Home Assistant Debian base and verify that the pinned MQTT client installs and imports successfully with the PEP 668 override.
+
 ## [1.5.0] - 2026-07-30
 
 ### Added

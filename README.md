@@ -71,8 +71,10 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 | `git_ref`             |                                                    | Branch, tag, or commit (empty = repo's default branch)                          |
 | `git_token`           |                                                    | Token for private repos + exported as `GITHUB_TOKEN` for gh CLI                 |
 | `auto_update`         | `false`                                            | Pull latest changes on restart (preserves local modifications)                  |
-| `hass_url`            | `http://homeassistant.local:8123`                  | Home Assistant URL for API access                                               |
-| `homeassistant_token` |                                                    | Long-lived access token for Home Assistant API integration                      |
+| `hass_url`            | `http://homeassistant.local:8123`                  | Home Assistant URL used only when an explicit long-lived token is configured    |
+| `homeassistant_token` |                                                    | Optional long-lived token; blank uses the add-on's short-lived Supervisor token |
+| `ha_control_allowed_domains` | `light`                                      | Write-enabled domains; only `light` and `switch` are supported                  |
+| `ha_control_allowed_entities` | empty                                       | Optional exact entity allowlist; empty permits entities in enabled domains      |
 | `enable_dashboard`    | `false`                                            | Enable web dashboard on direct HTTP/HTTPS ports                                 |
 | `enable_terminal`     | `false`                                            | Enable web terminal on direct HTTP/HTTPS ports                                  |
 | `enable_api`          | `false`                                            | Enable the OpenAI-compatible API server on direct HTTP/HTTPS ports              |
@@ -85,6 +87,8 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 | `profile_env_vars`    | `[]`                                               | Per-profile `.env` overrides: each entry is `{profile, name, value}` where `profile` matches a directory in `profiles` |
 
 API keys can be configured in two places: `env_vars` above (convenient, via Home Assistant UI) or each profile's `.env` directly (full list, via terminal or `hermes setup`). Non-empty top-level `env_vars` are written to every profile's `.env` on each start, overriding existing entries. `profile_env_vars` entries layer on top of the top-level set for the profile whose directory matches `profile`.
+
+Home Assistant access uses the add-on's short-lived Supervisor credential by default, so no long-lived HA token is required. The explicit `homeassistant_token` and `hass_url` options remain available for nonstandard deployments. Home Assistant does not provide service-level token permissions, so the add-on replaces upstream Hermes' broad service caller with a restricted implementation: ordinary device states are readable, security-sensitive domains are hidden, every write targets one exact entity, target expansion is rejected, and success is reported only after the entity's real HA state is re-read and verified.
 
 ### Running multiple profiles concurrently
 
@@ -226,6 +230,7 @@ Authentication layers differ by access path:
   2. **Session Token** (ephemeral, rotates on every add-on restart) gates dashboard API calls. The token is injected into the dashboard HTML on load — only clients who successfully loaded the page via Basic Auth ever see it. Requests to `/dashboard/api/*` without a matching Bearer token return 401. Only `/dashboard/api/status` is public (it mirrors Hermes' own whitelist and powers the landing page health indicator). If the dashboard process is restarted without restarting the add-on, the nginx-side token cache goes stale — restart the add-on to re-sync.
 - **OpenAI-compatible API** (`/v1/*`): Bearer token authentication. The `access_password` doubles as the API key, passed as `Authorization: Bearer <api-key>`.
 - **Hermes Desktop backend** (`:9119` when enabled and mapped): Hermes Basic-auth login using username `hermes` and `access_password`. This endpoint exposes the full Desktop backend contract, including chat, WebSockets, PTY, events, profiles, and agent control. It is disabled and unmapped by default. Enabling it is an explicit risk decision; keep it on a trusted LAN/VPN/Tailscale path and do not expose it directly to the internet.
+- **Home Assistant device control**: the add-on requests Core API access and converts its short-lived Supervisor credential into the `HASS_TOKEN` expected by Hermes. Read tools exclude locks, alarms, cameras, people, device trackers, automations, scripts, scenes, and other sensitive/action domains. Write tools default to `light.turn_on` and `light.turn_off`; `switch` must be explicitly enabled and also requires an exact entity allowlist. Calls require one exact entity, accept only restricted parameters, and verify the resulting HA state before returning success. Use `ha_control_allowed_entities` when control must be narrower than the enabled domain.
 
 If you expose direct ports to the internet, place a network-perimeter gate (firewall, VPN, reverse proxy with stronger auth) in front — Basic Auth alone is not brute-force resistant.
 

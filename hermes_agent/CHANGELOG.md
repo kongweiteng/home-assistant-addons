@@ -6,6 +6,24 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-30
+
+### Added
+
+- Use Home Assistant's short-lived Supervisor credential for Hermes HA tools when no explicit long-lived token is configured.
+- Add configurable control-domain and exact-entity allowlists. The default write scope is only the `light` domain.
+
+### Security
+
+- Replace upstream Hermes' broad Home Assistant service caller with an add-on-owned restricted implementation on every start.
+- Hide security-sensitive state domains, require one exact entity for writes, reject area/device/target expansion, limit service data, and verify the authoritative HA entity state after every control call.
+- Protect the generated shell environment containing runtime credentials with mode `0600`.
+
+### Verified
+
+- Restricted HA tool unit tests pass, including allowlist, target-expansion, parameter, redaction, and post-state verification policies.
+- Shell syntax, Python compilation, and `git diff --check` pass.
+
 ## [1.3.0] - 2026-07-19
 
 ### Added

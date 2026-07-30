@@ -6,6 +6,33 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-30
+
+### Added
+
+- Add an opt-in MQTT v1 notification bridge from Home Assistant topic `home/notification/v1/request` to the primary Hermes Weixin Home Channel.
+- Add retained bridge health plus MQTT Discovery entities for connectivity and the latest non-retained result.
+- Add a persistent SQLite ledger for message-ID idempotency, deduplication, TTL, rate limits, retry state, and crash-safe redelivery decisions.
+
+### Security
+
+- Keep the bridge disabled until dedicated MQTT credentials are configured.
+- Send notification text through `hermes send` without model execution and never persist message bodies or Weixin identities.
+- Remove bridge-only `NOTIFICATION_*` variables before launching `hermes send`, so the Hermes subprocess does not inherit MQTT credentials.
+- Use MQTT v5 persistent sessions, manual QoS 1 acknowledgement, non-retained request/result topics, and a retained health topic containing no notification body.
+
+### Changed
+
+- Add configurable MQTT host, port, TLS, logical audiences, and credential fields.
+- Keep MQTT credential fields optional while the bridge is disabled and fail closed at startup when an enabled bridge has incomplete credentials.
+- Pin the standalone bridge runtime to `paho-mqtt==2.1.0`.
+
+### Verified
+
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'` - 113 tests OK, 1 skipped.
+- Shell syntax, Python compilation, YAML/notification contracts, design-document governance, and `git diff --check` pass.
+- An isolated Python 3.11 slim container with `paho-mqtt==2.1.0` imports and instantiates the real bridge, preserves the MQTT v5 session on its first connection, and does not connect to a broker during the smoke test.
+
 ## [1.4.0] - 2026-07-30
 
 ### Added

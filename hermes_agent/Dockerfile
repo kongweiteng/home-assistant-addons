@@ -77,6 +77,7 @@ RUN su - linuxbrew -c \
 
 # ── Addon files ──────────────────────────────────────────────────────
 COPY run.sh /
+COPY homeassistant_tool.py /usr/local/share/hermes-addon/homeassistant_tool.py
 COPY nginx-render.sh /usr/local/lib/hermes-nginx-render.sh
 COPY profile-init.sh /usr/local/lib/hermes-profile-init.sh
 COPY desktop-backend.sh /usr/local/lib/hermes-desktop-backend.sh

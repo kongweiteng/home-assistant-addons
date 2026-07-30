@@ -22,6 +22,31 @@ configuration:
   homeassistant_token:
     name: Home Assistant Token
     description: Long-lived access token for HA API integration (optional).
+  notification_bridge_enabled:
+    name: Enable MQTT Notification Bridge
+    description: >-
+      Subscribe to the versioned Home Assistant notification request topic and
+      send deterministic text through the primary Hermes Weixin Home Channel.
+  notification_mqtt_host:
+    name: Notification MQTT Host
+    description: MQTT broker hostname. The official broker app is normally core-mosquitto.
+  notification_mqtt_port:
+    name: Notification MQTT Port
+    description: MQTT broker port, normally 1883 on the internal app network.
+  notification_mqtt_username:
+    name: Notification MQTT Username
+    description: Dedicated least-privilege MQTT username for the notification bridge.
+  notification_mqtt_password:
+    name: Notification MQTT Password
+    description: Password for the dedicated notification MQTT user.
+  notification_mqtt_tls:
+    name: Notification MQTT TLS
+    description: Validate and use TLS for the MQTT broker connection.
+  notification_allowed_audiences:
+    name: Notification Audiences
+    description: >-
+      Logical audience aliases accepted from Home Assistant. Version 1 normally
+      enables only owner; aliases never contain a Weixin user identifier.
   enable_dashboard:
     name: Enable Web Dashboard
     description: >-

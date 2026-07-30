@@ -1,5 +1,5 @@
 name: Hermes Agent
-version: "1.4.0"
+version: "1.5.0"
 slug: hermes_agent
 description: "The self-improving AI agent built by Nous Research. Home Assistant add-on by Wolfram Ravenwolf."
 url: "https://github.com/WolframRavenwolf/hermes-ha-addon"
@@ -37,6 +37,14 @@ options:
   ha_control_allowed_domains:
     - "light"
   ha_control_allowed_entities: []
+  notification_bridge_enabled: false
+  notification_mqtt_host: "core-mosquitto"
+  notification_mqtt_port: 1883
+  notification_mqtt_username: ""
+  notification_mqtt_password: ""
+  notification_mqtt_tls: false
+  notification_allowed_audiences:
+    - "owner"
   hermes_home: ".hermes"
   profiles: []
   profiles_base: ".hermes/profiles"
@@ -60,6 +68,14 @@ schema:
     - "str"
   ha_control_allowed_entities:
     - "str"
+  notification_bridge_enabled: "bool"
+  notification_mqtt_host: "str"
+  notification_mqtt_port: "port"
+  notification_mqtt_username: "str?"
+  notification_mqtt_password: "password?"
+  notification_mqtt_tls: "bool"
+  notification_allowed_audiences:
+    - "match(^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,254}$)"
   hermes_home: "str?"
   profiles:
     - "str"

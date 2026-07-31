@@ -12,6 +12,7 @@ from .cache import CacheStore
 from .client import ENDPOINT_PATHS, HuaxinClient, UpstreamError
 from .config import AccountConfig, AppConfig
 from .normalize import ContractError, normalize_response
+from .statistics import build_statistics
 
 
 LOGGER = logging.getLogger(__name__)
@@ -81,7 +82,7 @@ class WaterService:
             ]
             return {
                 "service": "huaxin_water",
-                "version": "0.1.0",
+                "version": "0.2.0",
                 "status": _service_status(statuses),
                 "configured_accounts": len(statuses),
                 "refreshing_accounts": len(self._busy),
@@ -298,6 +299,10 @@ class WaterService:
         }
         if include_endpoints:
             result["endpoints"] = endpoints
+            result["statistics"] = build_statistics(
+                endpoints.get("water_records", {}).get("data"),
+                endpoints.get("payment_records", {}).get("data"),
+            )
         return result
 
 

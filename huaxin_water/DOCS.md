@@ -37,6 +37,26 @@ logs or backups into the public source repository.
 - Tier usage.
 - Balance and arrears summary.
 
+## Year and month statistics
+
+The **Statistics** tab derives an annual overview, a fixed twelve-month trend
+and a cross-year summary from the current account's existing usage and payment
+history. It does not call another upstream endpoint.
+
+- Usage and receivable charges from multiple meters are summed by billing
+  month.
+- Payments are summed by their payment month and are not guessed to belong to
+  a specific water bill.
+- Missing months, unparseable dates and missing numeric values remain unknown;
+  they are not displayed as zero.
+- Cached, stale or incomplete source endpoints remain visible as a data-quality
+  warning on the statistics page.
+
+The annual average uses only months that contain a valid usage value. History
+is still bounded by the existing 500-record limit per endpoint. Year-over-year
+usage is the percentage change from the immediately preceding calendar year;
+it remains unknown when either total is missing or the preceding total is zero.
+
 No arbitrary URL or customer-number input is available in the Ingress page.
 The client has a fixed path allowlist and uses `GET` only. History responses are
 bounded to 500 records per category, meters to 50 and tiers to 20; truncation is

@@ -18,6 +18,8 @@ Supervisor management permissions.
 - Atomic `/data/state.json` persistence without copying configured customer
   numbers into the cache.
 - Low-frequency polling plus a per-account manual refresh cooldown.
+- Per-account annual overview, twelve-month usage/payment trend and cross-year
+  comparison derived locally from the bounded history already returned.
 - Synthetic tests only; no real customer number or upstream response is stored
   in this public repository.
 

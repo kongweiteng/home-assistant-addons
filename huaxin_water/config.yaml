@@ -1,5 +1,5 @@
 name: Huaxin Water
-version: "0.1.0"
+version: "0.2.0"
 slug: huaxin_water
 description: "Read-only multi-account water usage and payment history for Tianjin Huaxin Water."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/huaxin_water"

@@ -20,6 +20,7 @@ from huaxin_water.client import ENDPOINT_PATHS, HuaxinClient, UpstreamError
 from huaxin_water.config import AppConfig
 from huaxin_water.normalize import ContractError, normalize_response
 from huaxin_water.runtime import WaterService
+from huaxin_water.statistics import build_statistics
 
 
 ACCOUNT_A = "000000000001"
@@ -195,6 +196,54 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
         self.assertNotIn("services:", config)
+        self.assertIn('version: "0.2.0"', config)
+
+    def test_year_month_statistics_aggregate_records_and_keep_unknowns(self) -> None:
+        statistics = build_statistics(
+            [
+                {"billing_month": "2026-01", "usage": 2.5, "charge": 7.25},
+                {"billing_month": "2026年1月", "usage": "3.5", "charge": "8.75"},
+                {"billing_month": "202602", "usage": 4, "charge": None},
+                {"billing_month": "2025-01-31", "usage": 5, "charge": 12},
+                {"billing_month": "invalid", "reading_time": "2025年2月8日", "usage": 5},
+                {"billing_month": "not-a-date", "usage": 99, "charge": 99},
+                {"billing_month": "2026-13", "usage": 99, "charge": 99},
+            ],
+            [
+                {"payment_time": "2026-01-05", "amount": 10},
+                {"payment_time": "20260118", "amount": "6.50"},
+                {"payment_time": "2025年02月", "amount": None},
+                {"payment_time": "invalid", "amount": 20},
+            ],
+        )
+        self.assertEqual(statistics["years"], [2026, 2025])
+        self.assertEqual(len(statistics["monthly_by_year"]["2026"]), 12)
+        january = statistics["monthly_by_year"]["2026"][0]
+        february = statistics["monthly_by_year"]["2026"][1]
+        self.assertEqual(january["usage"], 6.0)
+        self.assertEqual(january["charge"], 16.0)
+        self.assertEqual(january["payments"], 16.5)
+        self.assertEqual(january["water_record_count"], 2)
+        self.assertEqual(january["payment_record_count"], 2)
+        self.assertEqual(february["usage"], 4.0)
+        self.assertIsNone(february["charge"])
+        self.assertIsNone(february["payments"])
+        latest = statistics["yearly"][0]
+        self.assertEqual(latest["usage"], 10.0)
+        self.assertEqual(latest["average_monthly_usage"], 5.0)
+        self.assertEqual(latest["usage_year_over_year_percent"], 0.0)
+        self.assertEqual(statistics["unparsed_water_records"], 2)
+        self.assertEqual(statistics["unparsed_payment_records"], 1)
+
+    def test_year_over_year_is_unknown_without_nonzero_previous_usage(self) -> None:
+        statistics = build_statistics(
+            [
+                {"billing_month": "2026-01", "usage": 2},
+                {"billing_month": "2025-01", "usage": 0},
+            ],
+            [],
+        )
+        self.assertIsNone(statistics["yearly"][0]["usage_year_over_year_percent"])
 
     def test_client_has_exact_get_allowlist(self) -> None:
         self.assertEqual(
@@ -399,9 +448,15 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertNotIn(ACCOUNT_A, health_text)
         self.assertEqual(account["summary"]["address"], "Synthetic address A")
         self.assertEqual(len(account["endpoints"]), 5)
+        self.assertEqual(account["statistics"]["latest_year"], 2026)
+        self.assertEqual(len(account["statistics"]["monthly_by_year"]["2026"]), 12)
+        self.assertIn('"version":"0.2.0"', health_text)
 
     def test_dashboard_uses_relative_api_and_safe_text_nodes(self) -> None:
         self.assertIn("用水地址", DASHBOARD_HTML)
+        self.assertIn("年月统计", DASHBOARD_HTML)
+        self.assertIn("同比用量", DASHBOARD_HTML)
+        self.assertIn("usage_year_over_year_percent", DASHBOARD_HTML)
         self.assertIn("api/v1/accounts", DASHBOARD_HTML)
         self.assertNotIn("fetch('/api/", DASHBOARD_HTML)
         self.assertIn("textContent", DASHBOARD_HTML)

@@ -1,0 +1,57 @@
+name: Journey Analyzer
+version: "0.1.0"
+slug: journey_analyzer
+description: "Local-first Home Assistant location collection, journey analysis, statistics and AMap playback."
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/journey_analyzer"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+ingress_stream: true
+homeassistant_api: true
+panel_icon: mdi:map-marker-path
+panel_title: Journey Analyzer
+services:
+  - mqtt:need
+backup: cold
+watchdog: http://[HOST]:[PORT:8099]/health
+stage: experimental
+options:
+  entity_ids: []
+  poll_interval_s: 60
+  initial_history_hours: 24
+  analysis_window_hours: 72
+  stale_after_s: 900
+  retention_days: 90
+  timezone: Asia/Shanghai
+  max_accuracy_m: 100.0
+  max_gap_s: 900
+  stop_radius_m: 80.0
+  stop_min_duration_s: 600
+  min_journey_distance_m: 200.0
+  min_journey_duration_s: 120
+  max_speed_mps: 100.0
+  amap_web_key: ""
+  amap_security_code: ""
+schema:
+  entity_ids:
+    - "match(^(person|device_tracker)\\.[a-z0-9_]+$)"
+  poll_interval_s: "int(15,3600)"
+  initial_history_hours: "int(1,168)"
+  analysis_window_hours: "int(1,720)"
+  stale_after_s: "int(60,86400)"
+  retention_days: "int(1,3650)"
+  timezone: "str"
+  max_accuracy_m: "float(1,10000)"
+  max_gap_s: "int(30,86400)"
+  stop_radius_m: "float(1,10000)"
+  stop_min_duration_s: "int(30,86400)"
+  min_journey_distance_m: "float(1,1000000)"
+  min_journey_duration_s: "int(1,86400)"
+  max_speed_mps: "float(1,1000)"
+  amap_web_key: "password?"
+  amap_security_code: "password?"

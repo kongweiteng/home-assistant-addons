@@ -45,6 +45,7 @@ Secrets and service credentials must never be committed to this repository.
 - **Self-improving skills** -- agent learns and creates new capabilities over time
 - **Multi-platform messaging** -- Telegram, Discord, WhatsApp, and more via the gateway
 - **MQTT notification bridge** -- optional model-free Home Assistant notifications through the primary Weixin Home Channel
+- **Home Assistant plugin research** -- evidence-backed official, Add-on, HACS, HASSbian, and GitHub candidate evaluation without installation
 - **OpenAI-compatible API** -- connect any chat frontend ([Open WebUI](https://github.com/open-webui/open-webui), [SillyTavern](https://github.com/SillyTavern/SillyTavern), etc.) via `/v1/`
 - **Hermes Desktop backend** -- opt-in remote backend for the official Hermes Desktop app on a dedicated port
 - **Plugin architecture** -- custom tools, commands, and hooks without forking
@@ -116,6 +117,14 @@ Use an individual MQTT user for the bridge and restrict it to:
 - write: `home/notification/v1/result`, `home/notification/v1/status`, `homeassistant/binary_sensor/hermes_notification_bridge_online/config`, `homeassistant/sensor/hermes_notification_last_result/config`
 
 Home Assistant's built-in `homeassistant` and `addons` MQTT users must retain their required unrestricted access if broker ACLs are enabled. Keep the bridge disabled until its dedicated MQTT credentials and ACL have been configured. The credential fields remain optional while the bridge is disabled and startup fails closed if it is enabled without both values. Version 1 routes accepted audiences to the primary Weixin Home Channel; an audience alias is not a Weixin account or user ID.
+
+### Home Assistant plugin research Skill
+
+The add-on installs an add-on-managed `home-assistant-plugin-research` Skill into every configured Hermes profile. Natural-language requests to find or compare Home Assistant integrations, Add-ons, HACS repositories, or manual custom components can therefore produce one to three evidence-backed candidates with original links, maintainer and release metadata, compatibility, installation method, permissions, risk, and a deterministic recommendation grade.
+
+This is a research-only capability. HASSbian is used only to discover leads, and every candidate must be confirmed by Home Assistant official documentation, HACS evidence, or the original GitHub repository. The Skill does not install anything, does not call Home Assistant or Supervisor write APIs, and does not use HACS or GitHub write credentials. Webpages, README files, issues, and forum posts are treated as untrusted data and their instructions are never executed.
+
+The bundled normalizer is standard-library-only, performs no network requests, accepts at most three public HTTPS candidates, and rejects private, credentialed, HASSbian-only, or source-mismatched evidence. The installed Skill directory is refreshed on each add-on start and is reserved for add-on management; keep custom skills in a different directory.
 
 ### Running multiple profiles concurrently
 

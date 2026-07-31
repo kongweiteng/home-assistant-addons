@@ -6,6 +6,23 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-31
+
+### Added
+
+- Bundle the `home-assistant-plugin-research` Hermes Skill into every configured profile. It researches official integrations, Add-ons, HACS repositories, HASSbian leads, and original GitHub sources while explicitly forbidding installation or Home Assistant changes.
+- Add a standard-library-only candidate normalizer that validates one to three public HTTPS candidates, rejects HASSbian-only or private/credentialed source URLs, preserves evidence links, calculates maintenance status, and produces deterministic `recommend`, `review`, or `reject` grades.
+
+### Security
+
+- Refresh the reserved add-on-managed Skill directory on every start and mark its files read-only, so accidental or self-generated edits do not persist across add-on restarts.
+- The normalizer performs no network requests and executes no external commands; webpage and README content remains untrusted input for research only.
+
+### Verified
+
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'` - 127 tests OK, 1 skipped.
+- Shell syntax, Python compilation, Skill format validation, dual-profile installation simulation, repository safety checks, and `git diff --check` pass.
+
 ## [1.5.2] - 2026-07-30
 
 ### Changed

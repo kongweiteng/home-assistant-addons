@@ -90,6 +90,22 @@ source "$PROFILE_INIT_LIB"
 
 resolve_profiles || exit 1
 
+BUNDLED_SKILLS_LIB=""
+for _candidate in \
+    "/usr/local/lib/hermes-bundled-skills.sh" \
+    "$(dirname "${BASH_SOURCE[0]}")/bundled-skills.sh"; do
+    if [ -f "$_candidate" ]; then
+        BUNDLED_SKILLS_LIB="$_candidate"
+        break
+    fi
+done
+if [ -z "$BUNDLED_SKILLS_LIB" ]; then
+    echo "[run] FATAL: bundled-skills.sh not found"
+    exit 1
+fi
+# shellcheck source=bundled-skills.sh
+source "$BUNDLED_SKILLS_LIB"
+
 PRIMARY_HOME="${PROFILE_HOMES[0]}"
 export HERMES_HOME="$PRIMARY_HOME"
 
@@ -410,6 +426,11 @@ if [ ! -f "$HASS_TOOL_OVERRIDE" ] || [ ! -f "$SRC_DIR/tools/homeassistant_tool.p
 fi
 install -m 0644 "$HASS_TOOL_OVERRIDE" "$SRC_DIR/tools/homeassistant_tool.py"
 echo "[run] Restricted Home Assistant tool installed"
+
+# Hermes discovers skills below each profile's $HERMES_HOME/skills directory,
+# not from the shared source checkout. Refresh the reserved, add-on-managed
+# target on every start so policy and helper code remain versioned together.
+bundled_skills_install || exit 1
 
 # Activate the shared venv for any tooling (e.g. dashboard module probe).
 # shellcheck disable=SC1091

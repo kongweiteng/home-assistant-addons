@@ -11,7 +11,7 @@ import threading
 DISCOVERY_PREFIX = "homeassistant"
 BASE_TOPIC = "journey_analyzer"
 MQTT_STATUS_TOPIC = f"{BASE_TOPIC}/mqtt_status"
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 LOGGER = logging.getLogger(__name__)
 

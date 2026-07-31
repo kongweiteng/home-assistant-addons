@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- Probe the optional Supervisor MQTT service without emitting a false startup
+  error when an external broker relies on Home Assistant's MQTT integration.
+
 ## 0.1.1
 
 - Fall back to Home Assistant's authenticated `mqtt.publish` service when an

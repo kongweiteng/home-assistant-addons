@@ -289,7 +289,8 @@ class JourneyAnalyzerAddonTests(unittest.TestCase):
         self.assertNotIn("set -x", script)
         self.assertNotIn("echo \"$SUPERVISOR_TOKEN", script)
         self.assertNotIn("echo \"$JOURNEY_MQTT_PASSWORD", script)
-        self.assertIn("bashio::services.available mqtt", script)
+        self.assertNotIn("bashio::services.available mqtt", script)
+        self.assertIn('url = "http://supervisor/services/mqtt"', script)
         self.assertIn('JOURNEY_PUBLISHER="ha_mqtt"', script)
 
 

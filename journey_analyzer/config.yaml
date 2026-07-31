@@ -1,5 +1,5 @@
 name: Journey Analyzer
-version: "0.1.1"
+version: "0.1.2"
 slug: journey_analyzer
 description: "Local-first Home Assistant location collection, journey analysis, statistics and AMap playback."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/journey_analyzer"

@@ -1,0 +1,40 @@
+name: ESLink Gas
+version: "0.1.0"
+slug: eslink_gas
+description: "Read-only multi-account ESLink gas balance and meter status for Home Assistant."
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/eslink_gas"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8097
+panel_icon: mdi:fire
+panel_title: Gas Balance
+homeassistant_api: true
+services:
+  - mqtt:want
+backup: cold
+watchdog: http://[HOST]:[PORT:8097]/health
+stage: experimental
+options:
+  accounts: []
+  portal_url: ""
+  allow_insecure_http: false
+  poll_interval_minutes: 30
+  page_timeout_seconds: 25
+  stale_after_minutes: 180
+  include_personal_details: false
+schema:
+  accounts:
+    - id: "match(^[a-z0-9][a-z0-9_-]{0,31}$)"
+      user_no: "match(^[0-9]{6,32}$)"
+      user_name: password
+  portal_url: password
+  allow_insecure_http: bool
+  poll_interval_minutes: "int(5,1440)"
+  page_timeout_seconds: "int(10,60)"
+  stale_after_minutes: "int(10,10080)"
+  include_personal_details: bool

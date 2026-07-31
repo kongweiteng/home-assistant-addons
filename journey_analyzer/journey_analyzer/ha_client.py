@@ -1,4 +1,4 @@
-"""Read-only Home Assistant Core REST client."""
+"""Bounded Home Assistant Core REST client."""
 
 from __future__ import annotations
 
@@ -77,14 +77,33 @@ class HomeAssistantClient:
                 points.append(point)
         return tuple(points)
 
+    def call_service(self, domain: str, service: str, data: dict) -> None:
+        """Call one exact Home Assistant service with a JSON object payload."""
+        if not domain or not service or not isinstance(data, dict):
+            raise ValueError("domain, service and object data are required")
+        self._request_json(
+            f"/services/{quote(domain, safe='')}/{quote(service, safe='')}",
+            method="POST",
+            payload=data,
+        )
+
     def _get_json(self, path: str):
+        return self._request_json(path, method="GET")
+
+    def _request_json(self, path: str, *, method: str, payload: dict | None = None):
+        body = None
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/json",
+        }
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
         request = Request(
             f"{self.base_url}{path}",
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "Accept": "application/json",
-            },
-            method="GET",
+            data=body,
+            headers=headers,
+            method=method,
         )
         try:
             with self._opener(request, timeout=self.timeout_s) as response:

@@ -22,17 +22,24 @@ export JOURNEY_OPTIONS_FILE="$OPTIONS_FILE"
 export JOURNEY_DATABASE_PATH="${JOURNEY_DATABASE_PATH:-/data/journeys.db}"
 export JOURNEY_HA_BASE_URL="http://supervisor/core/api"
 export JOURNEY_HA_TOKEN="$SUPERVISOR_TOKEN"
-export JOURNEY_MQTT_HOST
-export JOURNEY_MQTT_PORT
-export JOURNEY_MQTT_USERNAME
-export JOURNEY_MQTT_PASSWORD
-export JOURNEY_MQTT_SSL
+export JOURNEY_PUBLISHER="ha_mqtt"
 
-JOURNEY_MQTT_HOST=$(bashio::services mqtt "host")
-JOURNEY_MQTT_PORT=$(bashio::services mqtt "port")
-JOURNEY_MQTT_USERNAME=$(bashio::services mqtt "username")
-JOURNEY_MQTT_PASSWORD=$(bashio::services mqtt "password")
-JOURNEY_MQTT_SSL=$(bashio::services mqtt "ssl")
+if bashio::services.available mqtt; then
+    export JOURNEY_PUBLISHER="direct_mqtt"
+    export JOURNEY_MQTT_HOST
+    export JOURNEY_MQTT_PORT
+    export JOURNEY_MQTT_USERNAME
+    export JOURNEY_MQTT_PASSWORD
+    export JOURNEY_MQTT_SSL
+    JOURNEY_MQTT_HOST=$(bashio::services mqtt "host")
+    JOURNEY_MQTT_PORT=$(bashio::services mqtt "port")
+    JOURNEY_MQTT_USERNAME=$(bashio::services mqtt "username")
+    JOURNEY_MQTT_PASSWORD=$(bashio::services mqtt "password")
+    JOURNEY_MQTT_SSL=$(bashio::services mqtt "ssl")
+    bashio::log.info "Using Supervisor-provided MQTT service"
+else
+    bashio::log.warning "Supervisor MQTT service is unavailable; using Home Assistant mqtt.publish"
+fi
 
 bashio::log.info "Starting Journey Analyzer for ${ENTITY_COUNT} selected entity/entities"
 exec python3 -m journey_analyzer.main

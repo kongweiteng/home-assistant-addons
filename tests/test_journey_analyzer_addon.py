@@ -16,7 +16,11 @@ from journey_analyzer.api import create_server, journey_detail, journey_summary,
 from journey_analyzer.config import AppConfig
 from journey_analyzer.ha_client import state_to_track_point
 from journey_analyzer.models import TrackPoint
-from journey_analyzer.mqtt import discovery_messages
+from journey_analyzer.mqtt import (
+    HomeAssistantMqttPublisher,
+    discovery_messages,
+    snapshot_messages,
+)
 from journey_analyzer.runtime import CollectorService, RuntimeState
 from journey_analyzer.segmentation import JourneyAnalyzer
 from journey_analyzer.statistics import build_statistics
@@ -79,6 +83,14 @@ class FakeHomeAssistant:
         return self.points
 
 
+class FakeServiceClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def call_service(self, domain, service, data) -> None:
+        self.calls.append((domain, service, dict(data)))
+
+
 class JourneyAnalyzerAddonTests(unittest.TestCase):
     def test_required_files_and_minimum_permissions(self) -> None:
         for relative in (
@@ -95,7 +107,8 @@ class JourneyAnalyzerAddonTests(unittest.TestCase):
         self.assertIn("slug: journey_analyzer", config)
         self.assertIn("homeassistant_api: true", config)
         self.assertIn("ingress: true", config)
-        self.assertIn("  - mqtt:need", config)
+        self.assertIn("  - mqtt:want", config)
+        self.assertNotIn("  - mqtt:need", config)
         self.assertIn("backup: cold", config)
         self.assertNotIn("host_network", config)
         self.assertNotIn("privileged", config)
@@ -153,6 +166,34 @@ class JourneyAnalyzerAddonTests(unittest.TestCase):
         self.assertNotIn("latitude", combined)
         self.assertNotIn("longitude", combined)
         self.assertEqual(len(messages), 9)
+
+    def test_home_assistant_mqtt_publisher_uses_configured_core_broker(self) -> None:
+        client = FakeServiceClient()
+        publisher = HomeAssistantMqttPublisher(client)
+        snapshot = {
+            "today_trip_count": None,
+            "today_distance_km": None,
+            "today_duration_min": None,
+            "distance_7d_km": None,
+            "distance_30d_km": None,
+            "last_trip_distance_km": None,
+            "last_trip_duration_min": None,
+            "status": "no_data",
+            "available": False,
+        }
+        publisher.connect()
+        publisher.publish_snapshot(snapshot)
+        publisher.stop()
+        self.assertEqual(len(client.calls), 22)
+        self.assertTrue(
+            all(domain == "mqtt" and service == "publish" for domain, service, _ in client.calls)
+        )
+        combined = json.dumps([data for _, _, data in client.calls])
+        self.assertIn("journey_analyzer_today_distance", combined)
+        self.assertIn('"payload": "unknown"', combined)
+        self.assertNotIn("latitude", combined)
+        self.assertNotIn("longitude", combined)
+        self.assertEqual(len(snapshot_messages(snapshot)), 10)
 
     def test_no_location_data_is_unknown_not_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,6 +289,8 @@ class JourneyAnalyzerAddonTests(unittest.TestCase):
         self.assertNotIn("set -x", script)
         self.assertNotIn("echo \"$SUPERVISOR_TOKEN", script)
         self.assertNotIn("echo \"$JOURNEY_MQTT_PASSWORD", script)
+        self.assertIn("bashio::services.available mqtt", script)
+        self.assertIn('JOURNEY_PUBLISHER="ha_mqtt"', script)
 
 
 if __name__ == "__main__":

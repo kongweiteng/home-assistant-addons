@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import threading
 
 
 DISCOVERY_PREFIX = "homeassistant"
 BASE_TOPIC = "journey_analyzer"
 MQTT_STATUS_TOPIC = f"{BASE_TOPIC}/mqtt_status"
+VERSION = "0.1.1"
+
+LOGGER = logging.getLogger(__name__)
 
 
 SENSORS = {
@@ -42,7 +46,7 @@ def discovery_messages() -> tuple[tuple[str, str], ...]:
         "name": "Journey Analyzer",
         "manufacturer": "Kongweiteng",
         "model": "Local journey analytics",
-        "sw_version": "0.1.0",
+        "sw_version": VERSION,
     }
     messages: list[tuple[str, str]] = []
     for object_name, values in SENSORS.items():
@@ -83,6 +87,59 @@ def discovery_messages() -> tuple[tuple[str, str], ...]:
         )
     )
     return tuple(messages)
+
+
+def snapshot_messages(snapshot: dict) -> tuple[tuple[str, str], ...]:
+    messages: list[tuple[str, str]] = [(MQTT_STATUS_TOPIC, "online")]
+    for object_name, snapshot_key in SNAPSHOT_KEYS.items():
+        value = snapshot.get(snapshot_key)
+        payload = "unknown" if value is None else str(value)
+        messages.append((f"{BASE_TOPIC}/state/{object_name}", payload))
+    messages.append(
+        (
+            f"{BASE_TOPIC}/state/available",
+            "ON" if snapshot.get("available") else "OFF",
+        )
+    )
+    return tuple(messages)
+
+
+class HomeAssistantMqttPublisher:
+    """Publish retained MQTT Discovery data through HA's configured broker."""
+
+    def __init__(self, ha_client) -> None:
+        self._ha_client = ha_client
+
+    def connect(self) -> None:
+        self._publish_messages(discovery_messages())
+        self._publish_messages(((MQTT_STATUS_TOPIC, "online"),))
+
+    def publish_snapshot(self, snapshot: dict) -> None:
+        self._publish_messages(snapshot_messages(snapshot))
+
+    def stop(self) -> None:
+        try:
+            self._publish_messages(
+                (
+                    (f"{BASE_TOPIC}/state/available", "OFF"),
+                    (MQTT_STATUS_TOPIC, "offline"),
+                )
+            )
+        except Exception as error:
+            LOGGER.warning("Failed to publish shutdown availability (%s)", type(error).__name__)
+
+    def _publish_messages(self, messages: tuple[tuple[str, str], ...]) -> None:
+        for topic, payload in messages:
+            self._ha_client.call_service(
+                "mqtt",
+                "publish",
+                {
+                    "topic": topic,
+                    "payload": payload,
+                    "qos": 1,
+                    "retain": True,
+                },
+            )
 
 
 @dataclass(frozen=True)
@@ -126,19 +183,8 @@ class MqttPublisher:
         self._snapshot = dict(snapshot)
         if not self._connected.is_set():
             return
-        self._client.publish(MQTT_STATUS_TOPIC, "online", qos=1, retain=True)
-        for object_name, snapshot_key in SNAPSHOT_KEYS.items():
-            value = snapshot.get(snapshot_key)
-            payload = "unknown" if value is None else str(value)
-            self._client.publish(
-                f"{BASE_TOPIC}/state/{object_name}", payload, qos=1, retain=True
-            )
-        self._client.publish(
-            f"{BASE_TOPIC}/state/available",
-            "ON" if snapshot.get("available") else "OFF",
-            qos=1,
-            retain=True,
-        )
+        for topic, payload in snapshot_messages(snapshot):
+            self._client.publish(topic, payload, qos=1, retain=True)
 
     def stop(self) -> None:
         if self._connected.is_set():

@@ -1,5 +1,5 @@
 name: Journey Analyzer
-version: "0.1.0"
+version: "0.1.1"
 slug: journey_analyzer
 description: "Local-first Home Assistant location collection, journey analysis, statistics and AMap playback."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/journey_analyzer"
@@ -16,7 +16,7 @@ homeassistant_api: true
 panel_icon: mdi:map-marker-path
 panel_title: Journey Analyzer
 services:
-  - mqtt:need
+  - mqtt:want
 backup: cold
 watchdog: http://[HOST]:[PORT:8099]/health
 stage: experimental

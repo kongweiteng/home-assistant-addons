@@ -15,6 +15,8 @@ tracks, expose a host port, or put coordinate arrays in MQTT or HA attributes.
 - Accuracy, duplicate timestamp, `0,0`, time-gap and impossible-speed filtering.
 - Local SQLite persistence with a configurable raw-point retention period.
 - Today, 7-day, 30-day and last-journey Home Assistant statistics.
+- Retained MQTT Discovery through either a Supervisor-provided MQTT service or
+  Home Assistant's existing MQTT integration, without copying broker passwords.
 - Truthful `no_data`, `insufficient`, `stale`, `degraded`, `good` and `error` quality states.
 - Ingress-only bounded journey list, statistics and track-detail APIs.
 - Optional AMap Web JS playback with WGS84 to GCJ-02 conversion, satellite tiles and live traffic.

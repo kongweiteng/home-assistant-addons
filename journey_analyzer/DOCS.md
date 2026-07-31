@@ -38,6 +38,13 @@ MQTT Discovery creates:
 - `sensor.journey_analyzer_location_quality`
 - `binary_sensor.journey_analyzer_available`
 
+If Supervisor exposes a provider-managed `mqtt` service, the app publishes
+directly with its short-lived service credentials. Brokers such as EMQX may be
+configured in Home Assistant without registering that Supervisor service; in
+that case the app calls Home Assistant's authenticated `mqtt.publish` action.
+Both paths use the same retained Discovery topics and aggregate-only payloads.
+Journey Analyzer does not need broker credentials in its options.
+
 When no valid location has ever been observed, numeric sensors publish
 `unknown`, not a fabricated zero. A valid location with no qualifying journey
 may truthfully produce zero for current-period totals and `insufficient` quality.

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Fall back to Home Assistant's authenticated `mqtt.publish` service when an
+  external broker such as EMQX does not register a Supervisor `mqtt` service.
+- Preserve retained MQTT Discovery, aggregate-only payloads and stable entity
+  IDs without requiring broker credentials in Journey Analyzer options.
+
 ## 0.1.0
 
 - Add explicit Home Assistant location-entity collection and bounded Recorder backfill.

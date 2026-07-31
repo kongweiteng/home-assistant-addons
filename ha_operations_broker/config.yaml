@@ -1,7 +1,7 @@
 name: HA Operations Broker
-version: "0.1.0"
+version: "0.2.0"
 slug: ha_operations_broker
-description: "Experimental read-only preflight broker for approved Home Assistant operation proposals."
+description: "Experimental read-only preflight and Passkey authorization broker for Home Assistant operation proposals."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ha_operations_broker"
 arch:
   - amd64
@@ -12,19 +12,37 @@ boot: manual
 stage: experimental
 hassio_api: true
 hassio_role: default
+ingress: true
+ingress_port: 8098
+panel_icon: mdi:shield-key
+panel_title: HA 操作审批
+panel_admin: true
 ports:
   8098/tcp: null
 ports_description:
-  8098/tcp: "Internal-only authenticated preflight API; never maps a host port"
+  8098/tcp: "Ingress and internal authenticated API; never maps a host port"
 watchdog: "http://[HOST]:[PORT:8098]/healthz"
 options:
   broker_api_token: ""
   trusted_owner_identity_hashes: []
   max_request_bytes: 32768
   supervisor_timeout_seconds: 5
+  webauthn_rp_id: ""
+  webauthn_allowed_origins: []
+  passkey_enrollment_token: ""
+  passkey_challenge_ttl_seconds: 180
+  max_passkeys: 8
+  max_pending_passkey_flows: 100
 schema:
   broker_api_token: "password"
   trusted_owner_identity_hashes:
     - "match(^[a-f0-9]{64}$)"
   max_request_bytes: "int(4096,65536)"
   supervisor_timeout_seconds: "int(1,30)"
+  webauthn_rp_id: str
+  webauthn_allowed_origins:
+    - url
+  passkey_enrollment_token: password
+  passkey_challenge_ttl_seconds: "int(60,600)"
+  max_passkeys: "int(1,32)"
+  max_pending_passkey_flows: "int(10,500)"

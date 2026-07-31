@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.0] - 2026-07-31
+
+### Added
+
+- Add a Home Assistant admin-only Ingress page for exact proposal review and Passkey confirmation.
+- Add private SQLite persistence for hashed HA operator identities, Passkey verification material, immutable authorization requests, counters, and `passkey_verified` receipts.
+- Add bearer-authenticated authorization-request creation and status APIs with action/hash idempotency.
+- Add exact HTTPS RP/origin validation, one-time in-memory WebAuthn challenges, user verification, replay checks, and signature-counter rollback protection.
+- Pin Yubico `fido2 2.2.1` to a verified wheel SHA-256 and use Debian's packaged cryptographic backend.
+
+### Security
+
+- Keep `hassio_role: default`; do not add Home Assistant Core, manager, backup, admin, host, privileged, Docker, file-map, or host-port access.
+- Require both an authenticated HA admin Ingress session and a private enrollment token for initial Passkey registration.
+- Never persist raw HA/Weixin identities, enrollment tokens, private keys, biometrics, or WebAuthn challenge state.
+- Keep hashed HA operator and credential identifiers out of the Ingress context; expose them only through the authenticated internal receipt API.
+- Passkey success still returns `execution_allowed: false`; no execution endpoint exists.
+
 ## [0.1.0] - 2026-07-31
 
 ### Added

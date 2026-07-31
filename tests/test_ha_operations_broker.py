@@ -117,15 +117,22 @@ class PackagingTests(unittest.TestCase):
             "operations_broker/supervisor.py",
             "operations_broker/service.py",
             "operations_broker/api.py",
+            "operations_broker/authorization.py",
+            "operations_broker/passkeys.py",
+            "operations_broker/ui.py",
+            "../tests/fixtures/ha_operations_broker_options.json",
         ):
             self.assertTrue((ADDON / relative).is_file(), relative)
         config = (ADDON / "config.yaml").read_text(encoding="utf-8")
-        self.assertIn('version: "0.1.0"', config)
+        self.assertIn('version: "0.2.0"', config)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: default", config)
         self.assertIn("boot: manual", config)
         self.assertIn("stage: experimental", config)
+        self.assertIn("ingress: true", config)
+        self.assertIn("ingress_port: 8098", config)
+        self.assertIn("panel_admin: true", config)
         self.assertRegex(config, r"(?ms)ports:\n\s+8098/tcp: null")
         for forbidden in (
             "homeassistant_api: true",
@@ -135,7 +142,6 @@ class PackagingTests(unittest.TestCase):
             "host_network: true",
             "privileged:",
             "full_access: true",
-            "ingress: true",
             "map:",
         ):
             self.assertNotIn(forbidden, config)
@@ -148,6 +154,15 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn("set -x", run)
         self.assertNotIn('echo "$BROKER_API_TOKEN', run)
         self.assertNotIn('echo "$SUPERVISOR_TOKEN', run)
+        self.assertNotIn('echo "$BROKER_PASSKEY_ENROLLMENT_TOKEN', run)
+
+        dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('FIDO2_VERSION="2.2.1"', dockerfile)
+        self.assertIn(
+            'FIDO2_SHA256="ed397da981b9ab133da6ead7309e41f924b566b749956129efe286fae097749f"',
+            dockerfile,
+        )
+        self.assertIn("pip install --no-cache-dir --no-deps", dockerfile)
 
     def test_source_has_no_execution_or_arbitrary_process_capability(self) -> None:
         combined = "\n".join(
@@ -329,7 +344,7 @@ class ApiTests(unittest.TestCase):
     def test_health_is_minimal_and_execution_disabled(self) -> None:
         with urlopen(self.base + "/healthz") as response:
             payload = json.loads(response.read())
-        self.assertEqual(payload, {"status": "ok", "version": 1, "execution_enabled": False})
+        self.assertEqual(payload, {"status": "ok", "version": 2, "execution_enabled": False})
 
     def test_preflight_requires_bearer_and_json(self) -> None:
         unauthorized = Request(

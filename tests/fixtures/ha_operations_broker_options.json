@@ -1,0 +1,16 @@
+{
+  "broker_api_token": "test-broker-api-token-0000000000000000",
+  "trusted_owner_identity_hashes": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  ],
+  "max_request_bytes": 32768,
+  "supervisor_timeout_seconds": 5,
+  "webauthn_rp_id": "example.invalid",
+  "webauthn_allowed_origins": [
+    "https://ha.example.invalid"
+  ],
+  "passkey_enrollment_token": "test-enrollment-token-000000000000000",
+  "passkey_challenge_ttl_seconds": 180,
+  "max_passkeys": 8,
+  "max_pending_passkey_flows": 100
+}

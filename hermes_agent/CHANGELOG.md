@@ -6,6 +6,25 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-31
+
+### Added
+
+- Add an opt-in, add-on-managed `ha-operations-approval` Hermes plugin on the primary profile.
+- Add immutable `ha_create_operation_proposal` and read-only proposal-status tools plus model-free `/ha-approve`, `/ha-confirm`, and `/ha-cancel` commands.
+- Add a persistent SQLite audit ledger with action IDs, canonical proposal hashes, parameter-summary hashes, owner identity hashes, TTL, cancellation, duplicate handling, and L3 second confirmation.
+
+### Security
+
+- Keep the protocol disabled by default and fail closed when enabled without a configured owner identity hash.
+- Accept approvals only from the configured Weixin private-chat identity hash; group messages, other platforms, natural-language approval, and unstable identities cannot change proposal state.
+- Reject secret-like parameter keys and values, credentialed URLs, unsupported action types, target paths, risk downgrades, and L3 proposals without a backup requirement.
+- The plugin has no HA, Supervisor, HACS, network, shell, or process execution capability. A future isolated Operations Broker must re-validate the proposal and remains the only permitted production writer.
+
+### Verified
+
+- Proposal normalization, immutable hashing, SQLite permissions, TTL, cancellation, idempotent approval, L3 challenge confirmation, owner/DM enforcement, prompt-injection boundaries, managed primary-profile enablement, and multi-profile disablement are covered by deterministic tests.
+
 ## [1.7.0] - 2026-07-31
 
 ### Added

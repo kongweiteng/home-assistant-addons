@@ -86,9 +86,11 @@ COPY config.yaml /usr/local/share/hermes-addon/config.yaml
 COPY homeassistant_tool.py /usr/local/share/hermes-addon/homeassistant_tool.py
 COPY homeassistant_health.py /usr/local/share/hermes-addon/homeassistant_health.py
 COPY bundled_skills /usr/local/share/hermes-addon/skills
+COPY bundled_plugins /usr/local/share/hermes-addon/plugins
 COPY notification_bridge.py /usr/local/bin/hermes-notification-bridge
 COPY notification-bridge.sh /usr/local/lib/hermes-notification-bridge.sh
 COPY bundled-skills.sh /usr/local/lib/hermes-bundled-skills.sh
+COPY managed-plugins.sh /usr/local/lib/hermes-managed-plugins.sh
 COPY nginx-render.sh /usr/local/lib/hermes-nginx-render.sh
 COPY profile-init.sh /usr/local/lib/hermes-profile-init.sh
 COPY desktop-backend.sh /usr/local/lib/hermes-desktop-backend.sh
@@ -99,7 +101,7 @@ COPY landing.html.tpl /var/www/landing.html.tpl
 COPY loading.html /var/www/loading.html
 COPY brew-wrapper.sh /usr/local/bin/brew-wrapper
 COPY dashboard-patches.py /usr/local/bin/hermes-dashboard-patches
-RUN chmod +x /run.sh /usr/local/bin/brew-wrapper /usr/local/bin/hermes-dashboard-patches /usr/local/bin/hermes-desktop-backend /usr/local/bin/hermes-notification-bridge
+RUN chmod +x /run.sh /usr/local/bin/brew-wrapper /usr/local/bin/hermes-dashboard-patches /usr/local/bin/hermes-desktop-backend /usr/local/bin/hermes-notification-bridge /usr/local/lib/hermes-managed-plugins.sh
 
 # ── nginx dirs ───────────────────────────────────────────────────────
 RUN mkdir -p /var/www /var/log/nginx /run/nginx

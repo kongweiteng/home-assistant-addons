@@ -81,7 +81,7 @@ def _payload(
 class AddonPackagingTests(unittest.TestCase):
     def test_feature_is_opt_in_and_versioned(self):
         config = CONFIG.read_text()
-        self.assertIn('version: "1.7.0"', config)
+        self.assertIn('version: "1.8.0"', config)
         self.assertIn("notification_bridge_enabled: false", config)
         self.assertIn('notification_mqtt_host: "core-mosquitto"', config)
         self.assertIn('notification_mqtt_username: "str?"', config)

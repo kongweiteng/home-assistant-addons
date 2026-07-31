@@ -48,6 +48,7 @@ Secrets and service credentials must never be committed to this repository.
 - **MQTT notification bridge** -- optional model-free Home Assistant notifications through the primary Weixin Home Channel
 - **Home Assistant plugin research** -- evidence-backed official, Add-on, HACS, HASSbian, and GitHub candidate evaluation without installation
 - **Home Assistant health snapshot** -- deterministic disk, Recorder, backup, storage-consumer, and component freshness through explicit read-only HA entities
+- **Home Assistant operation approvals** -- opt-in immutable proposals, owner-only model-free commands, TTL, L3 confirmation, and a non-executing audit ledger
 - **OpenAI-compatible API** -- connect any chat frontend ([Open WebUI](https://github.com/open-webui/open-webui), [SillyTavern](https://github.com/SillyTavern/SillyTavern), etc.) via `/v1/`
 - **Hermes Desktop backend** -- opt-in remote backend for the official Hermes Desktop app on a dedicated port
 - **Plugin architecture** -- custom tools, commands, and hooks without forking
@@ -82,6 +83,10 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 | `ha_health_entities` | empty | Explicit numeric HA entity mapping for disk, Recorder, backup, and storage-consumer metrics |
 | `ha_health_status_entities` | empty | Explicit binary-sensor mapping plus the expected `on`/`off` state for critical component health |
 | `ha_health_stale_after_seconds` | `300` | Maximum accepted source age before the whole snapshot becomes `stale` |
+| `ha_operations_approval_enabled` | `false` | Enable the non-executing proposal/approval protocol on the primary profile |
+| `ha_operations_owner_identity_hashes` | empty | SHA-256 hashes of exact `weixin:user_id` owner identities; raw IDs are not stored |
+| `ha_operations_proposal_ttl_seconds` | `600` | Approval lifetime; expired action IDs cannot be reused |
+| `ha_operations_max_pending` | `20` | Maximum unexpired pending/approved proposals |
 | `notification_bridge_enabled` | `false`                                     | Enable the versioned MQTT-to-Weixin notification bridge                         |
 | `notification_mqtt_host` | `core-mosquitto`                                  | MQTT broker hostname on the internal app network                                |
 | `notification_mqtt_port` | `1883`                                             | MQTT broker port                                                                |
@@ -171,6 +176,22 @@ The add-on installs an add-on-managed `home-assistant-plugin-research` Skill int
 This is a research-only capability. HASSbian is used only to discover leads, and every candidate must be confirmed by Home Assistant official documentation, HACS evidence, or the original GitHub repository. The Skill does not install anything, does not call Home Assistant or Supervisor write APIs, and does not use HACS or GitHub write credentials. Webpages, README files, issues, and forum posts are treated as untrusted data and their instructions are never executed.
 
 The bundled normalizer is standard-library-only, performs no network requests, accepts at most three public HTTPS candidates, and rejects private, credentialed, HASSbian-only, or source-mismatched evidence. The installed Skill directory is refreshed on each add-on start and is reserved for add-on management; keep custom skills in a different directory.
+
+### Home Assistant operation approval protocol
+
+The opt-in `ha-operations-approval` plugin creates immutable, non-executing operation proposals. The model can call `ha_create_operation_proposal` with an allowlisted action, a logical target, a non-secret parameter summary, expected changes, validation, rollback, and backup requirement. The plugin derives the minimum risk, generates an action ID and canonical SHA-256 proposal hash, then stores only bounded audit metadata in a profile-local SQLite ledger.
+
+Approval commands are processed as plugin slash commands before model dispatch:
+
+```text
+/ha-approve OPS-YYYYMMDD-XXXXXXXXXXXX
+/ha-confirm OPS-YYYYMMDD-XXXXXXXXXXXX XXXXXXXX
+/ha-cancel OPS-YYYYMMDD-XXXXXXXXXXXX
+```
+
+Only the primary profile can load the managed plugin. Approval requires a Weixin private chat whose `sha256("weixin:" + user_id)` value appears in `ha_operations_owner_identity_hashes`. Raw Weixin identifiers are not stored in add-on options or the audit ledger. L3 proposals require the same owner to complete a second challenge within the proposal TTL. Group messages, other platforms, natural-language approval, expired IDs, duplicate execution attempts, secret-like fields, credentialed URLs, and risk downgrades are rejected.
+
+This protocol does not install, configure, restart, delete, or otherwise change Home Assistant. Hermes still has no Supervisor management permission. A separately isolated Operations Broker must re-validate the action schema, proposal hash, owner decision, TTL, and idempotency before it can become the sole production writer in a later phase.
 
 ### Running multiple profiles concurrently
 

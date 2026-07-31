@@ -81,7 +81,7 @@ class AddonContractTests(unittest.TestCase):
         config = CONFIG_PATH.read_text()
         self.assertIn("homeassistant_api: true", config)
         self.assertNotIn("hassio_api: true", config)
-        self.assertIn('version: "1.7.0"', config)
+        self.assertIn('version: "1.8.0"', config)
         self.assertRegex(
             config,
             r'(?ms)ha_control_allowed_domains:\n\s+- "light"\n\s+ha_control_allowed_entities: \[\]',

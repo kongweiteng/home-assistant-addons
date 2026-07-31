@@ -22,6 +22,22 @@ configuration:
   homeassistant_token:
     name: Home Assistant Token
     description: Long-lived access token for HA API integration (optional).
+  ha_operations_approval_enabled:
+    name: Enable HA Operations Approval Protocol
+    description: >-
+      Install and enable the model-free proposal and owner approval plugin on
+      the primary profile. This protocol does not execute Home Assistant actions.
+  ha_operations_owner_identity_hashes:
+    name: HA Operations Owner Identity Hashes
+    description: >-
+      Lowercase SHA-256 hashes of the exact "weixin:user_id" owner identities.
+      Raw Weixin identifiers are not stored in the add-on options or audit ledger.
+  ha_operations_proposal_ttl_seconds:
+    name: HA Operations Proposal TTL
+    description: Approval lifetime in seconds. Expired action IDs cannot be reused.
+  ha_operations_max_pending:
+    name: HA Operations Pending Limit
+    description: Maximum number of unexpired pending or approved proposals.
   notification_bridge_enabled:
     name: Enable MQTT Notification Bridge
     description: >-

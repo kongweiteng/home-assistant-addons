@@ -1,0 +1,10 @@
+name: ha-operations-approval
+version: "1.0.0"
+description: Immutable Home Assistant operation proposals and model-free owner approval commands.
+author: Kongweiteng
+kind: standalone
+provides_tools:
+  - ha_create_operation_proposal
+  - ha_get_operation_proposal_status
+provides_hooks:
+  - pre_gateway_dispatch

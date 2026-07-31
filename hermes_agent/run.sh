@@ -24,6 +24,10 @@ HASS_TOKEN=$(opt homeassistant_token)
 HASS_ALLOWED_DOMAINS=$(jq -r 'if has("ha_control_allowed_domains") then (.ha_control_allowed_domains // []) else ["light"] end | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
 HASS_ALLOWED_ENTITIES=$(jq -r '(.ha_control_allowed_entities // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
 HASS_HEALTH_CONFIG_B64=$(jq -c '{metrics: (.ha_health_entities // []), statuses: (.ha_health_status_entities // []), stale_after_seconds: (.ha_health_stale_after_seconds // 300)}' "$OPTIONS_FILE" | base64 | tr -d '\n')
+HA_OPERATIONS_APPROVAL_ENABLED=$(opt_bool ha_operations_approval_enabled)
+HA_OPERATIONS_OWNER_IDENTITY_HASHES=$(jq -r '(.ha_operations_owner_identity_hashes // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
+HA_OPERATIONS_PROPOSAL_TTL_SECONDS=$(jq -r '.ha_operations_proposal_ttl_seconds // 600' "$OPTIONS_FILE")
+HA_OPERATIONS_MAX_PENDING=$(jq -r '.ha_operations_max_pending // 20' "$OPTIONS_FILE")
 NOTIFICATION_BRIDGE_ENABLED=$(opt_bool notification_bridge_enabled)
 NOTIFICATION_MQTT_HOST=$(opt notification_mqtt_host)
 NOTIFICATION_MQTT_PORT=$(jq -r '.notification_mqtt_port // 1883' "$OPTIONS_FILE")
@@ -106,6 +110,22 @@ if [ -z "$BUNDLED_SKILLS_LIB" ]; then
 fi
 # shellcheck source=bundled-skills.sh
 source "$BUNDLED_SKILLS_LIB"
+
+MANAGED_PLUGINS_LIB=""
+for _candidate in \
+    "/usr/local/lib/hermes-managed-plugins.sh" \
+    "$(dirname "${BASH_SOURCE[0]}")/managed-plugins.sh"; do
+    if [ -f "$_candidate" ]; then
+        MANAGED_PLUGINS_LIB="$_candidate"
+        break
+    fi
+done
+if [ -z "$MANAGED_PLUGINS_LIB" ]; then
+    echo "[run] FATAL: managed-plugins.sh not found"
+    exit 1
+fi
+# shellcheck source=managed-plugins.sh
+source "$MANAGED_PLUGINS_LIB"
 
 PRIMARY_HOME="${PROFILE_HOMES[0]}"
 export HERMES_HOME="$PRIMARY_HOME"
@@ -486,6 +506,12 @@ for i in "${!PROFILE_DIRS[@]}"; do
     scaffold_profile_files "$i"
 done
 
+# The approval plugin is add-on managed and enabled only for the primary
+# profile when the explicit option is on. It never executes HA operations.
+export HA_OPERATIONS_APPROVAL_ENABLED HA_OPERATIONS_OWNER_IDENTITY_HASHES
+export HA_OPERATIONS_PROPOSAL_TTL_SECONDS HA_OPERATIONS_MAX_PENDING
+managed_plugins_install "$VENV_DIR/bin/python" || exit 1
+
 # tmux config (persistent, user-editable, single-instance)
 if [ ! -f /config/.tmux.conf ]; then
     cat > /config/.tmux.conf << 'TMUX'
@@ -510,6 +536,7 @@ fi
 export HASS_ALLOWED_DOMAINS HASS_ALLOWED_ENTITIES HASS_HEALTH_CONFIG_B64
 echo "[run] HA control domains: ${HASS_ALLOWED_DOMAINS:-none}"
 echo "[run] HA health entity sources: $(jq -r '(.ha_health_entities // []) | length' "$OPTIONS_FILE") metrics, $(jq -r '(.ha_health_status_entities // []) | length' "$OPTIONS_FILE") statuses"
+echo "[run] HA operations approval: $HA_OPERATIONS_APPROVAL_ENABLED ($(jq -r '(.ha_operations_owner_identity_hashes // []) | length' "$OPTIONS_FILE") owner hashes; primary profile only)"
 if [ -n "$HASS_ALLOWED_ENTITIES" ]; then
     echo "[run] HA control entity allowlist enabled"
 else
@@ -548,6 +575,11 @@ $([ -n "$HASS_URL" ] && echo "export HASS_URL=\"$HASS_URL\"")
 export HASS_ALLOWED_DOMAINS="$HASS_ALLOWED_DOMAINS"
 export HASS_ALLOWED_ENTITIES="$HASS_ALLOWED_ENTITIES"
 export HASS_HEALTH_CONFIG_B64="$HASS_HEALTH_CONFIG_B64"
+export HA_OPERATIONS_APPROVAL_ENABLED="$HA_OPERATIONS_APPROVAL_ENABLED"
+export HA_OPERATIONS_OWNER_IDENTITY_HASHES="$HA_OPERATIONS_OWNER_IDENTITY_HASHES"
+export HA_OPERATIONS_PROPOSAL_TTL_SECONDS="$HA_OPERATIONS_PROPOSAL_TTL_SECONDS"
+export HA_OPERATIONS_MAX_PENDING="$HA_OPERATIONS_MAX_PENDING"
+export HA_OPERATIONS_LEDGER_PATH="\$HERMES_HOME/state/ha_operations_approval.sqlite3"
 export HOMEBREW_CELLAR="$BREW_DIR/Cellar"
 export HOMEBREW_PREFIX="$BREW_DIR"
 export HOMEBREW_REPOSITORY="$BREW_DIR/Homebrew"

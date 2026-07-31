@@ -1,0 +1,36 @@
+name: Huaxin Water
+version: "0.1.0"
+slug: huaxin_water
+description: "Read-only multi-account water usage and payment history for Tianjin Huaxin Water."
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/huaxin_water"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8098
+panel_icon: mdi:water-outline
+panel_title: Huaxin Water
+backup: cold
+watchdog: http://[HOST]:[PORT:8098]/health
+stage: experimental
+options:
+  accounts: []
+  base_url: http://www.huaxinshuiwu.com/api
+  allow_insecure_http: false
+  poll_interval_minutes: 360
+  request_timeout_seconds: 15
+  stale_after_minutes: 1440
+  manual_refresh_cooldown_seconds: 60
+schema:
+  accounts:
+    - id: "match(^[a-z0-9][a-z0-9_-]{0,31}$)"
+      customer_no: "match(^[0-9]{6,32}$)"
+  base_url: url
+  allow_insecure_http: bool
+  poll_interval_minutes: "int(60,10080)"
+  request_timeout_seconds: "int(3,50)"
+  stale_after_minutes: "int(60,43200)"
+  manual_refresh_cooldown_seconds: "int(30,3600)"

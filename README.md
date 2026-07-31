@@ -10,6 +10,7 @@ Canonical Home Assistant add-on repository for every application maintained and 
 | [DrawIO](drawio/) | Browser-based diagram editor through Home Assistant Ingress | `amd64`, `aarch64` | [jgraph/docker-drawio](https://github.com/jgraph/docker-drawio) |
 | [HA Operations Broker](ha_operations_broker/) | Experimental read-only preflight and Passkey authorization broker; execution is always disabled | `amd64`, `aarch64` | Self-maintained |
 | [Hermes Agent](hermes_agent/) | Persistent AI agent, dashboard, terminal and API | `amd64`, `aarch64` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
+| [Huaxin Water](huaxin_water/) | Read-only multi-account water information, usage and payment history through Ingress | `amd64`, `aarch64` | Undocumented Tianjin Huaxin Water H5 API |
 | [Journey Analyzer](journey_analyzer/) | Local HA location collection, journey statistics and authenticated AMap playback | `amd64`, `aarch64` | Self-maintained |
 | [WizNote Server](wiznote_server/) | Self-hosted notes with persistent storage, OSS guidance and cold backups | `amd64` | [wiznote/wizserver](https://hub.docker.com/r/wiznote/wizserver) |
 

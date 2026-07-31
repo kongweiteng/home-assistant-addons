@@ -84,6 +84,7 @@ RUN uv pip install --system --break-system-packages paho-mqtt==2.1.0
 COPY run.sh /
 COPY config.yaml /usr/local/share/hermes-addon/config.yaml
 COPY homeassistant_tool.py /usr/local/share/hermes-addon/homeassistant_tool.py
+COPY homeassistant_health.py /usr/local/share/hermes-addon/homeassistant_health.py
 COPY bundled_skills /usr/local/share/hermes-addon/skills
 COPY notification_bridge.py /usr/local/bin/hermes-notification-bridge
 COPY notification-bridge.sh /usr/local/lib/hermes-notification-bridge.sh

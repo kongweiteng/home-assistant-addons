@@ -46,6 +46,7 @@ Secrets and service credentials must never be committed to this repository.
 - **Multi-platform messaging** -- Telegram, Discord, WhatsApp, and more via the gateway
 - **MQTT notification bridge** -- optional model-free Home Assistant notifications through the primary Weixin Home Channel
 - **Home Assistant plugin research** -- evidence-backed official, Add-on, HACS, HASSbian, and GitHub candidate evaluation without installation
+- **Home Assistant health snapshot** -- deterministic disk, Recorder, backup, storage-consumer, and component freshness through explicit read-only HA entities
 - **OpenAI-compatible API** -- connect any chat frontend ([Open WebUI](https://github.com/open-webui/open-webui), [SillyTavern](https://github.com/SillyTavern/SillyTavern), etc.) via `/v1/`
 - **Hermes Desktop backend** -- opt-in remote backend for the official Hermes Desktop app on a dedicated port
 - **Plugin architecture** -- custom tools, commands, and hooks without forking
@@ -77,6 +78,9 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 | `homeassistant_token` |                                                    | Optional long-lived token; blank uses the add-on's short-lived Supervisor token |
 | `ha_control_allowed_domains` | `light`                                      | Write-enabled domains; only `light` and `switch` are supported                  |
 | `ha_control_allowed_entities` | empty                                       | Optional exact entity allowlist; empty permits entities in enabled domains      |
+| `ha_health_entities` | empty | Explicit numeric HA entity mapping for disk, Recorder, backup, and storage-consumer metrics |
+| `ha_health_status_entities` | empty | Explicit binary-sensor mapping plus the expected `on`/`off` state for critical component health |
+| `ha_health_stale_after_seconds` | `300` | Maximum accepted source age before the whole snapshot becomes `stale` |
 | `notification_bridge_enabled` | `false`                                     | Enable the versioned MQTT-to-Weixin notification bridge                         |
 | `notification_mqtt_host` | `core-mosquitto`                                  | MQTT broker hostname on the internal app network                                |
 | `notification_mqtt_port` | `1883`                                             | MQTT broker port                                                                |
@@ -98,6 +102,47 @@ Add-on-level options are configured in the Home Assistant UI (Settings > Apps > 
 API keys can be configured in two places: `env_vars` above (convenient, via Home Assistant UI) or each profile's `.env` directly (full list, via terminal or `hermes setup`). Non-empty top-level `env_vars` are written to every profile's `.env` on each start, overriding existing entries. `profile_env_vars` entries layer on top of the top-level set for the profile whose directory matches `profile`.
 
 Home Assistant access uses the add-on's short-lived Supervisor credential by default, so no long-lived HA token is required. The explicit `homeassistant_token` and `hass_url` options remain available for nonstandard deployments. Home Assistant does not provide service-level token permissions, so the add-on replaces upstream Hermes' broad service caller with a restricted implementation: ordinary device states are readable, security-sensitive domains are hidden, every write targets one exact entity, target expansion is rejected, and success is reported only after the entity's real HA state is re-read and verified.
+
+### Home Assistant health snapshot
+
+Hermes registers a read-only `ha_health_snapshot` tool. It reads only the exact entities configured in the add-on options and returns a bounded versioned document containing source timestamps, freshness, disk totals, Recorder size, backup count/size, optional top consumers, and expected-state checks for binary sensors.
+
+The add-on deliberately keeps `homeassistant_api: true` and does not enable `hassio_api`. It therefore does not call Supervisor backup or add-on management endpoints and does not auto-discover entity names. Configure or create suitable HA sensors separately, verify their units and ownership, then map their exact IDs:
+
+```yaml
+ha_health_entities:
+  - metric: disk_total_bytes
+    entity_id: sensor.example_disk_total
+  - metric: disk_used_bytes
+    entity_id: sensor.example_disk_used
+  - metric: disk_free_bytes
+    entity_id: sensor.example_disk_free
+  - metric: disk_used_percent
+    entity_id: sensor.example_disk_used_percent
+  - metric: recorder_bytes
+    entity_id: sensor.example_recorder_size
+  - metric: backup_count
+    entity_id: sensor.example_backup_count
+  - metric: backup_bytes
+    entity_id: sensor.example_backup_size
+  - metric: top_consumer
+    entity_id: sensor.example_addon_data_size
+ha_health_status_entities:
+  - entity_id: binary_sensor.hermes_notification_bridge_online
+    expected_state: "on"
+ha_health_stale_after_seconds: 300
+```
+
+Supported numeric metrics are:
+
+| Metric | Expected unit/meaning |
+| --- | --- |
+| `disk_total_bytes`, `disk_used_bytes`, `disk_free_bytes` | HA sensor with `B`, `KB`, `MB`, `GB`, `TB`, `KiB`, `MiB`, `GiB`, or `TiB` |
+| `disk_used_percent` | `%`, from 0 through 100 |
+| `recorder_bytes`, `backup_bytes`, `top_consumer` | Same byte units as disk metrics |
+| `backup_count` | Non-negative whole number; optional count unit such as `backups` or `items` |
+
+Missing metrics are `null`, never `0`. Invalid units, duplicate singleton mappings, unavailable entities, future timestamps, and stale sources are preserved as explicit quality issues. A snapshot reports `critical` only after a future deterministic P3 threshold policy is implemented; P2 reports data-quality problems as `warning`, `stale`, or `unavailable`.
 
 ### MQTT notification bridge
 
@@ -267,6 +312,7 @@ Authentication layers differ by access path:
 - **OpenAI-compatible API** (`/v1/*`): Bearer token authentication. The `access_password` doubles as the API key, passed as `Authorization: Bearer <api-key>`.
 - **Hermes Desktop backend** (`:9119` when enabled and mapped): Hermes Basic-auth login using username `hermes` and `access_password`. This endpoint exposes the full Desktop backend contract, including chat, WebSockets, PTY, events, profiles, and agent control. It is disabled and unmapped by default. Enabling it is an explicit risk decision; keep it on a trusted LAN/VPN/Tailscale path and do not expose it directly to the internet.
 - **Home Assistant device control**: the add-on requests Core API access and converts its short-lived Supervisor credential into the `HASS_TOKEN` expected by Hermes. Read tools exclude locks, alarms, cameras, people, device trackers, automations, scripts, scenes, and other sensitive/action domains. Write tools default to `light.turn_on` and `light.turn_off`; `switch` must be explicitly enabled and also requires an exact entity allowlist. Calls require one exact entity, accept only restricted parameters, and verify the resulting HA state before returning success. Use `ha_control_allowed_entities` when control must be narrower than the enabled domain.
+- **Home Assistant health snapshot**: the add-on reads exact configured `sensor` and `binary_sensor` entity IDs through the Core API. The compact base64 runtime configuration prevents shell interpolation, raw HA attributes are not returned, and no Supervisor management permission or filesystem scan is added.
 - **MQTT notification bridge**: disabled by default. When enabled, it uses separate broker credentials, subscribes only to the versioned request contract, rejects unknown audiences, persists no notification body, and sends through `hermes send` without model execution. Request/result messages are never retained.
 
 If you expose direct ports to the internet, place a network-perimeter gate (firewall, VPN, reverse proxy with stronger auth) in front — Basic Auth alone is not brute-force resistant.

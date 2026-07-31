@@ -11,6 +11,10 @@ The public tool names intentionally match upstream Hermes:
 * ``ha_list_services``
 * ``ha_call_service``
 
+The add-on also registers ``ha_health_snapshot``.  It reads only explicitly
+configured numeric and binary-sensor entities through the same HA Core API;
+it never calls Supervisor management endpoints.
+
 Read access is limited to ordinary device/status domains.  Write access is
 limited by both a domain policy and an optional exact entity allowlist, always
 requires one explicit entity, rejects target expansion, and verifies the real
@@ -25,6 +29,8 @@ import logging
 import os
 import re
 from typing import Any, Dict, Optional
+
+from tools.homeassistant_health import build_health_snapshot, decode_health_config
 
 
 logger = logging.getLogger(__name__)
@@ -210,6 +216,28 @@ async def _async_get_state(entity_id: str) -> Dict[str, Any]:
         "last_changed": state.get("last_changed"),
         "last_updated": state.get("last_updated"),
     }
+
+
+async def _async_health_snapshot() -> Dict[str, Any]:
+    import aiohttp
+
+    hass_url, hass_token = _get_config()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{hass_url}/api/states",
+            headers=_get_headers(hass_token),
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as response:
+            response.raise_for_status()
+            states = await response.json()
+    config, configuration_errors = decode_health_config(
+        os.getenv("HASS_HEALTH_CONFIG_B64", "")
+    )
+    return build_health_snapshot(
+        states,
+        config,
+        configuration_errors=configuration_errors,
+    )
 
 
 def _build_service_payload(
@@ -419,6 +447,14 @@ def _handle_get_state(args: dict, **kw: Any) -> str:
         return tool_error(f"Failed to get state for {entity_id}: {exc}")
 
 
+def _handle_health_snapshot(args: dict, **kw: Any) -> str:
+    try:
+        return json.dumps({"result": _run_async(_async_health_snapshot())})
+    except Exception as exc:
+        logger.error("ha_health_snapshot error: %s", exc)
+        return tool_error(f"Failed to build Home Assistant health snapshot: {exc}")
+
+
 def _handle_list_services(args: dict, **kw: Any) -> str:
     domain = args.get("domain")
     if domain and domain not in _allowed_control_domains():
@@ -506,6 +542,16 @@ HA_GET_STATE_SCHEMA = {
     },
 }
 
+HA_HEALTH_SNAPSHOT_SCHEMA = {
+    "name": "ha_health_snapshot",
+    "description": (
+        "Build a read-only Home Assistant health snapshot from explicitly configured "
+        "disk, Recorder, backup, storage-consumer, and component-status entities. "
+        "Missing data is null and stale or unavailable sources are reported explicitly."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
 HA_LIST_SERVICES_SCHEMA = {
     "name": "ha_list_services",
     "description": "List only the Home Assistant control services enabled by the add-on allowlist.",
@@ -558,6 +604,14 @@ registry.register(
     handler=_handle_get_state,
     check_fn=_check_ha_available,
     emoji="🏠",
+)
+registry.register(
+    name="ha_health_snapshot",
+    toolset="homeassistant",
+    schema=HA_HEALTH_SNAPSHOT_SCHEMA,
+    handler=_handle_health_snapshot,
+    check_fn=_check_ha_available,
+    emoji="🩺",
 )
 registry.register(
     name="ha_list_services",

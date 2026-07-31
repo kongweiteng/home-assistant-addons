@@ -23,6 +23,7 @@ HASS_URL=$(opt hass_url)
 HASS_TOKEN=$(opt homeassistant_token)
 HASS_ALLOWED_DOMAINS=$(jq -r 'if has("ha_control_allowed_domains") then (.ha_control_allowed_domains // []) else ["light"] end | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
 HASS_ALLOWED_ENTITIES=$(jq -r '(.ha_control_allowed_entities // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
+HASS_HEALTH_CONFIG_B64=$(jq -c '{metrics: (.ha_health_entities // []), statuses: (.ha_health_status_entities // []), stale_after_seconds: (.ha_health_stale_after_seconds // 300)}' "$OPTIONS_FILE" | base64 | tr -d '\n')
 NOTIFICATION_BRIDGE_ENABLED=$(opt_bool notification_bridge_enabled)
 NOTIFICATION_MQTT_HOST=$(opt notification_mqtt_host)
 NOTIFICATION_MQTT_PORT=$(jq -r '.notification_mqtt_port // 1883' "$OPTIONS_FILE")
@@ -420,11 +421,13 @@ install_hermes_core
 # auditable implementation after every clone/update. Fail closed if the
 # expected upstream module is absent.
 HASS_TOOL_OVERRIDE="/usr/local/share/hermes-addon/homeassistant_tool.py"
-if [ ! -f "$HASS_TOOL_OVERRIDE" ] || [ ! -f "$SRC_DIR/tools/homeassistant_tool.py" ]; then
+HASS_HEALTH_OVERRIDE="/usr/local/share/hermes-addon/homeassistant_health.py"
+if [ ! -f "$HASS_TOOL_OVERRIDE" ] || [ ! -f "$HASS_HEALTH_OVERRIDE" ] || [ ! -f "$SRC_DIR/tools/homeassistant_tool.py" ]; then
     echo "[run] FATAL: Home Assistant tool override cannot be installed"
     exit 1
 fi
 install -m 0644 "$HASS_TOOL_OVERRIDE" "$SRC_DIR/tools/homeassistant_tool.py"
+install -m 0644 "$HASS_HEALTH_OVERRIDE" "$SRC_DIR/tools/homeassistant_health.py"
 echo "[run] Restricted Home Assistant tool installed"
 
 # Hermes discovers skills below each profile's $HERMES_HOME/skills directory,
@@ -504,8 +507,9 @@ if [ -n "$HASS_TOKEN" ]; then
     export HASS_TOKEN
     echo "[run] HASS authentication: $HASS_AUTH_SOURCE"
 fi
-export HASS_ALLOWED_DOMAINS HASS_ALLOWED_ENTITIES
+export HASS_ALLOWED_DOMAINS HASS_ALLOWED_ENTITIES HASS_HEALTH_CONFIG_B64
 echo "[run] HA control domains: ${HASS_ALLOWED_DOMAINS:-none}"
+echo "[run] HA health entity sources: $(jq -r '(.ha_health_entities // []) | length' "$OPTIONS_FILE") metrics, $(jq -r '(.ha_health_status_entities // []) | length' "$OPTIONS_FILE") statuses"
 if [ -n "$HASS_ALLOWED_ENTITIES" ]; then
     echo "[run] HA control entity allowlist enabled"
 else
@@ -543,6 +547,7 @@ $([ -n "$HASS_TOKEN" ] && echo "export HASS_TOKEN=\"$HASS_TOKEN\"")
 $([ -n "$HASS_URL" ] && echo "export HASS_URL=\"$HASS_URL\"")
 export HASS_ALLOWED_DOMAINS="$HASS_ALLOWED_DOMAINS"
 export HASS_ALLOWED_ENTITIES="$HASS_ALLOWED_ENTITIES"
+export HASS_HEALTH_CONFIG_B64="$HASS_HEALTH_CONFIG_B64"
 export HOMEBREW_CELLAR="$BREW_DIR/Cellar"
 export HOMEBREW_PREFIX="$BREW_DIR"
 export HOMEBREW_REPOSITORY="$BREW_DIR/Homebrew"

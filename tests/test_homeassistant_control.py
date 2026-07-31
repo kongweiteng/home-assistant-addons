@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "hermes_agent" / "homeassistant_tool.py"
+HEALTH_PATH = ROOT / "hermes_agent" / "homeassistant_health.py"
 CONFIG_PATH = ROOT / "hermes_agent" / "config.yaml"
 RUN_PATH = ROOT / "hermes_agent" / "run.sh"
 PROFILE_INIT_PATH = ROOT / "hermes_agent" / "profile-init.sh"
@@ -37,9 +38,18 @@ def _load_tool_module():
 
     old_tools = sys.modules.get("tools")
     old_registry = sys.modules.get("tools.registry")
+    old_health = sys.modules.get("tools.homeassistant_health")
     sys.modules["tools"] = tools_module
     sys.modules["tools.registry"] = registry_module
     try:
+        health_spec = importlib.util.spec_from_file_location(
+            "tools.homeassistant_health", HEALTH_PATH
+        )
+        if health_spec is None or health_spec.loader is None:
+            raise RuntimeError("Unable to load Home Assistant health helper")
+        health_module = importlib.util.module_from_spec(health_spec)
+        sys.modules["tools.homeassistant_health"] = health_module
+        health_spec.loader.exec_module(health_module)
         spec = importlib.util.spec_from_file_location(
             "hermes_addon_homeassistant_tool", TOOL_PATH
         )
@@ -57,6 +67,10 @@ def _load_tool_module():
             sys.modules.pop("tools.registry", None)
         else:
             sys.modules["tools.registry"] = old_registry
+        if old_health is None:
+            sys.modules.pop("tools.homeassistant_health", None)
+        else:
+            sys.modules["tools.homeassistant_health"] = old_health
 
 
 TOOL, REGISTRY = _load_tool_module()
@@ -66,7 +80,8 @@ class AddonContractTests(unittest.TestCase):
     def test_addon_uses_supervisor_core_api_permission(self):
         config = CONFIG_PATH.read_text()
         self.assertIn("homeassistant_api: true", config)
-        self.assertIn('version: "1.6.0"', config)
+        self.assertNotIn("hassio_api: true", config)
+        self.assertIn('version: "1.7.0"', config)
         self.assertRegex(
             config,
             r'(?ms)ha_control_allowed_domains:\n\s+- "light"\n\s+ha_control_allowed_entities: \[\]',
@@ -77,6 +92,7 @@ class AddonContractTests(unittest.TestCase):
         self.assertIn('HASS_TOKEN="$SUPERVISOR_TOKEN"', run)
         self.assertIn('HASS_URL="http://supervisor/core"', run)
         self.assertIn('export HASS_ALLOWED_DOMAINS HASS_ALLOWED_ENTITIES', run)
+        self.assertIn("HASS_HEALTH_CONFIG_B64", run)
         self.assertIn("chmod 600 /config/.hermes_profile", run)
 
     def test_restricted_tool_is_installed_after_upstream_setup(self):
@@ -86,9 +102,17 @@ class AddonContractTests(unittest.TestCase):
             "COPY homeassistant_tool.py /usr/local/share/hermes-addon/homeassistant_tool.py",
             dockerfile,
         )
+        self.assertIn(
+            "COPY homeassistant_health.py /usr/local/share/hermes-addon/homeassistant_health.py",
+            dockerfile,
+        )
         self.assertGreater(run.index("HASS_TOOL_OVERRIDE="), run.index("install_hermes_core\n"))
         self.assertIn(
             'install -m 0644 "$HASS_TOOL_OVERRIDE" "$SRC_DIR/tools/homeassistant_tool.py"',
+            run,
+        )
+        self.assertIn(
+            'install -m 0644 "$HASS_HEALTH_OVERRIDE" "$SRC_DIR/tools/homeassistant_health.py"',
             run,
         )
 
@@ -96,6 +120,7 @@ class AddonContractTests(unittest.TestCase):
         profile_init = PROFILE_INIT_PATH.read_text()
         self.assertIn("HASS_ALLOWED_DOMAINS", profile_init)
         self.assertIn("HASS_ALLOWED_ENTITIES", profile_init)
+        self.assertIn("HASS_HEALTH_CONFIG_B64", profile_init)
 
 
 class ToolPolicyTests(unittest.TestCase):
@@ -116,7 +141,13 @@ class ToolPolicyTests(unittest.TestCase):
     def test_expected_tools_are_registered(self):
         self.assertEqual(
             set(REGISTRY.names),
-            {"ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service"},
+            {
+                "ha_list_entities",
+                "ha_get_state",
+                "ha_health_snapshot",
+                "ha_list_services",
+                "ha_call_service",
+            },
         )
 
     def test_default_write_domain_is_only_light(self):
@@ -258,6 +289,20 @@ class ToolPolicyTests(unittest.TestCase):
             }
         )
         self.assertEqual(attributes, {"friendly_name": "Living Room"})
+
+    def test_health_snapshot_handler_returns_versioned_result(self):
+        def fake_run(coro):
+            coro.close()
+            return {
+                "version": 1,
+                "status": "unavailable",
+                "disk": {"total_bytes": None},
+            }
+
+        with patch.object(TOOL, "_run_async", side_effect=fake_run):
+            result = json.loads(TOOL._handle_health_snapshot({}))
+        self.assertEqual(result["result"]["version"], 1)
+        self.assertEqual(result["result"]["status"], "unavailable")
 
     def test_service_response_requires_verified_state(self):
         ok = TOOL._parse_service_response(

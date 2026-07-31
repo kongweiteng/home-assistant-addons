@@ -6,6 +6,24 @@ The format follows the spirit of [Keep a Changelog](https://keepachangelog.com/e
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-31
+
+### Added
+
+- Add the read-only `ha_health_snapshot` Hermes tool for a versioned disk, Recorder, backup, storage-consumer, and component-health snapshot.
+- Add explicit numeric HA entity mappings, binary-sensor expected-state mappings, configurable freshness, deterministic byte/unit normalization, disk derivation, and bounded data-quality issues.
+
+### Security
+
+- Keep `homeassistant_api: true` without enabling `hassio_api`; the snapshot uses only exact configured HA Core entities and never calls Supervisor management endpoints.
+- Encode the add-on-owned health mapping as compact base64 JSON before exporting it to Hermes shells, reject invalid entity domains/units/timestamps, and never return raw HA attributes.
+- Missing, unknown, unavailable, stale, inconsistent, and unconfigured data remains explicit and never becomes a fabricated zero or healthy result.
+
+### Verified
+
+- P2 targeted health and existing restricted-HA regression tests pass, including unit conversion, derivation, stale/unavailable semantics, component mismatch, duplicate rejection, timestamp validation, and attribute redaction.
+- Shell syntax and Python compilation pass for the new helper, tool override, and runtime option injection.
+
 ## [1.6.0] - 2026-07-31
 
 ### Added

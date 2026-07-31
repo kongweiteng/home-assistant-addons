@@ -1,5 +1,5 @@
 name: Hermes Agent
-version: "1.6.0"
+version: "1.7.0"
 slug: hermes_agent
 description: "The self-improving AI agent built by Nous Research. Home Assistant add-on by Wolfram Ravenwolf."
 url: "https://github.com/WolframRavenwolf/hermes-ha-addon"
@@ -37,6 +37,9 @@ options:
   ha_control_allowed_domains:
     - "light"
   ha_control_allowed_entities: []
+  ha_health_entities: []
+  ha_health_status_entities: []
+  ha_health_stale_after_seconds: 300
   notification_bridge_enabled: false
   notification_mqtt_host: "core-mosquitto"
   notification_mqtt_port: 1883
@@ -68,6 +71,13 @@ schema:
     - "str"
   ha_control_allowed_entities:
     - "str"
+  ha_health_entities:
+    - metric: "match(^(disk_total_bytes|disk_used_bytes|disk_free_bytes|disk_used_percent|recorder_bytes|backup_count|backup_bytes|top_consumer)$)"
+      entity_id: "match(^sensor\\.[a-z0-9_]+$)"
+  ha_health_status_entities:
+    - entity_id: "match(^binary_sensor\\.[a-z0-9_]+$)"
+      expected_state: "match(^(on|off)$)"
+  ha_health_stale_after_seconds: "int(30,86400)"
   notification_bridge_enabled: "bool"
   notification_mqtt_host: "str"
   notification_mqtt_port: "port"

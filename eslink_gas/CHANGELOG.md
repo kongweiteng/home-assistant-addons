@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Use a Debian package mirror build argument selected for reliable HAOS builds
+  in constrained networks; package authenticity remains enforced by Debian's
+  signed repository metadata.
+
 ## 0.1.0
 
 - Add read-only multi-account ESLink gas balance and meter-status collection.

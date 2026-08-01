@@ -145,6 +145,14 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
         self.assertNotIn("hassio_api", config)
+        self.assertIn('version: "0.1.1"', config)
+
+        build = (ADDON / "build.yaml").read_text(encoding="utf-8")
+        dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("DEBIAN_MIRROR", build)
+        self.assertIn("mirrors.tuna.tsinghua.edu.cn/debian", build)
+        self.assertIn("ARG DEBIAN_MIRROR=https://deb.debian.org/debian", dockerfile)
+        self.assertIn("deb.debian.org/debian", dockerfile)
 
     def test_configuration_is_fixed_host_and_fails_closed_on_http(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

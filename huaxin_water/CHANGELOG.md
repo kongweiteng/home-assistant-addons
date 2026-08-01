@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0
+
+- Add retained MQTT Discovery devices and aggregate entities for every
+  configured account, using separate state topics to preserve account isolation.
+- Add a retained global online status, MQTT LWT, Home Assistant birth-message
+  republishing and cleanup of obsolete retained topics.
+- Publish only privacy-safe aggregates such as balance, arrears, current and
+  annual usage/charges, meter summary and data quality; names, addresses,
+  customer numbers and record details stay out of MQTT.
+
 ## 0.2.0
 
 - Add per-account year selection, annual usage/billing/payment metrics, a

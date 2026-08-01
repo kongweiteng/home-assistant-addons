@@ -15,7 +15,7 @@ def create_server(host: str, port: int, service: WaterService) -> ThreadingHTTPS
 
 def create_handler(service: WaterService):
     class HuaxinRequestHandler(BaseHTTPRequestHandler):
-        server_version = "HuaxinWater/0.2"
+        server_version = "HuaxinWater/0.3"
 
         def do_GET(self) -> None:
             path = urlparse(self.path).path

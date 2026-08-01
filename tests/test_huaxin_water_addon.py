@@ -19,6 +19,17 @@ from huaxin_water.cache import CacheStore
 from huaxin_water.client import ENDPOINT_PATHS, HuaxinClient, UpstreamError
 from huaxin_water.config import AppConfig
 from huaxin_water.normalize import ContractError, normalize_response
+from huaxin_water.mqtt import (
+    BASE_TOPIC,
+    HOME_ASSISTANT_STATUS_TOPIC,
+    MQTT_STATUS_TOPIC,
+    MqttPublisher,
+    MqttSettings,
+    discovery_messages,
+    managed_topics,
+    mqtt_state_from_account,
+    state_message,
+)
 from huaxin_water.runtime import WaterService
 from huaxin_water.statistics import build_statistics
 
@@ -174,6 +185,68 @@ class FakeResponse:
         return self.payload[:size]
 
 
+class RecordingPublisher:
+    connected = True
+
+    def __init__(self) -> None:
+        self.snapshots = []
+
+    def publish_snapshot(self, account_id: str, snapshot: dict) -> None:
+        self.snapshots.append((account_id, snapshot))
+
+
+class FakePublishInfo:
+    def wait_for_publish(self, timeout=None):
+        return None
+
+
+class FakeMqttClient:
+    def __init__(self, *args, **kwargs) -> None:
+        self.published = []
+        self.subscriptions = []
+        self.will = None
+        self.username = None
+        self.tls = False
+        self.disconnected = False
+
+    def username_pw_set(self, username, password):
+        self.username = (username, password)
+
+    def tls_set(self):
+        self.tls = True
+
+    def will_set(self, topic, payload, qos, retain):
+        self.will = (topic, payload, qos, retain)
+
+    def reconnect_delay_set(self, min_delay, max_delay):
+        self.reconnect_delays = (min_delay, max_delay)
+
+    def publish(self, topic, payload, qos, retain):
+        self.published.append((topic, payload, qos, retain))
+        return FakePublishInfo()
+
+    def subscribe(self, topic, qos):
+        self.subscriptions.append((topic, qos))
+
+    def disconnect(self):
+        self.disconnected = True
+
+    def loop_stop(self):
+        return None
+
+
+class FakeMqttModule:
+    class CallbackAPIVersion:
+        VERSION2 = 2
+
+    def __init__(self) -> None:
+        self.client = None
+
+    def Client(self, *args, **kwargs):
+        self.client = FakeMqttClient(*args, **kwargs)
+        return self.client
+
+
 class HuaxinWaterAddonTests(unittest.TestCase):
     def test_required_files_and_minimum_permissions(self) -> None:
         for relative in (
@@ -195,8 +268,150 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertNotIn("host_network", config)
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
-        self.assertNotIn("services:", config)
-        self.assertIn('version: "0.2.0"', config)
+        self.assertIn("services:", config)
+        self.assertIn("  - mqtt:need", config)
+        self.assertIn('version: "0.3.0"', config)
+
+    def test_mqtt_discovery_is_per_account_retained_and_privacy_safe(self) -> None:
+        messages = discovery_messages(("home", "studio"))
+        self.assertEqual(len(messages), 26)
+        topics = {topic for topic, _ in messages}
+        self.assertIn(
+            "homeassistant/sensor/huaxin_water_home/balance/config", topics
+        )
+        self.assertIn(
+            "homeassistant/binary_sensor/huaxin_water_studio/available/config",
+            topics,
+        )
+        balance = json.loads(
+            next(
+                payload
+                for topic, payload in messages
+                if topic.endswith("huaxin_water_home/balance/config")
+            )
+        )
+        self.assertEqual(balance["state_topic"], "huaxin_water/home/state")
+        self.assertEqual(balance["availability_topic"], MQTT_STATUS_TOPIC)
+        self.assertEqual(
+            balance["value_template"],
+            "{{ value_json.balance if value_json.balance is not none else none }}",
+        )
+        self.assertEqual(balance["unit_of_measurement"], "CNY")
+        self.assertEqual(balance["device"]["identifiers"], ["huaxin_water_home"])
+        serialized = json.dumps(messages, ensure_ascii=False)
+        self.assertNotIn(ACCOUNT_A, serialized)
+        self.assertNotIn("address", serialized.lower())
+
+    def test_mqtt_state_uses_latest_billing_month_and_excludes_private_fields(self) -> None:
+        state = mqtt_state_from_account(
+            {
+                "id": "home",
+                "masked_customer_no": "****0001",
+                "status": "good",
+                "last_success_at": "2026-08-01T00:00:00Z",
+                "summary": {
+                    "name": "Private Name",
+                    "address": "Private Address",
+                    "remaining": 52.36,
+                    "arrears": 0,
+                    "meter_count": 2,
+                    "latest_reading": 325.8,
+                },
+                "statistics": {
+                    "years": [2026, 2025],
+                    "latest_year": 2026,
+                    "yearly": [{"year": 2026, "usage": 10, "charge": 30}],
+                    "monthly_by_year": {
+                        "2026": [
+                            {
+                                "month": month,
+                                "water_record_count": 1 if month == 7 else 0,
+                                "usage": 6.4 if month == 7 else None,
+                                "charge": 18.2 if month == 7 else None,
+                            }
+                            for month in range(1, 13)
+                        ]
+                    },
+                },
+            }
+        )
+        self.assertEqual(state["balance"], 52.36)
+        self.assertEqual(state["arrears"], 0)
+        self.assertEqual(state["current_usage"], 6.4)
+        self.assertEqual(state["current_charge"], 18.2)
+        self.assertEqual(state["billing_period"], "2026-07")
+        self.assertEqual(state["payment_status"], "无欠费")
+        self.assertTrue(state["available"])
+        serialized = json.dumps(state, ensure_ascii=False)
+        self.assertNotIn("Private", serialized)
+        self.assertNotIn("0001", serialized)
+
+    def test_mqtt_publisher_sets_lwt_cleans_topics_and_republishes_on_birth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = pathlib.Path(tmp) / "mqtt-topics.json"
+            registry.write_text(
+                json.dumps(
+                    [
+                        "homeassistant/sensor/huaxin_water_removed/balance/config",
+                        "huaxin_water/removed/state",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            module = FakeMqttModule()
+            publisher = MqttPublisher(
+                MqttSettings("mqtt.example.test", 1883, "user", "password"),
+                ("home",),
+                registry,
+                mqtt_module=module,
+            )
+            client = module.client
+            self.assertEqual(
+                client.will, (MQTT_STATUS_TOPIC, "offline", 1, True)
+            )
+            publisher._on_connect(client, None, None, 0, None)
+            publisher.publish_snapshot("home", {"balance": 12.5, "available": True})
+            before_birth = len(client.published)
+            message = type(
+                "Message",
+                (),
+                {"topic": HOME_ASSISTANT_STATUS_TOPIC, "payload": b"online"},
+            )()
+            publisher._on_message(client, None, message)
+            publisher.stop()
+
+            self.assertIn((HOME_ASSISTANT_STATUS_TOPIC, 1), client.subscriptions)
+            self.assertIn(
+                (
+                    "homeassistant/sensor/huaxin_water_removed/balance/config",
+                    "",
+                    1,
+                    True,
+                ),
+                client.published,
+            )
+            self.assertIn(
+                ("huaxin_water/removed/state", "", 1, True), client.published
+            )
+            self.assertGreater(len(client.published), before_birth)
+            self.assertIn((MQTT_STATUS_TOPIC, "online", 1, True), client.published)
+            self.assertIn((MQTT_STATUS_TOPIC, "offline", 1, True), client.published)
+            self.assertTrue(all(qos == 1 and retain for _, _, qos, retain in client.published))
+            self.assertTrue(client.disconnected)
+            self.assertEqual(
+                set(json.loads(registry.read_text(encoding="utf-8"))),
+                managed_topics(("home",)),
+            )
+
+    def test_mqtt_state_message_is_one_retained_json_document_per_account(self) -> None:
+        topic, payload = state_message(
+            "home", {"balance": 12.5, "arrears": None, "available": True}
+        )
+        self.assertEqual(topic, f"{BASE_TOPIC}/home/state")
+        self.assertEqual(
+            json.loads(payload),
+            {"balance": 12.5, "arrears": None, "available": True},
+        )
 
     def test_year_month_statistics_aggregate_records_and_keep_unknowns(self) -> None:
         statistics = build_statistics(
@@ -450,7 +665,28 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertEqual(len(account["endpoints"]), 5)
         self.assertEqual(account["statistics"]["latest_year"], 2026)
         self.assertEqual(len(account["statistics"]["monthly_by_year"]["2026"]), 12)
-        self.assertIn('"version":"0.2.0"', health_text)
+        self.assertIn('"version":"0.3.0"', health_text)
+
+    def test_runtime_publishes_only_projected_account_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp)
+            config = write_options(directory / "options.json")
+            publisher = RecordingPublisher()
+            service = WaterService(
+                config,
+                FakeClient(),
+                CacheStore(directory / "state.json", directory / "cache.key"),
+                publisher,
+            )
+            service.run_once()
+        account_id, state = publisher.snapshots[-1]
+        self.assertEqual(account_id, "studio")
+        self.assertEqual(state["balance"], 12.5)
+        self.assertEqual(state["current_usage"], 4.5)
+        self.assertEqual(state["current_charge"], 12.34)
+        serialized = json.dumps(state)
+        self.assertNotIn("Synthetic", serialized)
+        self.assertNotIn(ACCOUNT_A, serialized)
 
     def test_dashboard_uses_relative_api_and_safe_text_nodes(self) -> None:
         self.assertIn("用水地址", DASHBOARD_HTML)

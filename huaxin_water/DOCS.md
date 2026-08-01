@@ -37,6 +37,12 @@ logs or backups into the public source repository.
 - Tier usage.
 - Balance and arrears summary.
 
+The currently verified five read-only upstream endpoints do not require a
+login, verification code or Cookie. The app does not invent an authentication
+flow. If the upstream starts requiring authentication, the affected account is
+suspended and the authorization design must be reviewed before adding a
+controlled session flow.
+
 ## Year and month statistics
 
 The **Statistics** tab derives an annual overview, a fixed twelve-month trend
@@ -61,6 +67,36 @@ No arbitrary URL or customer-number input is available in the Ingress page.
 The client has a fixed path allowlist and uses `GET` only. History responses are
 bounded to 500 records per category, meters to 50 and tiers to 20; truncation is
 reported as a contract issue instead of allowing unbounded cache or UI growth.
+
+## MQTT Discovery
+
+The app requires Supervisor's `mqtt` service and publishes Home Assistant MQTT
+Discovery automatically. No broker username or password is stored in options.
+
+- Discovery prefix: `homeassistant`.
+- Global availability topic: `huaxin_water/status`.
+- Per-account JSON state: `huaxin_water/<account_id>/state`.
+- Per-account device identifier: `huaxin_water_<account_id>`.
+- Discovery, state and availability use QoS 1 and retain.
+- The direct MQTT connection sets a retained `offline` LWT and publishes
+  retained `online` after connecting.
+- Home Assistant's `homeassistant/status=online` birth message causes Discovery
+  and the latest state to be republished.
+
+Each account creates sensors for balance, arrears, latest billing-period charge
+and usage, current-year charge and usage, latest meter reading, meter count,
+payment status, billing period, update time and data status, plus a connectivity
+binary sensor. Monetary sensors use the Home Assistant standard currency unit
+`CNY`; water sensors use `m³`.
+
+The latest billing period is the newest parseable month that contains a water
+record. Payment status is derived only from arrears: positive means `欠费`, zero
+means `无欠费`, and a missing value means `未知`.
+
+MQTT payloads never include names, addresses, full or masked customer numbers,
+meter registration numbers, payment history or water-record arrays. A small
+`/data/mqtt-topics.json` registry stores topic names only so removed accounts
+and retired entities can have their retained Discovery/state topics cleared.
 
 ## State and recovery
 

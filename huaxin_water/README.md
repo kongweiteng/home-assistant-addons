@@ -20,6 +20,8 @@ Supervisor management permissions.
 - Low-frequency polling plus a per-account manual refresh cooldown.
 - Per-account annual overview, twelve-month usage/payment trend and cross-year
   comparison derived locally from the bounded history already returned.
+- Retained MQTT Discovery devices and aggregate entities for every configured
+  account, with LWT availability and no manual Home Assistant YAML.
 - Synthetic tests only; no real customer number or upstream response is stored
   in this public repository.
 
@@ -32,6 +34,9 @@ Supervisor management permissions.
 4. Review the plain-HTTP warning in [DOCS.md](DOCS.md). The current default
    upstream is blocked until `allow_insecure_http` is explicitly enabled.
 5. Start the app and open it from the Home Assistant sidebar.
+
+The app requires a Home Assistant MQTT service. Broker connection details are
+provided by Supervisor at runtime and are never added to the app options.
 
 This source release has no official relationship with Tianjin Huaxin Water.
 The upstream H5 interface is undocumented and may change without notice.

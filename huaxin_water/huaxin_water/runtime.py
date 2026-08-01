@@ -12,6 +12,7 @@ from .cache import CacheStore
 from .client import ENDPOINT_PATHS, HuaxinClient, UpstreamError
 from .config import AccountConfig, AppConfig
 from .normalize import ContractError, normalize_response
+from .mqtt import mqtt_state_from_account
 from .statistics import build_statistics
 
 
@@ -25,14 +26,18 @@ class WaterService:
         config: AppConfig,
         client: HuaxinClient,
         cache: CacheStore,
+        publisher=None,
     ) -> None:
         self.config = config
         self.client = client
         self.cache = cache
+        self.publisher = publisher
         self._lock = threading.RLock()
         self._busy: set[str] = set()
         self._last_manual_refresh: dict[str, float] = {}
         self._state = self._reconcile(cache.load())
+        for account in self.config.accounts:
+            self._publish_account(account.account_id)
 
     def run_forever(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
@@ -80,14 +85,19 @@ class WaterService:
                 account.get("status", "starting")
                 for account in self._state["accounts"].values()
             ]
+            status = _service_status(statuses)
+            mqtt_connected = self.publisher is None or self.publisher.connected
+            if not mqtt_connected and status == "good":
+                status = "degraded"
             return {
                 "service": "huaxin_water",
-                "version": "0.2.0",
-                "status": _service_status(statuses),
+                "version": "0.3.0",
+                "status": status,
                 "configured_accounts": len(statuses),
                 "refreshing_accounts": len(self._busy),
                 "updated_at": self._state.get("updated_at"),
                 "insecure_http_enabled": self.config.base_url.startswith("http://"),
+                "mqtt_connected": mqtt_connected,
             }
 
     def accounts_snapshot(self) -> dict:
@@ -184,6 +194,24 @@ class WaterService:
                 value = self._state["accounts"].get(account.account_id)
                 if value is not None:
                     value["refreshing"] = False
+            self._publish_account(account.account_id)
+
+    def _publish_account(self, account_id: str) -> None:
+        if self.publisher is None:
+            return
+        try:
+            with self._lock:
+                value = self._state["accounts"].get(account_id)
+                if value is None:
+                    return
+                snapshot = self._public_account(value, True)
+            self.publisher.publish_snapshot(
+                account_id, mqtt_state_from_account(snapshot)
+            )
+        except Exception as error:
+            LOGGER.warning(
+                "account=%s mqtt_publish=%s", account_id, type(error).__name__
+            )
 
     def _record_success(self, account_id, endpoint, attempted_at, normalized) -> None:
         with self._lock:

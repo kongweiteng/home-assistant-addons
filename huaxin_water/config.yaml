@@ -1,7 +1,7 @@
 name: Huaxin Water
-version: "0.2.0"
+version: "0.3.0"
 slug: huaxin_water
-description: "Read-only multi-account water usage and payment history for Tianjin Huaxin Water."
+description: "Read-only multi-account water history, statistics and MQTT Discovery for Tianjin Huaxin Water."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/huaxin_water"
 arch:
   - amd64
@@ -13,6 +13,8 @@ ingress: true
 ingress_port: 8098
 panel_icon: mdi:water-outline
 panel_title: Huaxin Water
+services:
+  - mqtt:need
 backup: cold
 watchdog: http://[HOST]:[PORT:8098]/health
 stage: experimental

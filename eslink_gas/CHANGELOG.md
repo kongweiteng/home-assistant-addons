@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2
+
+- Identify the private headless browser as desktop WeChat so the service hall
+  selects its observed WeChat authentication channel instead of the unrelated
+  desktop web-login channel.
+
 ## 0.1.1
 
 - Use a Debian package mirror build argument selected for reliable HAOS builds

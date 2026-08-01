@@ -20,6 +20,11 @@ USER_INFO_PATH = "/api/usmart/v1.0/iot/userInfoQuery"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 PORTAL_SETTLE_SECONDS = 2.0
 CHROMEDRIVER_BINARY = "/usr/bin/chromedriver"
+DESKTOP_WECHAT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 "
+    "MicroMessenger/3.9.0 WindowsWechat"
+)
 
 
 class GasClientError(RuntimeError):
@@ -217,6 +222,7 @@ def chrome_arguments(profile_dir: Path) -> tuple[str, ...]:
         "--no-first-run",
         "--no-default-browser-check",
         "--remote-debugging-port=0",
+        f"--user-agent={DESKTOP_WECHAT_USER_AGENT}",
         f"--user-data-dir={profile_dir}",
     )
 

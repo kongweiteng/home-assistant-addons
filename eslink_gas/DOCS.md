@@ -25,6 +25,11 @@ the backend session is valid: the Add-on waits for a renewed `SESSION` cookie
 or a settled, fully rendered service-hall page, then verifies the session by
 loading the read-only meter page and query.
 
+The private Chromium session identifies itself as desktop WeChat because the
+service-hall frontend selects a different authentication channel for ordinary
+desktop browsers. This fixed browser identity contains no account or device
+identifier and does not bypass upstream authentication.
+
 ```yaml
 accounts:
   - id: home

@@ -19,6 +19,7 @@ from eslink_gas.client import (
     AuthRequiredError,
     CHROMEDRIVER_BINARY,
     ContractError,
+    DESKTOP_WECHAT_USER_AGENT,
     EslinkBrowserClient,
     FetchResult,
     USER_INFO_PATH,
@@ -145,7 +146,7 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
         self.assertNotIn("hassio_api", config)
-        self.assertIn('version: "0.1.1"', config)
+        self.assertIn('version: "0.1.2"', config)
 
         build = (ADDON / "build.yaml").read_text(encoding="utf-8")
         dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
@@ -208,6 +209,11 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertIn("--disable-dev-shm-usage", args)
         self.assertTrue(any(arg.startswith("--user-data-dir=") for arg in args))
         self.assertEqual(CHROMEDRIVER_BINARY, "/usr/bin/chromedriver")
+        self.assertIn("MicroMessenger", DESKTOP_WECHAT_USER_AGENT)
+        self.assertIn(
+            f"--user-agent={DESKTOP_WECHAT_USER_AGENT}",
+            args,
+        )
         blocked = "\n".join(blocked_third_party_urls())
         self.assertIn("amap.com", blocked)
         self.assertIn("cnzz.com", blocked)

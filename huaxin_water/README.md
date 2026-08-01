@@ -35,8 +35,9 @@ Supervisor management permissions.
    upstream is blocked until `allow_insecure_http` is explicitly enabled.
 5. Start the app and open it from the Home Assistant sidebar.
 
-The app requires a Home Assistant MQTT service. Broker connection details are
-provided by Supervisor at runtime and are never added to the app options.
+The app prefers a Home Assistant Supervisor MQTT service. If the installed
+broker does not register one, configure its connection only in private add-on
+options; credentials never enter Discovery, state or the public repository.
 
 This source release has no official relationship with Tianjin Huaxin Water.
 The upstream H5 interface is undocumented and may change without notice.

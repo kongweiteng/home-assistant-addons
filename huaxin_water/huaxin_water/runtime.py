@@ -91,7 +91,7 @@ class WaterService:
                 status = "degraded"
             return {
                 "service": "huaxin_water",
-                "version": "0.3.0",
+                "version": "0.3.1",
                 "status": status,
                 "configured_accounts": len(statuses),
                 "refreshing_accounts": len(self._busy),

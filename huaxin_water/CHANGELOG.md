@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Keep Supervisor MQTT service discovery as the preferred path, while allowing
+  private broker settings for EMQX and other brokers that do not register that
+  service.
+- Fail with a bounded, non-secret configuration error when neither MQTT source
+  is available.
+
 ## 0.3.0
 
 - Add retained MQTT Discovery devices and aggregate entities for every

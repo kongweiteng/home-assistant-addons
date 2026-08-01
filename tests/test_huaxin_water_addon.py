@@ -269,8 +269,16 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
         self.assertIn("services:", config)
-        self.assertIn("  - mqtt:need", config)
-        self.assertIn('version: "0.3.0"', config)
+        self.assertIn("  - mqtt:want", config)
+        self.assertIn('mqtt_password: "password?"', config)
+        self.assertIn('version: "0.3.1"', config)
+        run_script = (ADDON / "run.sh").read_text(encoding="utf-8")
+        self.assertIn("Supervisor-provided MQTT service", run_script)
+        self.assertIn("Using configured MQTT broker", run_script)
+        self.assertIn('[ -n "$MQTT_SERVICE_JSON" ] && jq -e', run_script)
+        self.assertIn(".data.host | length > 0", run_script)
+        self.assertIn('.data.port | type == "number"', run_script)
+        self.assertNotIn("Supervisor MQTT service is required", run_script)
 
     def test_mqtt_discovery_is_per_account_retained_and_privacy_safe(self) -> None:
         messages = discovery_messages(("home", "studio"))
@@ -665,7 +673,7 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertEqual(len(account["endpoints"]), 5)
         self.assertEqual(account["statistics"]["latest_year"], 2026)
         self.assertEqual(len(account["statistics"]["monthly_by_year"]["2026"]), 12)
-        self.assertIn('"version":"0.3.0"', health_text)
+        self.assertIn('"version":"0.3.1"', health_text)
 
     def test_runtime_publishes_only_projected_account_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,7 +14,7 @@ DISCOVERY_PREFIX = "homeassistant"
 BASE_TOPIC = "huaxin_water"
 MQTT_STATUS_TOPIC = f"{BASE_TOPIC}/status"
 HOME_ASSISTANT_STATUS_TOPIC = "homeassistant/status"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LOGGER = logging.getLogger(__name__)
 
 

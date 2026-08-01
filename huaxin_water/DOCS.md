@@ -12,6 +12,11 @@ poll_interval_minutes: 360
 request_timeout_seconds: 15
 stale_after_minutes: 1440
 manual_refresh_cooldown_seconds: 60
+mqtt_host: ""
+mqtt_port: 1883
+mqtt_username: ""
+mqtt_password: ""
+mqtt_ssl: false
 ```
 
 - `accounts[].id` is a unique local alias containing lowercase letters,
@@ -25,6 +30,10 @@ manual_refresh_cooldown_seconds: 60
   explicit acknowledgement. Customer numbers and returned personal data then
   travel over plaintext HTTP outside Home Assistant.
 - Polling is at least hourly. Manual refresh is limited per account.
+- MQTT connection settings may stay empty when the installed broker registers a
+  Supervisor `mqtt` service. Brokers such as EMQX that do not register that
+  service require a reachable host, port and their private credentials here.
+  Supervisor-provided settings take precedence when available.
 
 The example customer number is synthetic. Do not copy real options, caches,
 logs or backups into the public source repository.
@@ -70,8 +79,10 @@ reported as a contract issue instead of allowing unbounded cache or UI growth.
 
 ## MQTT Discovery
 
-The app requires Supervisor's `mqtt` service and publishes Home Assistant MQTT
-Discovery automatically. No broker username or password is stored in options.
+The app publishes Home Assistant MQTT Discovery automatically. It first uses a
+Supervisor-provided `mqtt` service; otherwise it uses the broker connection
+stored in private add-on options. Credentials are never included in Discovery,
+state, logs or the public repository.
 
 - Discovery prefix: `homeassistant`.
 - Global availability topic: `huaxin_water/status`.

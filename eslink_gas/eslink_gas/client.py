@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import json
 import logging
@@ -9,7 +10,7 @@ import os
 from pathlib import Path
 import time
 from typing import Callable
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from .config import AccountConfig, AppConfig
 
@@ -19,7 +20,7 @@ UTILITY_ORIGIN = "http://utilityserve-mobile.eslink.cc"
 USER_INFO_PATH = "/api/usmart/v1.0/iot/userInfoQuery"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 PORTAL_SETTLE_SECONDS = 2.0
-IOT_SETTLE_SECONDS = 2.0
+IOT_SETTLE_SECONDS = 5.0
 CHROMEDRIVER_BINARY = "/usr/bin/chromedriver"
 DESKTOP_WECHAT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -130,14 +131,23 @@ class EslinkBrowserClient:
     def _fetch_account(self, driver, account: AccountConfig) -> dict:
         driver.get(build_iot_url(account))
         deadline = self._clock() + self.config.page_timeout_s
+        ready_since: float | None = None
         while self._clock() < deadline:
+            observed = _observed_query_response(driver)
+            if observed is not None:
+                return parse_fetch_response(observed)
             title = str(getattr(driver, "title", "") or "")
             if "物联网表充值" in title:
-                break
+                now = self._clock()
+                if ready_since is None:
+                    ready_since = now
+                elif now - ready_since >= IOT_SETTLE_SECONDS:
+                    break
+            else:
+                ready_since = None
             time.sleep(0.25)
         else:
             raise AuthRequiredError("iot_page_unavailable")
-        time.sleep(IOT_SETTLE_SECONDS)
         response = driver.execute_async_script(
             _FETCH_SCRIPT,
             USER_INFO_PATH,
@@ -158,6 +168,7 @@ class EslinkBrowserClient:
         options = Options()
         options.binary_location = self.browser_binary
         options.page_load_strategy = "eager"
+        options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
         for argument in chrome_arguments(self.profile_dir):
             options.add_argument(argument)
         service = Service(
@@ -265,6 +276,48 @@ def _portal_is_ready(driver) -> bool:
     return isinstance(body_text, str) and (
         "物联表缴费" in body_text or "物联表使用" in body_text
     )
+
+
+def _observed_query_response(driver) -> dict | None:
+    try:
+        entries = driver.get_log("performance")
+    except Exception:
+        return None
+    for entry in entries:
+        try:
+            envelope = json.loads(entry.get("message", "{}"))
+            message = envelope.get("message", {})
+            if message.get("method") != "Network.responseReceived":
+                continue
+            params = message.get("params", {})
+            response = params.get("response", {})
+            if urlsplit(str(response.get("url", ""))).path != USER_INFO_PATH:
+                continue
+            request_id = params.get("requestId")
+            if not isinstance(request_id, str) or not request_id:
+                continue
+            body_result = driver.execute_cdp_cmd(
+                "Network.getResponseBody", {"requestId": request_id}
+            )
+            body = body_result.get("body")
+            if not isinstance(body, str):
+                continue
+            if body_result.get("base64Encoded") is True:
+                body_bytes = base64.b64decode(body, validate=True)
+                truncated = len(body_bytes) > MAX_RESPONSE_BYTES
+                text = body_bytes[:MAX_RESPONSE_BYTES].decode("utf-8", errors="strict")
+            else:
+                encoded = body.encode("utf-8")
+                truncated = len(encoded) > MAX_RESPONSE_BYTES
+                text = encoded[:MAX_RESPONSE_BYTES].decode("utf-8", errors="strict")
+            return {
+                "status": int(response.get("status", 0)),
+                "text": text,
+                "truncated": truncated,
+            }
+        except Exception:
+            continue
+    return None
 
 
 _FETCH_SCRIPT = r"""

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- Prefer the meter page's own observed read-only account response, preserving
+  its complete initialization and request context; retain the bounded manual
+  query only as a compatibility fallback.
+
 ## 0.1.3
 
 - Wait briefly for the authenticated meter page scripts to settle before the

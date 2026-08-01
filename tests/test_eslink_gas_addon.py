@@ -6,7 +6,6 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest import mock
 from urllib.request import Request, urlopen
 
 
@@ -132,16 +131,48 @@ class FakeIotDriver:
     def __init__(self, payload):
         self.payload = payload
         self.visited = []
+        self.manual_query_called = False
+        self.performance_entries = [
+            {
+                "message": json.dumps(
+                    {
+                        "message": {
+                            "method": "Network.responseReceived",
+                            "params": {
+                                "requestId": "request-1",
+                                "response": {
+                                    "url": (
+                                        "http://utilityserve-mobile.eslink.cc"
+                                        "/api/usmart/v1.0/iot/userInfoQuery"
+                                    ),
+                                    "status": 200,
+                                },
+                            },
+                        }
+                    }
+                )
+            }
+        ]
 
     def get(self, url):
         self.visited.append(url)
 
-    def execute_async_script(self, script, *args):
+    def get_log(self, kind):
+        self.log_kind = kind
+        entries, self.performance_entries = self.performance_entries, []
+        return entries
+
+    def execute_cdp_cmd(self, method, params):
+        if method != "Network.getResponseBody" or params != {"requestId": "request-1"}:
+            raise AssertionError("unexpected CDP request")
         return {
-            "status": 200,
-            "text": json.dumps(self.payload),
-            "truncated": False,
+            "body": json.dumps(self.payload),
+            "base64Encoded": False,
         }
+
+    def execute_async_script(self, script, *args):
+        self.manual_query_called = True
+        raise AssertionError("the observed page response should be preferred")
 
 
 class EslinkGasAddonTests(unittest.TestCase):
@@ -165,7 +196,7 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
         self.assertNotIn("hassio_api", config)
-        self.assertIn('version: "0.1.3"', config)
+        self.assertIn('version: "0.1.4"', config)
 
         build = (ADDON / "build.yaml").read_text(encoding="utf-8")
         dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
@@ -218,8 +249,8 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertIn("userName=%E7%A4%BA%E4%BE%8B%20%E7%94%A8%E6%88%B7", url)
         self.assertEqual(USER_INFO_PATH, "/api/usmart/v1.0/iot/userInfoQuery")
         source = (ADDON / "eslink_gas" / "client.py").read_text(encoding="utf-8")
-        self.assertIn("IOT_SETTLE_SECONDS", source)
-        self.assertIn("time.sleep(IOT_SETTLE_SECONDS)", source)
+        self.assertIn("goog:loggingPrefs", source)
+        self.assertIn("Network.getResponseBody", source)
         self.assertNotIn("wechatPay", source)
         self.assertNotIn("/payment", source.lower())
         self.assertNotIn("/bind", source.lower())
@@ -305,7 +336,7 @@ class EslinkGasAddonTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             parse_fetch_response({"status": 200, "text": "{}", "truncated": True})
 
-    def test_meter_page_settles_before_the_bounded_query(self) -> None:
+    def test_meter_page_observed_response_precedes_manual_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config = load_config(pathlib.Path(tmp) / "options.json")
             client = EslinkBrowserClient(
@@ -314,10 +345,10 @@ class EslinkGasAddonTests(unittest.TestCase):
                 "/usr/bin/chromium",
             )
             driver = FakeIotDriver(upstream_payload())
-            with mock.patch("eslink_gas.client.time.sleep") as sleep:
-                result = client._fetch_account(driver, config.accounts[0])
+            result = client._fetch_account(driver, config.accounts[0])
             self.assertTrue(result["success"])
-            sleep.assert_called_once_with(2.0)
+            self.assertEqual(driver.log_kind, "performance")
+            self.assertFalse(driver.manual_query_called)
 
     def test_normalization_masks_personal_data_and_keeps_decimal_text(self) -> None:
         account = AccountConfig("home", "100000000001", "示例用户")

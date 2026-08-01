@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from urllib.request import Request, urlopen
 
 
@@ -125,6 +126,24 @@ class FakePortalDriver:
         return None
 
 
+class FakeIotDriver:
+    title = "物联网表充值"
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.visited = []
+
+    def get(self, url):
+        self.visited.append(url)
+
+    def execute_async_script(self, script, *args):
+        return {
+            "status": 200,
+            "text": json.dumps(self.payload),
+            "truncated": False,
+        }
+
+
 class EslinkGasAddonTests(unittest.TestCase):
     def test_required_files_and_minimum_permissions(self) -> None:
         for relative in (
@@ -146,7 +165,7 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertNotIn("privileged", config)
         self.assertNotIn("ports:", config)
         self.assertNotIn("hassio_api", config)
-        self.assertIn('version: "0.1.2"', config)
+        self.assertIn('version: "0.1.3"', config)
 
         build = (ADDON / "build.yaml").read_text(encoding="utf-8")
         dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
@@ -199,6 +218,8 @@ class EslinkGasAddonTests(unittest.TestCase):
         self.assertIn("userName=%E7%A4%BA%E4%BE%8B%20%E7%94%A8%E6%88%B7", url)
         self.assertEqual(USER_INFO_PATH, "/api/usmart/v1.0/iot/userInfoQuery")
         source = (ADDON / "eslink_gas" / "client.py").read_text(encoding="utf-8")
+        self.assertIn("IOT_SETTLE_SECONDS", source)
+        self.assertIn("time.sleep(IOT_SETTLE_SECONDS)", source)
         self.assertNotIn("wechatPay", source)
         self.assertNotIn("/payment", source.lower())
         self.assertNotIn("/bind", source.lower())
@@ -283,6 +304,20 @@ class EslinkGasAddonTests(unittest.TestCase):
             )
         with self.assertRaises(ContractError):
             parse_fetch_response({"status": 200, "text": "{}", "truncated": True})
+
+    def test_meter_page_settles_before_the_bounded_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = load_config(pathlib.Path(tmp) / "options.json")
+            client = EslinkBrowserClient(
+                config,
+                pathlib.Path(tmp) / "profile",
+                "/usr/bin/chromium",
+            )
+            driver = FakeIotDriver(upstream_payload())
+            with mock.patch("eslink_gas.client.time.sleep") as sleep:
+                result = client._fetch_account(driver, config.accounts[0])
+            self.assertTrue(result["success"])
+            sleep.assert_called_once_with(2.0)
 
     def test_normalization_masks_personal_data_and_keeps_decimal_text(self) -> None:
         account = AccountConfig("home", "100000000001", "示例用户")

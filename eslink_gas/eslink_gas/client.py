@@ -19,6 +19,7 @@ UTILITY_ORIGIN = "http://utilityserve-mobile.eslink.cc"
 USER_INFO_PATH = "/api/usmart/v1.0/iot/userInfoQuery"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 PORTAL_SETTLE_SECONDS = 2.0
+IOT_SETTLE_SECONDS = 2.0
 CHROMEDRIVER_BINARY = "/usr/bin/chromedriver"
 DESKTOP_WECHAT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -136,6 +137,7 @@ class EslinkBrowserClient:
             time.sleep(0.25)
         else:
             raise AuthRequiredError("iot_page_unavailable")
+        time.sleep(IOT_SETTLE_SECONDS)
         response = driver.execute_async_script(
             _FETCH_SCRIPT,
             USER_INFO_PATH,

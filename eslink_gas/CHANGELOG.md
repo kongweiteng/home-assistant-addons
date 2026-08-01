@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- Wait briefly for the authenticated meter page scripts to settle before the
+  bounded read-only account query, avoiding an initialization race observed on
+  HAOS.
+
 ## 0.1.2
 
 - Identify the private headless browser as desktop WeChat so the service hall

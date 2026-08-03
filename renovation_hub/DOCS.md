@@ -37,6 +37,18 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 原始媒体不写入 SQLite 或便携账本 ZIP。正式部署前必须单独确认 `/media` 后端、容量、备份与恢复方式。
 
+## 便携包只读影子导入
+
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`format_version=1`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub 导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+
+- ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
+- manifest 文件全集、每个普通文件的大小和 SHA-256。
+- SQLite `integrity_check`、外键、流水、退款关系、有效/撤销状态、订金和退款上限。
+- `ledger.json`、三个 CSV、`audit_log.jsonl` 与 SQLite 的逐字段一致性。
+- 分类、标签、月份汇总、附件元数据/文件哈希、审计数量/顺序/前后值。
+
+成功导入后，`/data/shadow/<来源 SHA-256>/` 保存只读来源快照、全部附件、Hub 兼容 `ledger.sqlite3` 和 `report.json`。报告只包含结构计数、校验布尔值和摘要哈希，不包含金额、商家、备注、附件正文或绝对私有路径。重复导入会重新校验来源快照、规范化数据库和附件，不会仅返回旧报告。
+
 ## Writer 状态
 
 正常迁移顺序为：
@@ -105,8 +117,8 @@ python3 scripts/fixture_preview.py --static-dir frontend/dist --port 8101
 
 1. 停止新写入并记录 writer mode、数据库状态、最后流水、媒体数量和便携包 SHA-256。
 2. 使用 HAOS 冷备份恢复 `/data`；媒体原件还必须从已验证的 `/media` 独立备份恢复。
-3. 如需从便携包重建账本，先在 `read_only` 影子目录校验和导入。
-4. 对比付款、退款、分类、标签、附件、审计、净额、项目/阶段/空间/事件和媒体 manifest 后，另行批准 writer 切换。
+3. 如需从便携包重建账本，先在 `read_only` 影子目录执行全不变量校验和导入。
+4. 对比付款、退款、订金、有效/撤销状态、分类、标签、月份、附件、审计、项目/阶段/空间/事件和媒体 manifest 后，另行批准 writer 切换。
 5. 切换后若已经产生新真实账目或媒体，禁止使用旧数据库直接覆盖；必须先导出增量并执行无损反向迁移。
 
 本地源码、合成测试或双架构构建通过不能替代 HAOS Ingress、大文件、存储容量、重启恢复和真实微信链路验收。

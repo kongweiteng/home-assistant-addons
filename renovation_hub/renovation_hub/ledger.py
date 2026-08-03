@@ -9,15 +9,29 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 import unicodedata
 import uuid
 import zipfile
 from typing import Any, Callable
+
+from .portable import (
+    FORMAT_ID as CANONICAL_PORTABLE_FORMAT_ID,
+    FORMAT_VERSION as CANONICAL_PORTABLE_FORMAT_VERSION,
+    PortableArchiveError,
+    digest_json as portable_digest_json,
+    monthly_summary as portable_monthly_summary,
+    normalized_member_name,
+    sha256_file as portable_sha256_file,
+    summary_from_transactions as portable_summary_from_transactions,
+    verify_and_extract as verify_and_extract_canonical,
+    verify_extracted as verify_extracted_canonical,
+)
 
 
 FORMAT_ID = "kanhuwan-renovation-ledger@1"
@@ -181,6 +195,7 @@ class LedgerStore:
                     is_deposit INTEGER NOT NULL DEFAULT 0 CHECK(is_deposit IN (0,1)),
                     original_payment_id TEXT REFERENCES transactions(id),
                     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','voided')),
+                    void_reason TEXT NOT NULL DEFAULT '',
                     source_ref TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -194,6 +209,7 @@ class LedgerStore:
                 CREATE TABLE IF NOT EXISTS transaction_tags (
                     transaction_id TEXT NOT NULL REFERENCES transactions(id),
                     tag_normalized TEXT NOT NULL REFERENCES tags(normalized),
+                    position INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(transaction_id, tag_normalized)
                 );
                 CREATE TABLE IF NOT EXISTS attachments (
@@ -228,6 +244,20 @@ class LedgerStore:
                 );
                 """
             )
+            transaction_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(transactions)")
+            }
+            if "void_reason" not in transaction_columns:
+                connection.execute(
+                    "ALTER TABLE transactions ADD COLUMN void_reason TEXT NOT NULL DEFAULT ''"
+                )
+            tag_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(transaction_tags)")
+            }
+            if "position" not in tag_columns:
+                connection.execute(
+                    "ALTER TABLE transaction_tags ADD COLUMN position INTEGER NOT NULL DEFAULT 0"
+                )
             defaults = {
                 "schema_version": str(SCHEMA_VERSION),
                 "format_id": FORMAT_ID,
@@ -274,7 +304,7 @@ class LedgerStore:
             }
         return {
             "service": "renovation_hub",
-            "version": "0.1.1",
+            "version": "0.1.2",
             "schema_version": int(meta["schema_version"]),
             "format_id": meta["format_id"],
             "writer_mode": meta["writer_mode"],
@@ -327,20 +357,20 @@ class LedgerStore:
 
     def _set_tags(self, connection: sqlite3.Connection, transaction_id: str, tags: list[str]) -> None:
         connection.execute("DELETE FROM transaction_tags WHERE transaction_id=?", (transaction_id,))
-        for tag in tags:
+        for position, tag in enumerate(tags):
             normalized = unicodedata.normalize("NFC", tag).casefold()
             connection.execute(
                 "INSERT INTO tags(normalized,display_name) VALUES (?,?) ON CONFLICT(normalized) DO UPDATE SET display_name=excluded.display_name",
                 (normalized, tag),
             )
             connection.execute(
-                "INSERT INTO transaction_tags(transaction_id,tag_normalized) VALUES (?,?)",
-                (transaction_id, normalized),
+                "INSERT INTO transaction_tags(transaction_id,tag_normalized,position) VALUES (?,?,?)",
+                (transaction_id, normalized, position),
             )
 
     def _tags(self, connection: sqlite3.Connection, transaction_id: str) -> list[str]:
         rows = connection.execute(
-            "SELECT tags.display_name FROM transaction_tags JOIN tags ON tags.normalized=transaction_tags.tag_normalized WHERE transaction_id=? ORDER BY tags.display_name",
+            "SELECT tags.display_name FROM transaction_tags JOIN tags ON tags.normalized=transaction_tags.tag_normalized WHERE transaction_id=? ORDER BY transaction_tags.position,tags.display_name",
             (transaction_id,),
         )
         return [row[0] for row in rows]
@@ -602,7 +632,10 @@ class LedgerStore:
                 refunds = connection.execute("SELECT count(*) FROM transactions WHERE type='refund' AND status='active' AND original_payment_id=?", (transaction_id,)).fetchone()[0]
                 if refunds:
                     raise LedgerError("payment_has_refunds", "付款存在有效退款，不能直接撤销", status=409)
-            connection.execute("UPDATE transactions SET status='voided',updated_at=? WHERE id=?", (utc_now(), transaction_id))
+            connection.execute(
+                "UPDATE transactions SET status='voided',void_reason=?,updated_at=? WHERE id=?",
+                (reason, utc_now(), transaction_id),
+            )
             self._after_transaction_update(connection, transaction_id, payload)
             updated = connection.execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone()
             result = self._row_json(connection, updated)
@@ -840,62 +873,173 @@ class LedgerStore:
             for row in connection.execute("SELECT * FROM audit_log ORDER BY id"):
                 handle.write(canonical_json(dict(row)) + "\n")
 
-    def verify_portable(self, zip_path: str | Path) -> dict[str, Any]:
-        zip_path = Path(zip_path)
+    def _read_portable_manifest(self, zip_path: Path) -> dict[str, Any]:
         if not zip_path.is_file():
             raise LedgerError("import_invalid", "便携包不存在", status=404)
         if zip_path.stat().st_size > 512 * 1024 * 1024:
             raise LedgerError("import_invalid", "便携包超过大小上限")
-        with zipfile.ZipFile(zip_path) as archive:
-            names = archive.namelist()
-            if len(names) > 10000 or len(names) != len(set(names)):
-                raise LedgerError("import_invalid", "便携包文件数量或重复路径非法")
-            for name in names:
-                path = Path(name)
-                if path.is_absolute() or ".." in path.parts or "\\" in name:
-                    raise LedgerError("import_invalid", "便携包包含危险路径")
-            required = {"manifest.json", "ledger.json", "bookkeeping.sqlite3", "schema.json", "FORMAT.md", "verify.py"}
-            if not required.issubset(names):
-                raise LedgerError("import_invalid", "便携包缺少必需文件")
-            manifest = json.loads(archive.read("manifest.json"))
-            if manifest.get("format_id") != FORMAT_ID or manifest.get("schema_version") != SCHEMA_VERSION:
-                raise LedgerError("import_invalid", "便携包格式或版本不兼容")
-            expected_paths = {entry["path"] for entry in manifest.get("files", [])}
-            if expected_paths != set(names) - {"manifest.json"}:
-                raise LedgerError("import_invalid", "manifest 文件集合不一致")
-            for entry in manifest["files"]:
-                data = archive.read(entry["path"])
-                if len(data) != entry["size_bytes"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
-                    raise LedgerError("import_invalid", f"文件校验失败：{entry['path']}")
-            ledger = json.loads(archive.read("ledger.json"))
-        return {"valid": True, "format_id": FORMAT_ID, "sha256": sha256_file(zip_path), "transaction_count": len(ledger.get("transactions", []))}
+        try:
+            with zipfile.ZipFile(zip_path) as archive:
+                matches = [info for info in archive.infolist() if info.filename == "manifest.json"]
+                if len(matches) != 1 or matches[0].file_size > 1024 * 1024:
+                    raise LedgerError("import_invalid", "便携包 manifest 缺失或过大")
+                manifest = json.loads(archive.read(matches[0]))
+        except LedgerError:
+            raise
+        except (OSError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+            raise LedgerError("import_invalid", "便携包 manifest 无法读取") from exc
+        if not isinstance(manifest, dict):
+            raise LedgerError("import_invalid", "便携包 manifest 不是对象")
+        return manifest
+
+    @staticmethod
+    def _canonical_counts(state: dict[str, Any]) -> dict[str, int]:
+        invariants = state["invariants"]
+        return {
+            "transactions": int(invariants["transaction_count"]),
+            "active_payments": int(invariants["active_payment_count"]),
+            "active_refunds": int(invariants["active_refund_count"]),
+            "active_deposits": int(invariants["active_deposit_count"]),
+            "void_transactions": int(invariants["void_transaction_count"]),
+            "tag_links": int(invariants["transaction_tag_count"]),
+            "attachments": int(invariants["attachment_count"]),
+            "audit_events": int(invariants["audit_count"]),
+            "months": len(state["monthly_summary"]),
+        }
+
+    def _verify_canonical_portable(self, zip_path: Path) -> dict[str, Any]:
+        temporary = Path(tempfile.mkdtemp(prefix=".verify-", dir=self.shadow_dir))
+        try:
+            result = verify_and_extract_canonical(zip_path, temporary / "source")
+        except PortableArchiveError as exc:
+            raise LedgerError("import_invalid", str(exc)) from exc
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
+        state = result.pop("state")
+        return {
+            "valid": True,
+            "format_id": result["format_id"],
+            "format_version": result["format_version"],
+            "sha256": result["archive_sha256"],
+            "size_bytes": result["archive_size_bytes"],
+            "verified_file_count": result["verified_file_count"],
+            "attachments_included": result["attachments_included"],
+            "counts": self._canonical_counts(state),
+            "digests": result["digests"],
+        }
+
+    def _verify_legacy_portable(self, zip_path: Path) -> dict[str, Any]:
+        try:
+            with zipfile.ZipFile(zip_path) as archive:
+                infos = archive.infolist()
+                names = [info.filename for info in infos]
+                if len(names) > 10000 or len(names) != len(set(names)):
+                    raise LedgerError("import_invalid", "便携包文件数量或重复路径非法")
+                expanded = 0
+                for info in infos:
+                    normalized_member_name(info.filename, allow_directory=info.is_dir())
+                    mode = (info.external_attr >> 16) & 0xFFFF
+                    if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                        raise LedgerError("import_invalid", "便携包只允许普通文件和目录")
+                    expanded += info.file_size
+                if expanded > 1024 * 1024 * 1024:
+                    raise LedgerError("import_invalid", "便携包解压后大小超过上限")
+                required = {
+                    "manifest.json",
+                    "ledger.json",
+                    "bookkeeping.sqlite3",
+                    "schema.json",
+                    "FORMAT.md",
+                    "verify.py",
+                }
+                if not required.issubset(names):
+                    raise LedgerError("import_invalid", "便携包缺少必需文件")
+                manifest = json.loads(archive.read("manifest.json"))
+                if manifest.get("format_id") != FORMAT_ID or manifest.get("schema_version") != SCHEMA_VERSION:
+                    raise LedgerError("import_invalid", "便携包格式或版本不兼容")
+                entries = manifest.get("files", [])
+                if not isinstance(entries, list):
+                    raise LedgerError("import_invalid", "manifest 文件清单无效")
+                expected_paths = {entry.get("path") for entry in entries if isinstance(entry, dict)}
+                file_names = {name for name in names if not name.endswith("/")}
+                if expected_paths != file_names - {"manifest.json"}:
+                    raise LedgerError("import_invalid", "manifest 文件集合不一致")
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise LedgerError("import_invalid", "manifest 文件项无效")
+                    data = archive.read(str(entry["path"]))
+                    if len(data) != entry.get("size_bytes") or hashlib.sha256(data).hexdigest() != entry.get("sha256"):
+                        raise LedgerError("import_invalid", "便携包文件校验失败")
+                ledger = json.loads(archive.read("ledger.json"))
+        except LedgerError:
+            raise
+        except PortableArchiveError as exc:
+            raise LedgerError("import_invalid", str(exc)) from exc
+        except (OSError, RuntimeError, zipfile.BadZipFile, json.JSONDecodeError) as exc:
+            raise LedgerError("import_invalid", "便携包无法读取") from exc
+        return {
+            "valid": True,
+            "format_id": FORMAT_ID,
+            "sha256": sha256_file(zip_path),
+            "transaction_count": len(ledger.get("transactions", [])),
+        }
+
+    def verify_portable(self, zip_path: str | Path) -> dict[str, Any]:
+        path = Path(zip_path)
+        manifest = self._read_portable_manifest(path)
+        if (
+            manifest.get("format_id") == CANONICAL_PORTABLE_FORMAT_ID
+            and manifest.get("format_version") == CANONICAL_PORTABLE_FORMAT_VERSION
+        ):
+            return self._verify_canonical_portable(path)
+        return self._verify_legacy_portable(path)
 
     def inspect_import(self, zip_path: str | Path) -> dict[str, Any]:
-        verified = self.verify_portable(zip_path)
-        with zipfile.ZipFile(zip_path) as archive:
+        path = Path(zip_path)
+        verified = self.verify_portable(path)
+        if verified.get("format_id") == CANONICAL_PORTABLE_FORMAT_ID:
+            return verified
+        with zipfile.ZipFile(path) as archive:
             ledger = json.loads(archive.read("ledger.json"))
         payments = [item for item in ledger.get("transactions", []) if item.get("type") == "payment"]
         refunds = [item for item in ledger.get("transactions", []) if item.get("type") == "refund"]
-        active_total = sum((1 if item.get("type") == "payment" else -1) * int(item.get("amount_cents", 0)) for item in ledger.get("transactions", []) if item.get("status") == "active")
-        return {**verified, "payments": len(payments), "refunds": len(refunds), "net_amount_cents": active_total}
+        return {**verified, "payments": len(payments), "refunds": len(refunds)}
 
     def import_shadow(self, zip_path: str | Path) -> dict[str, Any]:
+        path = Path(zip_path)
+        manifest = self._read_portable_manifest(path)
+        if (
+            manifest.get("format_id") == CANONICAL_PORTABLE_FORMAT_ID
+            and manifest.get("format_version") == CANONICAL_PORTABLE_FORMAT_VERSION
+        ):
+            return self._import_canonical_shadow(path)
+        return self._import_legacy_shadow(path)
+
+    def _import_legacy_shadow(self, zip_path: Path) -> dict[str, Any]:
         inspected = self.inspect_import(zip_path)
         digest = inspected["sha256"]
         destination = self.shadow_dir / digest
         if destination.exists():
             report_path = destination / "report.json"
-            return json.loads(report_path.read_text())
+            if not report_path.is_file():
+                raise LedgerError("invariant_mismatch", "既有影子目录不完整")
+            return {**json.loads(report_path.read_text()), "idempotent_replay": True}
         destination.mkdir(parents=True, mode=0o700)
         with zipfile.ZipFile(zip_path) as archive:
             ledger = json.loads(archive.read("ledger.json"))
-        shadow = LedgerStore(destination / "ledger.sqlite3", data_dir=destination, share_dir=destination / "portable")
+        shadow = LedgerStore(
+            destination / "ledger.sqlite3",
+            data_dir=destination,
+            share_dir=destination / "portable",
+        )
         shadow.set_writer_mode("read_only", force_initial=True)
         shadow.set_writer_mode("shadow_validated")
         with shadow._connect() as connection:
+            connection.execute("DELETE FROM audit_log")
+            connection.execute("DELETE FROM attachments")
+            connection.execute("DELETE FROM transaction_tags")
             connection.execute("DELETE FROM transactions")
             connection.execute("DELETE FROM tags")
-            connection.execute("DELETE FROM transaction_tags")
             id_map: dict[str, str] = {}
             for item in ledger.get("transactions", []):
                 if item.get("type") != "payment":
@@ -904,30 +1048,396 @@ class LedgerStore:
                 id_map[str(item.get("id") or item.get("legacy_id"))] = transaction_id
                 now = str(item.get("created_at") or utc_now())
                 connection.execute(
-                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,status,source_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (transaction_id, item.get("legacy_id"), "payment", _positive_cents(item.get("amount_cents")), _validate_date(item.get("occurred_on")), _text(item.get("main_category"), "main_category", 80, required=True), _text(item.get("merchant"), "merchant", 200), _text(item.get("note"), "note", 2000), int(bool(item.get("is_deposit"))), item.get("status", "active"), _text(item.get("source_ref"), "source_ref", 256), now, str(item.get("updated_at") or now)),
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,status,void_reason,source_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        transaction_id,
+                        item.get("legacy_id"),
+                        "payment",
+                        _positive_cents(item.get("amount_cents")),
+                        _validate_date(item.get("occurred_on")),
+                        _text(item.get("main_category"), "main_category", 80, required=True),
+                        _text(item.get("merchant"), "merchant", 200),
+                        _text(item.get("note"), "note", 2000),
+                        int(bool(item.get("is_deposit"))),
+                        item.get("status", "active"),
+                        _text(item.get("void_reason"), "void_reason", 500),
+                        _text(item.get("source_ref"), "source_ref", 256),
+                        now,
+                        str(item.get("updated_at") or now),
+                    ),
                 )
                 shadow._set_tags(connection, transaction_id, normalize_tags(item.get("tags", [])))
             for item in ledger.get("transactions", []):
                 if item.get("type") != "refund":
                     continue
                 transaction_id = str(item.get("id") or uuid.uuid4())
-                source_original = str(item.get("original_payment_id") or item.get("original_legacy_id") or "")
+                source_original = str(
+                    item.get("original_payment_id") or item.get("original_legacy_id") or ""
+                )
                 original = id_map.get(source_original, source_original)
                 if not original:
                     raise LedgerError("invariant_mismatch", "退款缺少原付款关系")
                 now = str(item.get("created_at") or utc_now())
                 connection.execute(
-                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,note,original_payment_id,status,source_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (transaction_id, item.get("legacy_id"), "refund", _positive_cents(item.get("amount_cents")), _validate_date(item.get("occurred_on")), _text(item.get("note"), "note", 2000), original, item.get("status", "active"), _text(item.get("source_ref"), "source_ref", 256), now, str(item.get("updated_at") or now)),
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,merchant,note,is_deposit,original_payment_id,status,void_reason,source_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        transaction_id,
+                        item.get("legacy_id"),
+                        "refund",
+                        _positive_cents(item.get("amount_cents")),
+                        _validate_date(item.get("occurred_on")),
+                        _text(item.get("merchant"), "merchant", 200),
+                        _text(item.get("note"), "note", 2000),
+                        int(bool(item.get("is_deposit"))),
+                        original,
+                        item.get("status", "active"),
+                        _text(item.get("void_reason"), "void_reason", 500),
+                        _text(item.get("source_ref"), "source_ref", 256),
+                        now,
+                        str(item.get("updated_at") or now),
+                    ),
                 )
-        shadow_summary = shadow.summary()
-        expected_total = inspected["net_amount_cents"]
-        if shadow_summary["net_amount_cents"] != expected_total:
-            raise LedgerError("invariant_mismatch", "影子导入净额不一致")
-        report = {"state": "shadow_validated", "source_sha256": digest, "transaction_count": inspected["transaction_count"], "net_amount_cents": expected_total, "shadow_database": str(destination / "ledger.sqlite3")}
-        (destination / "report.json").write_text(canonical_json(report) + "\n")
+        if len(shadow.query({"limit": 1000})) != inspected["transaction_count"]:
+            raise LedgerError("invariant_mismatch", "影子导入流水数量不一致")
+        report = {
+            "state": "shadow_validated",
+            "format_id": FORMAT_ID,
+            "source_sha256": digest,
+            "counts": {
+                "transactions": inspected["transaction_count"],
+                "payments": inspected["payments"],
+                "refunds": inspected["refunds"],
+            },
+            "storage": {"shadow_database": "ledger.sqlite3"},
+            "idempotent_replay": False,
+        }
+        report_path = destination / "report.json"
+        report_path.write_text(canonical_json({key: value for key, value in report.items() if key != "idempotent_replay"}) + "\n")
+        os.chmod(report_path, 0o600)
         return report
+
+    def _import_canonical_shadow(self, zip_path: Path) -> dict[str, Any]:
+        temporary = Path(tempfile.mkdtemp(prefix=".canonical-import-", dir=self.shadow_dir))
+        moved = False
+        try:
+            try:
+                verified = verify_and_extract_canonical(zip_path, temporary / "source")
+            except PortableArchiveError as exc:
+                raise LedgerError("import_invalid", str(exc)) from exc
+            if verified["attachments_included"] is not True:
+                raise LedgerError("import_invalid", "只读影子导入要求便携包包含全部附件")
+            state = verified["state"]
+            digest = verified["archive_sha256"]
+            destination = self.shadow_dir / digest
+            if destination.exists():
+                report = self._validate_existing_canonical_shadow(destination, verified)
+                return {**report, "idempotent_replay": True}
+            self._restore_canonical_shadow(temporary, state, digest)
+            report = self._canonical_shadow_report(verified)
+            report_path = temporary / "report.json"
+            report_path.write_text(canonical_json(report) + "\n")
+            os.chmod(report_path, 0o600)
+            os.replace(temporary, destination)
+            moved = True
+            return {**report, "idempotent_replay": False}
+        finally:
+            if not moved:
+                shutil.rmtree(temporary, ignore_errors=True)
+
+    def _restore_canonical_shadow(
+        self,
+        destination: Path,
+        state: dict[str, Any],
+        source_sha256: str,
+    ) -> None:
+        shadow = LedgerStore(
+            destination / "ledger.sqlite3",
+            data_dir=destination,
+            share_dir=destination / "portable",
+        )
+        shadow.set_writer_mode("read_only", force_initial=True)
+        shadow.set_writer_mode("shadow_validated")
+        transactions = state["transactions"]
+        with shadow._connect() as connection:
+            connection.execute("DELETE FROM audit_log")
+            connection.execute("DELETE FROM attachments")
+            connection.execute("DELETE FROM transaction_tags")
+            connection.execute("DELETE FROM transactions")
+            connection.execute("DELETE FROM tags")
+            connection.execute("DELETE FROM idempotency_keys")
+            for item in transactions:
+                if item["kind"] != "payment":
+                    continue
+                identifier = str(item["id"])
+                connection.execute(
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,status,void_reason,source_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        identifier,
+                        int(item["id"]),
+                        "payment",
+                        int(item["amount_cents"]),
+                        str(item["date"]),
+                        str(item["category"]),
+                        str(item["vendor"]),
+                        str(item["description"]),
+                        int(bool(item["is_deposit"])),
+                        "active" if item["status"] == "active" else "voided",
+                        str(item["void_reason"]),
+                        f"portable:{source_sha256[:16]}:{identifier}",
+                        str(item["created_at"]),
+                        str(item["updated_at"]),
+                    ),
+                )
+                shadow._set_tags(connection, identifier, normalize_tags(item["tags"]))
+            for item in transactions:
+                if item["kind"] != "refund":
+                    continue
+                identifier = str(item["id"])
+                original = str(item["payment_id"])
+                connection.execute(
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,original_payment_id,status,void_reason,source_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        identifier,
+                        int(item["id"]),
+                        "refund",
+                        int(item["amount_cents"]),
+                        str(item["date"]),
+                        "",
+                        str(item["vendor"]),
+                        str(item["description"]),
+                        int(bool(item["is_deposit"])),
+                        original,
+                        "active" if item["status"] == "active" else "voided",
+                        str(item["void_reason"]),
+                        f"portable:{source_sha256[:16]}:{identifier}",
+                        str(item["created_at"]),
+                        str(item["updated_at"]),
+                    ),
+                )
+            for item in state["attachments"]:
+                relative = normalized_member_name(str(item["relative_path"]))
+                relative_path = PurePosixPath(relative)
+                source = destination.joinpath("source", "attachments", *relative_path.parts)
+                target = shadow.attachments_dir.joinpath(*relative_path.parts)
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copyfile(source, target)
+                os.chmod(target, 0o600)
+                connection.execute(
+                    "INSERT INTO attachments(id,transaction_id,storage_name,original_filename,mime_type,size_bytes,sha256,status,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        str(item["id"]),
+                        str(item["transaction_id"]),
+                        relative,
+                        str(item["original_filename"]),
+                        str(item["media_type"]),
+                        int(item["size_bytes"]),
+                        str(item["sha256"]),
+                        "active",
+                        str(item["created_at"]),
+                    ),
+                )
+            for item in state["audit_log"]:
+                connection.execute(
+                    "INSERT INTO audit_log(id,action,target_type,target_id,actor_hash,idempotency_key,reason,before_json,after_json,result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        int(item["id"]),
+                        str(item["action"]),
+                        "transaction",
+                        str(item["transaction_id"]),
+                        str(item["actor"]),
+                        f"portable-audit-{item['id']}",
+                        str(item["reason"]),
+                        canonical_json(item["before"]) if item["before"] is not None else None,
+                        canonical_json(item["after"]),
+                        "success",
+                        str(item["created_at"]),
+                    ),
+                )
+            source_metadata = {
+                "shadow_source_format_id": CANONICAL_PORTABLE_FORMAT_ID,
+                "shadow_source_format_version": str(CANONICAL_PORTABLE_FORMAT_VERSION),
+                "shadow_source_sha256": source_sha256,
+                "shadow_invariants_sha256": portable_digest_json(state["invariants"]),
+            }
+            for key, value in source_metadata.items():
+                connection.execute(
+                    "INSERT INTO metadata(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value),
+                )
+        self._validate_canonical_shadow(shadow, state, source_sha256)
+
+    def _canonical_shadow_transactions(self, shadow: "LedgerStore") -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        with shadow._connect() as connection:
+            rows = connection.execute("SELECT * FROM transactions ORDER BY legacy_id")
+            for row in rows:
+                item = shadow._row_json(connection, row)
+                amount_cents = int(item["amount_cents"])
+                result.append(
+                    {
+                        "id": int(item["legacy_id"]),
+                        "kind": item["type"],
+                        "payment_id": int(item["original_payment_id"])
+                        if item["original_payment_id"] is not None
+                        else None,
+                        "amount_cents": amount_cents,
+                        "amount": f"{amount_cents // 100}.{amount_cents % 100:02d}",
+                        "date": item["occurred_on"],
+                        "category": item["main_category"] if item["type"] == "payment" else None,
+                        "effective_category": item["main_category"],
+                        "vendor": item["merchant"],
+                        "description": item["note"],
+                        "is_deposit": bool(item["is_deposit"]),
+                        "status": "active" if item["status"] == "active" else "void",
+                        "void_reason": item["void_reason"],
+                        "created_at": item["created_at"],
+                        "updated_at": item["updated_at"],
+                        "tags": item["tags"],
+                    }
+                )
+        return result
+
+    def _validate_canonical_shadow(
+        self,
+        shadow: "LedgerStore",
+        state: dict[str, Any],
+        source_sha256: str,
+    ) -> None:
+        transactions = self._canonical_shadow_transactions(shadow)
+        if transactions != state["transactions"]:
+            raise LedgerError("invariant_mismatch", "影子流水字段与来源不一致")
+        with shadow._connect() as connection:
+            source_refs = [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT legacy_id,source_ref FROM transactions ORDER BY legacy_id"
+                )
+            ]
+            expected_refs = [
+                (int(item["id"]), f"portable:{source_sha256[:16]}:{item['id']}")
+                for item in state["transactions"]
+            ]
+            if source_refs != expected_refs:
+                raise LedgerError("invariant_mismatch", "影子 legacy ID 或 source_ref 不一致")
+            tag_count = connection.execute("SELECT count(*) FROM transaction_tags").fetchone()[0]
+            if tag_count != len(state["transaction_tags"]):
+                raise LedgerError("invariant_mismatch", "影子标签关联数量不一致")
+            attachments = [
+                {
+                    "id": int(row["id"]),
+                    "transaction_id": int(row["transaction_id"]),
+                    "original_filename": row["original_filename"],
+                    "relative_path": row["storage_name"],
+                    "sha256": row["sha256"],
+                    "size_bytes": int(row["size_bytes"]),
+                    "media_type": row["mime_type"],
+                    "created_at": row["created_at"],
+                }
+                for row in connection.execute(
+                    "SELECT * FROM attachments ORDER BY CAST(id AS INTEGER)"
+                )
+            ]
+            if attachments != state["attachments"]:
+                raise LedgerError("invariant_mismatch", "影子附件元数据不一致")
+            for item in attachments:
+                relative = normalized_member_name(item["relative_path"])
+                path = shadow.attachments_dir.joinpath(*PurePosixPath(relative).parts)
+                digest, size = portable_sha256_file(path)
+                if digest != item["sha256"] or size != item["size_bytes"]:
+                    raise LedgerError("invariant_mismatch", "影子附件文件校验失败")
+            audits = []
+            for row in connection.execute("SELECT * FROM audit_log ORDER BY id"):
+                audits.append(
+                    {
+                        "id": int(row["id"]),
+                        "transaction_id": int(row["target_id"]),
+                        "action": row["action"],
+                        "actor": row["actor_hash"],
+                        "before": json.loads(row["before_json"]) if row["before_json"] else None,
+                        "after": json.loads(row["after_json"]),
+                        "reason": row["reason"],
+                        "created_at": row["created_at"],
+                    }
+                )
+            if audits != state["audit_log"]:
+                raise LedgerError("invariant_mismatch", "影子审计顺序或前后值不一致")
+        category_order = [item["category"] for item in state["summary"]["categories"]]
+        summary = portable_summary_from_transactions(transactions, category_order)
+        months = portable_monthly_summary(transactions)
+        if summary != state["summary"] or months != state["monthly_summary"]:
+            raise LedgerError("invariant_mismatch", "影子分类、标签或月份汇总不一致")
+
+    def _canonical_shadow_report(self, verified: dict[str, Any]) -> dict[str, Any]:
+        state = verified["state"]
+        checks = {
+            "archive_paths_safe": True,
+            "manifest_files_match": True,
+            "sqlite_integrity": True,
+            "sqlite_foreign_keys": True,
+            "json_matches_sqlite": True,
+            "csv_matches_sqlite": True,
+            "audit_matches_sqlite": True,
+            "attachments_match": True,
+            "normalized_shadow_matches": True,
+            "source_snapshot_preserved": True,
+        }
+        return {
+            "state": "shadow_validated",
+            "format_id": verified["format_id"],
+            "format_version": verified["format_version"],
+            "source_sha256": verified["archive_sha256"],
+            "source_size_bytes": verified["archive_size_bytes"],
+            "verified_file_count": verified["verified_file_count"],
+            "attachments_included": verified["attachments_included"],
+            "counts": self._canonical_counts(state),
+            "digests": verified["digests"],
+            "checks": checks,
+            "verification_digest": portable_digest_json(
+                {
+                    "source_sha256": verified["archive_sha256"],
+                    "counts": self._canonical_counts(state),
+                    "digests": verified["digests"],
+                    "checks": checks,
+                }
+            ),
+            "storage": {
+                "source_snapshot": "source/bookkeeping.sqlite3",
+                "shadow_database": "ledger.sqlite3",
+                "attachments": "attachments/",
+            },
+        }
+
+    def _validate_existing_canonical_shadow(
+        self,
+        destination: Path,
+        input_verified: dict[str, Any],
+    ) -> dict[str, Any]:
+        report_path = destination / "report.json"
+        if not report_path.is_file():
+            raise LedgerError("invariant_mismatch", "既有影子目录不完整")
+        try:
+            persisted = verify_extracted_canonical(destination / "source")
+        except PortableArchiveError as exc:
+            raise LedgerError("invariant_mismatch", "既有来源快照校验失败") from exc
+        if persisted["digests"] != input_verified["digests"]:
+            raise LedgerError("invariant_mismatch", "既有来源快照与输入包不一致")
+        persisted["archive_sha256"] = input_verified["archive_sha256"]
+        persisted["archive_size_bytes"] = input_verified["archive_size_bytes"]
+        shadow = LedgerStore(
+            destination / "ledger.sqlite3",
+            data_dir=destination,
+            share_dir=destination / "portable",
+        )
+        self._validate_canonical_shadow(
+            shadow,
+            persisted["state"],
+            input_verified["archive_sha256"],
+        )
+        expected = self._canonical_shadow_report(persisted)
+        actual = json.loads(report_path.read_text())
+        if actual != expected:
+            raise LedgerError("invariant_mismatch", "既有影子脱敏报告与数据不一致")
+        return actual
 
     def generate_chart(self, filters: dict[str, Any] | None = None) -> dict[str, Any]:
         try:

@@ -16,8 +16,9 @@ from renovation_hub.ledger import LedgerError, LedgerStore, canonical_json
 
 
 class CanonicalPortableFixture:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, format_version: int = portable.FORMAT_VERSION) -> None:
         self.root = root
+        self.format_version = format_version
         self.root.mkdir(parents=True, mode=0o700)
         self.package = root / "package"
         self.package.mkdir(mode=0o700)
@@ -37,8 +38,9 @@ class CanonicalPortableFixture:
         attachment_sha = hashlib.sha256(attachment.read_bytes()).hexdigest()
         database = self.package / "bookkeeping.sqlite3"
         connection = sqlite3.connect(database)
+        category_column = "category TEXT," if self.format_version == portable.FORMAT_VERSION else ""
         connection.executescript(
-            """
+            f"""
             PRAGMA foreign_keys=ON;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE transactions(
@@ -47,7 +49,7 @@ class CanonicalPortableFixture:
               payment_id INTEGER REFERENCES transactions(id),
               amount_cents INTEGER NOT NULL,
               txn_date TEXT NOT NULL,
-              category TEXT,
+              {category_column}
               vendor TEXT NOT NULL,
               description TEXT NOT NULL,
               is_deposit INTEGER NOT NULL,
@@ -87,63 +89,37 @@ class CanonicalPortableFixture:
             """
         )
         timestamp = "2026-08-03T00:00:00Z"
-        connection.execute("INSERT INTO metadata VALUES ('schema_version','4')")
-        connection.executemany(
-            "INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [
-                (
-                    1,
-                    "payment",
-                    None,
-                    123_400,
-                    "2026-07-15",
-                    "示例工程",
-                    "示例供应方",
-                    "合成付款",
-                    0,
-                    "active",
-                    "",
-                    timestamp,
-                    timestamp,
-                ),
-                (
-                    2,
-                    "refund",
-                    1,
-                    3_400,
-                    "2026-08-01",
-                    None,
-                    "",
-                    "合成退款",
-                    0,
-                    "active",
-                    "",
-                    timestamp,
-                    timestamp,
-                ),
-                (
-                    3,
-                    "payment",
-                    None,
-                    50_000,
-                    "2026-08-02",
-                    "示例设备",
-                    "示例设备方",
-                    "撤销样例",
-                    1,
-                    "void",
-                    "合成重复记录",
-                    timestamp,
-                    timestamp,
-                ),
-            ],
+        sqlite_schema_version = "4" if self.format_version == portable.FORMAT_VERSION else "3"
+        connection.execute("INSERT INTO metadata VALUES ('schema_version',?)", (sqlite_schema_version,))
+        if self.format_version == portable.FORMAT_VERSION:
+            connection.executemany(
+                "INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (1, "payment", None, 123_400, "2026-07-15", "示例工程", "示例供应方", "合成付款", 0, "active", "", timestamp, timestamp),
+                    (2, "refund", 1, 3_400, "2026-08-01", None, "", "合成退款", 0, "active", "", timestamp, timestamp),
+                    (3, "payment", None, 50_000, "2026-08-02", "示例设备", "示例设备方", "撤销样例", 1, "void", "合成重复记录", timestamp, timestamp),
+                ],
+            )
+        else:
+            connection.executemany(
+                "INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (1, "payment", None, 123_400, "2026-07-15", "示例供应方", "合成付款", 0, "active", "", timestamp, timestamp),
+                    (2, "refund", 1, 3_400, "2026-08-01", "", "合成退款", 0, "active", "", timestamp, timestamp),
+                    (3, "payment", None, 50_000, "2026-08-02", "示例设备方", "撤销样例", 1, "void", "合成重复记录", timestamp, timestamp),
+                ],
+            )
+        tags = (
+            [(1, 1, "隐蔽", "隐蔽", 0, timestamp), (2, 1, "网络", "网络", 1, timestamp)]
+            if self.format_version == portable.FORMAT_VERSION
+            else [
+                (1, 1, "专业:隐蔽工程", "专业:隐蔽工程".casefold(), 0, timestamp),
+                (2, 1, "生态:网络", "生态:网络".casefold(), 1, timestamp),
+            ]
         )
         connection.executemany(
             "INSERT INTO transaction_tags VALUES (?,?,?,?,?,?)",
-            [
-                (1, 1, "隐蔽", "隐蔽", 0, timestamp),
-                (2, 1, "网络", "网络", 1, timestamp),
-            ],
+            tags,
         )
         connection.execute(
             "INSERT INTO attachments VALUES (?,?,?,?,?,?,?,?)",
@@ -183,16 +159,19 @@ class CanonicalPortableFixture:
         connection.commit()
         connection.close()
 
-        expected_summary = {
-            "categories": [
-                {"category": "示例工程"},
-                {"category": "示例设备"},
-            ]
-        }
-        state = portable._snapshot_state(database, expected_summary)
+        if self.format_version == portable.FORMAT_VERSION:
+            expected_summary = {
+                "categories": [
+                    {"category": "示例工程"},
+                    {"category": "示例设备"},
+                ]
+            }
+            state = portable._snapshot_state(database, expected_summary)
+        else:
+            state = portable._snapshot_state_v2(database)
         ledger = {
             "format_id": portable.FORMAT_ID,
-            "format_version": portable.FORMAT_VERSION,
+            "format_version": self.format_version,
             "generated_at": timestamp,
             "currency": "CNY",
             "amount_unit": "integer_cents",
@@ -222,7 +201,9 @@ class CanonicalPortableFixture:
         (self.package / "verify.py").write_text("raise SystemExit('fixture only')\n", encoding="utf-8")
         self._write_csv(
             self.package / "transactions.csv",
-            portable._expected_transaction_csv(state["transactions"]),
+            portable._expected_transaction_csv(state["transactions"])
+            if self.format_version == portable.FORMAT_VERSION
+            else portable._expected_transaction_csv_v2(state["transactions"]),
         )
         self._write_csv(
             self.package / "transaction_tags.csv",
@@ -256,19 +237,35 @@ class CanonicalPortableFixture:
             )
         manifest = {
             "format_id": portable.FORMAT_ID,
-            "format_version": portable.FORMAT_VERSION,
+            "format_version": self.format_version,
             "generated_at": "2026-08-03T00:00:00Z",
             "currency": "CNY",
             "amount_unit": "integer_cents",
             "hermes_required": False,
-            "source": {"application": "synthetic-fixture", "sqlite_schema_version": "4"},
+            "source": {
+                "application": "synthetic-fixture",
+                "sqlite_schema_version": "4"
+                if self.format_version == portable.FORMAT_VERSION
+                else "3",
+            },
             "semantics": {
-                "primary_category_single": True,
-                "refunds_link_to_payments": True,
-                "refunds_inherit_category_and_tags": True,
-                "tag_totals_overlap": True,
-                "tag_totals_must_not_be_summed": True,
-                "void_records_are_retained": True,
+                **(
+                    {
+                        "primary_category_single": True,
+                        "refunds_link_to_payments": True,
+                        "refunds_inherit_category_and_tags": True,
+                        "tag_totals_overlap": True,
+                        "tag_totals_must_not_be_summed": True,
+                        "void_records_are_retained": True,
+                    }
+                    if self.format_version == portable.FORMAT_VERSION
+                    else {
+                        "primary_category_single": False,
+                        "grouped_multi_tags": True,
+                        "tag_totals_overlap": True,
+                        "total_ledger_deduplicates_transactions": True,
+                    }
+                )
             },
             "export": {
                 "attachments_included": True,
@@ -312,6 +309,11 @@ class RenovationPortableTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.fixture = CanonicalPortableFixture(self.root / "fixture")
         self.archive = self.fixture.build()
+        self.v2_fixture = CanonicalPortableFixture(
+            self.root / "fixture-v2",
+            format_version=portable.FORMAT_VERSION_V2,
+        )
+        self.v2_archive = self.v2_fixture.build()
         self.store_root = self.root / "store"
         self.store = LedgerStore(
             self.store_root / "ledger.sqlite3",
@@ -361,6 +363,56 @@ class RenovationPortableTests(unittest.TestCase):
         path = destination / "attachments" / attachment["storage_name"]
         self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), attachment["sha256"])
         self.assertEqual(path.stat().st_size, attachment["size_bytes"])
+
+    def test_v2_grouped_tags_are_verified_and_restored_shadow_only(self) -> None:
+        verified = self.store.verify_portable(self.v2_archive)
+        self.assertEqual(verified["format_version"], portable.FORMAT_VERSION_V2)
+        self.assertEqual(verified["counts"]["tag_links"], 2)
+        first = self.store.import_shadow(self.v2_archive)
+        second = self.store.import_shadow(self.v2_archive)
+        self.assertEqual(first["state"], "shadow_validated")
+        self.assertFalse(first["idempotent_replay"])
+        self.assertTrue(second["idempotent_replay"])
+        destination = self.store.shadow_dir / first["source_sha256"]
+        connection = sqlite3.connect(destination / "ledger.sqlite3")
+        payment = connection.execute(
+            "SELECT id,main_category FROM transactions WHERE legacy_id=1"
+        ).fetchone()
+        tags = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT tags.display_name
+                FROM transaction_tags
+                JOIN tags ON tags.normalized=transaction_tags.tag_normalized
+                WHERE transaction_id=?
+                ORDER BY transaction_tags.position
+                """,
+                (payment[0],),
+            )
+        ]
+        connection.close()
+        self.assertEqual(payment[1], "")
+        self.assertEqual(tags, ["专业:隐蔽工程", "生态:网络"])
+        self.assertEqual(
+            json.loads((destination / "report.json").read_text())["format_version"],
+            portable.FORMAT_VERSION_V2,
+        )
+
+    def test_v2_invalid_grouped_tag_is_rejected(self) -> None:
+        def mutate(package: Path) -> None:
+            database = package / "bookkeeping.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "UPDATE transaction_tags SET tag='无维度标签',tag_key='无维度标签' WHERE id=1"
+            )
+            connection.commit()
+            connection.close()
+
+        candidate = self.v2_fixture.mutate_and_repack("v2-invalid-tag.zip", mutate)
+        with self.assertRaisesRegex(LedgerError, "分组标签") as context:
+            self.store.verify_portable(candidate)
+        self.assertEqual(context.exception.code, "import_invalid")
 
     def test_ledger_field_drift_is_rejected_even_with_updated_manifest(self) -> None:
         def mutate(package: Path) -> None:

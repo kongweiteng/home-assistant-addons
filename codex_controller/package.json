@@ -1,7 +1,7 @@
 {
   "name": "ha-codex-controller-runtime",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pinned official Codex runtime for the Home Assistant Codex Controller add-on.",
   "dependencies": {
     "@openai/codex": "0.146.0"

@@ -46,7 +46,7 @@ class CodexHermesContractTests(unittest.TestCase):
             if tool["write"]:
                 self.assertIn("idempotency_key", tool["required"])
 
-    def test_app_server_fixture_uses_supported_chatgpt_device_auth_only(self) -> None:
+    def test_app_server_fixture_preserves_explicit_device_auth_without_mixing_modes(self) -> None:
         messages = [json.loads(line) for line in (FIXTURES / "app_server_transcript.jsonl").read_text().splitlines()]
         methods = [message.get("method") for message in messages]
         self.assertIn("initialize", methods)

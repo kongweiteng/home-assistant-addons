@@ -6,6 +6,8 @@
 | --- | --- |
 | `internal_api_token` | Weixin Gateway 调用作业 API 的独立 Token，至少 32 个字符 |
 | `intake_enabled` | 是否接收新作业；默认关闭，正式切换前不得开启 |
+| `auth_mode` | 显式选择 `chatgpt_device_code` 或 `api_key`；默认设备码，禁止自动降级 |
+| `openai_api_key` | 仅在 `api_key` 模式使用的 Supervisor 私有 `password` option；页面和状态不会回显 |
 | `ledger_base_url` | Renovation Hub 的固定内部服务根地址；为空时禁用兼容 Ledger 工具 |
 | `ledger_api_token` | Ledger 独立 bearer；不会传给 app-server |
 | `gateway_base_url` | Weixin Gateway 的固定内部服务根地址；只用于一次性附件读取 |
@@ -21,14 +23,25 @@
 
 ## 认证
 
-1. 通过 Home Assistant Ingress 打开 Controller 页面。
+先在 Add-on options 中显式选择认证模式。运行时不会从一种模式自动降级或切换到另一种模式。
+
+ChatGPT Device Code：
+
+1. 设置 `auth_mode=chatgpt_device_code`，通过 Home Assistant Ingress 打开 Controller 页面。
 2. 点击“开始设备码登录”。Controller 只会向官方 app-server 发送 `{"type":"chatgptDeviceCode"}`。
 3. 在页面显示的官方验证地址登录与本机 Codex 相同的 ChatGPT 账号，并输入短期用户码。
-4. Controller 读回账户状态；只有 `authMode=chatgpt` 才标记为已就绪。
+4. Controller 读回账户状态；只有账户类型为 `chatgpt` 才标记为已就绪。
+
+API Key：
+
+1. 设置 `auth_mode=api_key`，把 Key 直接填入 Add-on options 的 `openai_api_key`；不要通过微信、Ingress、日志或聊天发送。
+2. 启动时 Controller 会在未登录状态下调用官方 `account/login/start {"type":"apiKey","apiKey":"..."}`，但不会把 Key 放进 app-server 子进程环境或命令行。
+3. Controller 随后读回 `account.type=apiKey`；类型不匹配、Key 缺失或请求失败时，任务入口保持关闭。
+4. 修正 options 后可重启 Add-on，或在 Ingress 点击“重试 API Key 登录”。页面只显示是否已配置，不显示 Key 内容。
 
 Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Cookie 或 `CODEX_HOME`，也不要通过微信发送设备码或任何凭据。
 
-正式设备码登录会创建外部账号会话，属于独立人工闸门；安装源码或通过本地测试不等于已经登录。
+正式设备码或 API Key 登录会改变外部账号会话，属于独立人工闸门；安装源码或通过本地测试不等于已经登录。
 
 ## 队列与恢复
 

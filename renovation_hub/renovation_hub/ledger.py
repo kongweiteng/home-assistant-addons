@@ -23,11 +23,15 @@ from typing import Any, Callable
 from .portable import (
     FORMAT_ID as CANONICAL_PORTABLE_FORMAT_ID,
     FORMAT_VERSION as CANONICAL_PORTABLE_FORMAT_VERSION,
+    FORMAT_VERSION_V2 as CANONICAL_PORTABLE_FORMAT_VERSION_V2,
+    SUPPORTED_FORMAT_VERSIONS as CANONICAL_SUPPORTED_FORMAT_VERSIONS,
     PortableArchiveError,
     digest_json as portable_digest_json,
+    grouped_tags as portable_grouped_tags,
     monthly_summary as portable_monthly_summary,
     normalized_member_name,
     sha256_file as portable_sha256_file,
+    summary_from_grouped_transactions as portable_summary_from_grouped_transactions,
     summary_from_transactions as portable_summary_from_transactions,
     verify_and_extract as verify_and_extract_canonical,
     verify_extracted as verify_extracted_canonical,
@@ -304,7 +308,7 @@ class LedgerStore:
             }
         return {
             "service": "renovation_hub",
-            "version": "0.1.2",
+            "version": "0.1.3",
             "schema_version": int(meta["schema_version"]),
             "format_id": meta["format_id"],
             "writer_mode": meta["writer_mode"],
@@ -989,7 +993,7 @@ class LedgerStore:
         manifest = self._read_portable_manifest(path)
         if (
             manifest.get("format_id") == CANONICAL_PORTABLE_FORMAT_ID
-            and manifest.get("format_version") == CANONICAL_PORTABLE_FORMAT_VERSION
+            and manifest.get("format_version") in CANONICAL_SUPPORTED_FORMAT_VERSIONS
         ):
             return self._verify_canonical_portable(path)
         return self._verify_legacy_portable(path)
@@ -1010,7 +1014,7 @@ class LedgerStore:
         manifest = self._read_portable_manifest(path)
         if (
             manifest.get("format_id") == CANONICAL_PORTABLE_FORMAT_ID
-            and manifest.get("format_version") == CANONICAL_PORTABLE_FORMAT_VERSION
+            and manifest.get("format_version") in CANONICAL_SUPPORTED_FORMAT_VERSIONS
         ):
             return self._import_canonical_shadow(path)
         return self._import_legacy_shadow(path)
@@ -1132,7 +1136,12 @@ class LedgerStore:
             if destination.exists():
                 report = self._validate_existing_canonical_shadow(destination, verified)
                 return {**report, "idempotent_replay": True}
-            self._restore_canonical_shadow(temporary, state, digest)
+            self._restore_canonical_shadow(
+                temporary,
+                state,
+                digest,
+                int(verified["format_version"]),
+            )
             report = self._canonical_shadow_report(verified)
             report_path = temporary / "report.json"
             report_path.write_text(canonical_json(report) + "\n")
@@ -1149,6 +1158,7 @@ class LedgerStore:
         destination: Path,
         state: dict[str, Any],
         source_sha256: str,
+        format_version: int,
     ) -> None:
         shadow = LedgerStore(
             destination / "ledger.sqlite3",
@@ -1177,7 +1187,9 @@ class LedgerStore:
                         "payment",
                         int(item["amount_cents"]),
                         str(item["date"]),
-                        str(item["category"]),
+                        str(item["category"])
+                        if format_version == CANONICAL_PORTABLE_FORMAT_VERSION
+                        else "",
                         str(item["vendor"]),
                         str(item["description"]),
                         int(bool(item["is_deposit"])),
@@ -1188,7 +1200,12 @@ class LedgerStore:
                         str(item["updated_at"]),
                     ),
                 )
-                shadow._set_tags(connection, identifier, normalize_tags(item["tags"]))
+                tags = (
+                    normalize_tags(item["tags"])
+                    if format_version == CANONICAL_PORTABLE_FORMAT_VERSION
+                    else list(item["tags"])
+                )
+                shadow._set_tags(connection, identifier, tags)
             for item in transactions:
                 if item["kind"] != "refund":
                     continue
@@ -1255,7 +1272,7 @@ class LedgerStore:
                 )
             source_metadata = {
                 "shadow_source_format_id": CANONICAL_PORTABLE_FORMAT_ID,
-                "shadow_source_format_version": str(CANONICAL_PORTABLE_FORMAT_VERSION),
+                "shadow_source_format_version": str(format_version),
                 "shadow_source_sha256": source_sha256,
                 "shadow_invariants_sha256": portable_digest_json(state["invariants"]),
             }
@@ -1264,37 +1281,45 @@ class LedgerStore:
                     "INSERT INTO metadata(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (key, value),
                 )
-        self._validate_canonical_shadow(shadow, state, source_sha256)
+        self._validate_canonical_shadow(shadow, state, source_sha256, format_version)
 
-    def _canonical_shadow_transactions(self, shadow: "LedgerStore") -> list[dict[str, Any]]:
+    def _canonical_shadow_transactions(
+        self,
+        shadow: "LedgerStore",
+        format_version: int,
+    ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         with shadow._connect() as connection:
             rows = connection.execute("SELECT * FROM transactions ORDER BY legacy_id")
             for row in rows:
                 item = shadow._row_json(connection, row)
                 amount_cents = int(item["amount_cents"])
-                result.append(
-                    {
-                        "id": int(item["legacy_id"]),
-                        "kind": item["type"],
-                        "payment_id": int(item["original_payment_id"])
-                        if item["original_payment_id"] is not None
-                        else None,
-                        "amount_cents": amount_cents,
-                        "amount": f"{amount_cents // 100}.{amount_cents % 100:02d}",
-                        "date": item["occurred_on"],
-                        "category": item["main_category"] if item["type"] == "payment" else None,
-                        "effective_category": item["main_category"],
-                        "vendor": item["merchant"],
-                        "description": item["note"],
-                        "is_deposit": bool(item["is_deposit"]),
-                        "status": "active" if item["status"] == "active" else "void",
-                        "void_reason": item["void_reason"],
-                        "created_at": item["created_at"],
-                        "updated_at": item["updated_at"],
-                        "tags": item["tags"],
-                    }
-                )
+                serialized = {
+                    "id": int(item["legacy_id"]),
+                    "kind": item["type"],
+                    "payment_id": int(item["original_payment_id"])
+                    if item["original_payment_id"] is not None
+                    else None,
+                    "amount_cents": amount_cents,
+                    "amount": f"{amount_cents // 100}.{amount_cents % 100:02d}",
+                    "date": item["occurred_on"],
+                    "vendor": item["merchant"],
+                    "description": item["note"],
+                    "is_deposit": bool(item["is_deposit"]),
+                    "status": "active" if item["status"] == "active" else "void",
+                    "void_reason": item["void_reason"],
+                    "created_at": item["created_at"],
+                    "updated_at": item["updated_at"],
+                    "tags": item["tags"],
+                }
+                if format_version == CANONICAL_PORTABLE_FORMAT_VERSION:
+                    serialized["category"] = (
+                        item["main_category"] if item["type"] == "payment" else None
+                    )
+                    serialized["effective_category"] = item["main_category"]
+                else:
+                    serialized["grouped_tags"] = portable_grouped_tags(item["tags"])
+                result.append(serialized)
         return result
 
     def _validate_canonical_shadow(
@@ -1302,8 +1327,9 @@ class LedgerStore:
         shadow: "LedgerStore",
         state: dict[str, Any],
         source_sha256: str,
+        format_version: int,
     ) -> None:
-        transactions = self._canonical_shadow_transactions(shadow)
+        transactions = self._canonical_shadow_transactions(shadow, format_version)
         if transactions != state["transactions"]:
             raise LedgerError("invariant_mismatch", "影子流水字段与来源不一致")
         with shadow._connect() as connection:
@@ -1361,8 +1387,13 @@ class LedgerStore:
                 )
             if audits != state["audit_log"]:
                 raise LedgerError("invariant_mismatch", "影子审计顺序或前后值不一致")
-        category_order = [item["category"] for item in state["summary"]["categories"]]
-        summary = portable_summary_from_transactions(transactions, category_order)
+        if format_version == CANONICAL_PORTABLE_FORMAT_VERSION:
+            category_order = [item["category"] for item in state["summary"]["categories"]]
+            summary = portable_summary_from_transactions(transactions, category_order)
+        elif format_version == CANONICAL_PORTABLE_FORMAT_VERSION_V2:
+            summary = portable_summary_from_grouped_transactions(transactions)
+        else:
+            raise LedgerError("invariant_mismatch", "影子来源版本不受支持")
         months = portable_monthly_summary(transactions)
         if summary != state["summary"] or months != state["monthly_summary"]:
             raise LedgerError("invariant_mismatch", "影子分类、标签或月份汇总不一致")
@@ -1432,6 +1463,7 @@ class LedgerStore:
             shadow,
             persisted["state"],
             input_verified["archive_sha256"],
+            int(persisted["format_version"]),
         )
         expected = self._canonical_shadow_report(persisted)
         actual = json.loads(report_path.read_text())

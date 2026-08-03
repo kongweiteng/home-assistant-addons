@@ -18,6 +18,21 @@ from typing import Any, Iterable
 
 FORMAT_ID = "kanhuwan-renovation-ledger"
 FORMAT_VERSION = 1
+FORMAT_VERSION_V2 = 2
+SUPPORTED_FORMAT_VERSIONS = {FORMAT_VERSION, FORMAT_VERSION_V2}
+TAG_DIMENSIONS = (
+    "主题",
+    "空间",
+    "专业",
+    "性质",
+    "渠道",
+    "品牌",
+    "生态",
+    "阶段",
+    "状态",
+)
+MAX_GROUPED_TAGS = 24
+MAX_GROUPED_TAG_LENGTH = 40
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 1024 * 1024 * 1024
 MAX_MEMBER_COUNT = 10_000
@@ -188,6 +203,16 @@ def _sqlite_rows(
     return [dict(row) for row in connection.execute(statement, tuple(parameters)).fetchall()]
 
 
+def grouped_tags(values: Iterable[str]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for value in values:
+        dimension, separator, label = str(value).partition(":")
+        if not separator or dimension not in TAG_DIMENSIONS or not label:
+            raise PortableArchiveError("便携包存在无效分组标签")
+        result.setdefault(dimension, []).append(label)
+    return result
+
+
 def summary_from_transactions(
     transactions: list[dict[str, Any]],
     category_order: list[str],
@@ -287,6 +312,69 @@ def summary_from_transactions(
         "net_cents": payments_cents - refunds_cents,
         "categories": categories,
         "tags": tags,
+    }
+
+
+def summary_from_grouped_transactions(transactions: list[dict[str, Any]]) -> dict[str, Any]:
+    active_payments = [
+        row for row in transactions if row["kind"] == "payment" and row["status"] == "active"
+    ]
+    active_refunds = [
+        row for row in transactions if row["kind"] == "refund" and row["status"] == "active"
+    ]
+    tag_data: dict[str, dict[str, Any]] = {}
+    for row, kind in [
+        *((item, "payment") for item in active_payments),
+        *((item, "refund") for item in active_refunds),
+    ]:
+        for tag in row["tags"]:
+            tag_key = unicodedata.normalize("NFKC", str(tag)).casefold()
+            dimension, _, value = str(tag).partition(":")
+            bucket = tag_data.setdefault(
+                tag_key,
+                {
+                    "tag": str(tag),
+                    "dimension": dimension,
+                    "value": value,
+                    "payments_count": 0,
+                    "refunds_count": 0,
+                    "payments_cents": 0,
+                    "refunds_cents": 0,
+                },
+            )
+            bucket[f"{kind}s_count"] += 1
+            bucket[f"{kind}s_cents"] += int(row["amount_cents"])
+    tags: list[dict[str, Any]] = []
+    dimensions: dict[str, list[dict[str, Any]]] = {
+        dimension: [] for dimension in TAG_DIMENSIONS
+    }
+    for item in tag_data.values():
+        value = dict(item)
+        value["net_cents"] = value["payments_cents"] - value["refunds_cents"]
+        tags.append(value)
+        dimensions[value["dimension"]].append(value)
+    tags.sort(key=lambda item: (-item["net_cents"], item["tag"]))
+    for items in dimensions.values():
+        items.sort(key=lambda item: (-item["net_cents"], item["value"]))
+    dates = [str(row["date"]) for row in transactions if row["status"] == "active"]
+    payments_cents = sum(int(row["amount_cents"]) for row in active_payments)
+    refunds_cents = sum(int(row["amount_cents"]) for row in active_refunds)
+    return {
+        "from": None,
+        "to": None,
+        "first_date": min(dates) if dates else None,
+        "last_date": max(dates) if dates else None,
+        "payments_count": len(active_payments),
+        "refunds_count": len(active_refunds),
+        "deposit_count": sum(1 for row in active_payments if row["is_deposit"]),
+        "deposit_cents": sum(
+            int(row["amount_cents"]) for row in active_payments if row["is_deposit"]
+        ),
+        "payments_cents": payments_cents,
+        "refunds_cents": refunds_cents,
+        "net_cents": payments_cents - refunds_cents,
+        "tags": tags,
+        "dimensions": dimensions,
     }
 
 
@@ -510,6 +598,192 @@ def _snapshot_state(database: Path, expected_summary: dict[str, Any]) -> dict[st
     }
 
 
+def _snapshot_state_v2(database: Path) -> dict[str, Any]:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        if str(connection.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
+            raise PortableArchiveError("便携包 SQLite 完整性检查失败")
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise PortableArchiveError("便携包 SQLite 外键检查失败")
+        transaction_columns = {
+            str(row[1]) for row in connection.execute("PRAGMA table_info(transactions)")
+        }
+        if "category" in transaction_columns:
+            raise PortableArchiveError("版本 2 便携账本不应包含主分类字段")
+        transactions = _sqlite_rows(connection, "SELECT * FROM transactions ORDER BY id")
+        tag_rows = _sqlite_rows(
+            connection,
+            """
+            SELECT id,transaction_id,tag,tag_key,position,created_at
+            FROM transaction_tags ORDER BY transaction_id,position,id
+            """,
+        )
+        attachment_rows = _sqlite_rows(
+            connection,
+            """
+            SELECT id,transaction_id,original_filename,relative_path,sha256,
+                   size_bytes,media_type,created_at
+            FROM attachments ORDER BY id
+            """,
+        )
+        audit_rows = _sqlite_rows(
+            connection,
+            """
+            SELECT id,transaction_id,action,actor,before_json,after_json,reason,created_at
+            FROM audit_log ORDER BY id
+            """,
+        )
+        metadata = {
+            str(row["key"]): str(row["value"])
+            for row in connection.execute("SELECT key,value FROM metadata ORDER BY key")
+        }
+    except PortableArchiveError:
+        raise
+    except sqlite3.Error as exc:
+        raise PortableArchiveError("便携包 SQLite 结构不兼容") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    if metadata.get("schema_version") != "3":
+        raise PortableArchiveError("版本 2 便携账本 SQLite schema_version 不是 3")
+    payment_ids = {int(row["id"]) for row in transactions if row["kind"] == "payment"}
+    tags_by_payment: dict[int, list[str]] = defaultdict(list)
+    tag_keys_by_payment: dict[int, set[str]] = defaultdict(set)
+    positions_by_payment: dict[int, set[int]] = defaultdict(set)
+    for row in tag_rows:
+        transaction_id = int(row["transaction_id"])
+        if transaction_id not in payment_ids:
+            raise PortableArchiveError("便携包标签关联到非付款流水")
+        tag = str(row["tag"])
+        tag_key = str(row["tag_key"])
+        position = int(row["position"])
+        if not tag.strip() or tag != tag.strip() or len(tag) > MAX_GROUPED_TAG_LENGTH:
+            raise PortableArchiveError("便携包分组标签文本不符合约束")
+        grouped_tags([tag])
+        if unicodedata.normalize("NFKC", tag).casefold() != tag_key:
+            raise PortableArchiveError("便携包分组标签规范键不一致")
+        if tag_key in tag_keys_by_payment[transaction_id]:
+            raise PortableArchiveError("便携包付款存在重复分组标签")
+        if position in positions_by_payment[transaction_id]:
+            raise PortableArchiveError("便携包付款存在重复标签位置")
+        tag_keys_by_payment[transaction_id].add(tag_key)
+        positions_by_payment[transaction_id].add(position)
+        tags_by_payment[transaction_id].append(tag)
+    for transaction_id, tags in tags_by_payment.items():
+        if len(tags) > MAX_GROUPED_TAGS:
+            raise PortableArchiveError("便携包付款分组标签数量超过上限")
+        if positions_by_payment[transaction_id] != set(range(len(tags))):
+            raise PortableArchiveError("便携包付款分组标签顺序不连续")
+
+    by_id = {int(row["id"]): row for row in transactions}
+    refunds_by_payment: dict[int, int] = defaultdict(int)
+    serialized: list[dict[str, Any]] = []
+    for row in transactions:
+        transaction_id = int(row["id"])
+        amount_cents = int(row["amount_cents"])
+        if amount_cents <= 0:
+            raise PortableArchiveError("便携包存在非正金额")
+        kind = str(row["kind"])
+        status = str(row["status"])
+        if status not in {"active", "void"}:
+            raise PortableArchiveError("便携包存在未知流水状态")
+        payment_id = int(row["payment_id"]) if row["payment_id"] is not None else None
+        if kind == "payment":
+            if payment_id is not None:
+                raise PortableArchiveError("便携包付款结构无效")
+            effective_tags = tags_by_payment.get(transaction_id, [])
+        elif kind == "refund":
+            parent = by_id.get(payment_id or -1)
+            if parent is None or parent["kind"] != "payment":
+                raise PortableArchiveError("便携包退款缺少有效原付款")
+            if status == "active" and parent["status"] != "active":
+                raise PortableArchiveError("便携包有效退款关联已撤销付款")
+            effective_tags = tags_by_payment.get(int(parent["id"]), [])
+            if status == "active":
+                refunds_by_payment[int(parent["id"])] += amount_cents
+        else:
+            raise PortableArchiveError("便携包存在未知流水类型")
+        serialized.append(
+            {
+                "id": transaction_id,
+                "kind": kind,
+                "payment_id": payment_id,
+                "amount_cents": amount_cents,
+                "amount": f"{amount_cents // 100}.{amount_cents % 100:02d}",
+                "date": str(row["txn_date"]),
+                "vendor": str(row["vendor"]),
+                "description": str(row["description"]),
+                "is_deposit": bool(row["is_deposit"]),
+                "status": status,
+                "void_reason": str(row["void_reason"]),
+                "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"]),
+                "tags": list(effective_tags),
+                "grouped_tags": grouped_tags(effective_tags),
+            }
+        )
+    for payment_id, refunded_cents in refunds_by_payment.items():
+        if refunded_cents > int(by_id[payment_id]["amount_cents"]):
+            raise PortableArchiveError("便携包累计退款超过原付款")
+
+    parsed_audit: list[dict[str, Any]] = []
+    for row in audit_rows:
+        try:
+            before = json.loads(row["before_json"]) if row["before_json"] else None
+            after = json.loads(row["after_json"])
+        except json.JSONDecodeError as exc:
+            raise PortableArchiveError("便携包审计前后值无效") from exc
+        parsed_audit.append(
+            {
+                "id": int(row["id"]),
+                "transaction_id": int(row["transaction_id"]),
+                "action": str(row["action"]),
+                "actor": str(row["actor"]),
+                "before": before,
+                "after": after,
+                "reason": str(row["reason"]),
+                "created_at": str(row["created_at"]),
+            }
+        )
+
+    active_payments = [
+        row for row in serialized if row["kind"] == "payment" and row["status"] == "active"
+    ]
+    active_refunds = [
+        row for row in serialized if row["kind"] == "refund" and row["status"] == "active"
+    ]
+    payments_cents = sum(int(row["amount_cents"]) for row in active_payments)
+    refunds_cents = sum(int(row["amount_cents"]) for row in active_refunds)
+    invariants = {
+        "transaction_count": len(serialized),
+        "active_payment_count": len(active_payments),
+        "active_refund_count": len(active_refunds),
+        "active_deposit_count": sum(1 for row in active_payments if row["is_deposit"]),
+        "void_transaction_count": sum(1 for row in serialized if row["status"] == "void"),
+        "transaction_tag_count": len(tag_rows),
+        "attachment_count": len(attachment_rows),
+        "audit_count": len(parsed_audit),
+        "max_transaction_id": max((int(row["id"]) for row in serialized), default=0),
+        "payments_cents": payments_cents,
+        "refunds_cents": refunds_cents,
+        "net_cents": payments_cents - refunds_cents,
+    }
+    return {
+        "metadata": metadata,
+        "transactions": serialized,
+        "transaction_tags": tag_rows,
+        "attachments": attachment_rows,
+        "audit_log": parsed_audit,
+        "invariants": invariants,
+        "summary": summary_from_grouped_transactions(serialized),
+        "monthly_summary": monthly_summary(serialized),
+    }
+
+
 def _expected_transaction_csv(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     fields = (
         "id",
@@ -534,6 +808,41 @@ def _expected_transaction_csv(rows: list[dict[str, Any]]) -> list[dict[str, str]
         values = dict(row)
         values["tags_json"] = json.dumps(row["tags"], ensure_ascii=False, separators=(",", ":"))
         values.pop("tags", None)
+        result.append(
+            {field: "" if values.get(field) is None else str(values.get(field)) for field in fields}
+        )
+    return result
+
+
+def _expected_transaction_csv_v2(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    fields = (
+        "id",
+        "kind",
+        "payment_id",
+        "amount_cents",
+        "amount",
+        "date",
+        "vendor",
+        "description",
+        "is_deposit",
+        "status",
+        "void_reason",
+        "created_at",
+        "updated_at",
+        "tags_json",
+        "grouped_tags_json",
+    )
+    result: list[dict[str, str]] = []
+    for row in rows:
+        values = dict(row)
+        values["tags_json"] = json.dumps(
+            row["tags"], ensure_ascii=False, separators=(",", ":")
+        )
+        values["grouped_tags_json"] = json.dumps(
+            row["grouped_tags"], ensure_ascii=False, separators=(",", ":")
+        )
+        values.pop("tags", None)
+        values.pop("grouped_tags", None)
         result.append(
             {field: "" if values.get(field) is None else str(values.get(field)) for field in fields}
         )
@@ -575,25 +884,36 @@ def verify_extracted(root: Path) -> dict[str, Any]:
     manifest = _load_json(root / "manifest.json")
     if not isinstance(manifest, dict):
         raise PortableArchiveError("便携包 manifest 不是对象")
-    if manifest.get("format_id") != FORMAT_ID or manifest.get("format_version") != FORMAT_VERSION:
+    format_version = manifest.get("format_version")
+    if manifest.get("format_id") != FORMAT_ID or format_version not in SUPPORTED_FORMAT_VERSIONS:
         raise PortableArchiveError("便携包格式 ID 或版本不受支持")
     if manifest.get("currency") != "CNY" or manifest.get("amount_unit") != "integer_cents":
         raise PortableArchiveError("便携包币种或金额单位无效")
     if manifest.get("hermes_required") is not False:
         raise PortableArchiveError("便携包未声明框架无关")
     semantics = manifest.get("semantics")
-    if not isinstance(semantics, dict) or any(
-        semantics.get(key) is not True
-        for key in (
-            "primary_category_single",
-            "refunds_link_to_payments",
-            "refunds_inherit_category_and_tags",
-            "tag_totals_overlap",
-            "tag_totals_must_not_be_summed",
-            "void_records_are_retained",
-        )
-    ):
+    if not isinstance(semantics, dict):
         raise PortableArchiveError("便携包账务语义声明不完整")
+    if format_version == FORMAT_VERSION:
+        if any(
+            semantics.get(key) is not True
+            for key in (
+                "primary_category_single",
+                "refunds_link_to_payments",
+                "refunds_inherit_category_and_tags",
+                "tag_totals_overlap",
+                "tag_totals_must_not_be_summed",
+                "void_records_are_retained",
+            )
+        ):
+            raise PortableArchiveError("便携包版本 1 账务语义声明不完整")
+    elif (
+        semantics.get("primary_category_single") is not False
+        or semantics.get("grouped_multi_tags") is not True
+        or semantics.get("tag_totals_overlap") is not True
+        or semantics.get("total_ledger_deduplicates_transactions") is not True
+    ):
+        raise PortableArchiveError("便携包版本 2 账务语义声明不完整")
     export = manifest.get("export")
     if not isinstance(export, dict) or export.get("manifest_self_excluded_from_hashes") is not True:
         raise PortableArchiveError("便携包 manifest 哈希规则不明确")
@@ -623,22 +943,33 @@ def verify_extracted(root: Path) -> dict[str, Any]:
         raise PortableArchiveError("便携包账本或 Schema 不是对象")
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise PortableArchiveError("便携包 Schema 版本无效")
-    if ledger.get("format_id") != FORMAT_ID or ledger.get("format_version") != FORMAT_VERSION:
+    if ledger.get("format_id") != FORMAT_ID or ledger.get("format_version") != format_version:
         raise PortableArchiveError("便携包 ledger 格式无效")
-    if ledger.get("currency") != "CNY" or ledger.get("amount_unit") != "integer_cents":
+    if format_version == FORMAT_VERSION and (
+        ledger.get("currency") != "CNY" or ledger.get("amount_unit") != "integer_cents"
+    ):
         raise PortableArchiveError("便携包 ledger 币种或金额单位无效")
     if not (root / "FORMAT.md").read_text(encoding="utf-8").strip():
         raise PortableArchiveError("便携包格式说明为空")
     expected_summary = ledger.get("summary")
     if not isinstance(expected_summary, dict):
         raise PortableArchiveError("便携包缺少汇总")
-    state = _snapshot_state(root / "bookkeeping.sqlite3", expected_summary)
+    state = (
+        _snapshot_state(root / "bookkeeping.sqlite3", expected_summary)
+        if format_version == FORMAT_VERSION
+        else _snapshot_state_v2(root / "bookkeeping.sqlite3")
+    )
     for key in ("metadata", "transactions", "transaction_tags", "attachments", "audit_log", "summary"):
         if ledger.get(key) != state[key]:
             raise PortableArchiveError(f"便携包 {key} 与 SQLite 不一致")
     if ledger.get("invariants") != state["invariants"] or manifest.get("invariants") != state["invariants"]:
         raise PortableArchiveError("便携包账务不变量与 SQLite 不一致")
-    if _load_csv(root / "transactions.csv") != _expected_transaction_csv(state["transactions"]):
+    expected_transactions_csv = (
+        _expected_transaction_csv(state["transactions"])
+        if format_version == FORMAT_VERSION
+        else _expected_transaction_csv_v2(state["transactions"])
+    )
+    if _load_csv(root / "transactions.csv") != expected_transactions_csv:
         raise PortableArchiveError("便携包 transactions.csv 与 SQLite 不一致")
     if _load_csv(root / "transaction_tags.csv") != _expected_tag_csv(state["transaction_tags"]):
         raise PortableArchiveError("便携包 transaction_tags.csv 与 SQLite 不一致")
@@ -670,7 +1001,7 @@ def verify_extracted(root: Path) -> dict[str, Any]:
         raise PortableArchiveError("便携包附件文件集合与元数据不一致")
     return {
         "format_id": FORMAT_ID,
-        "format_version": FORMAT_VERSION,
+        "format_version": format_version,
         "attachments_included": attachments_included,
         "verified_file_count": len(actual_files),
         "state": state,

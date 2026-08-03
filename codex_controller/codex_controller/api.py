@@ -66,6 +66,11 @@ def create_server(
                 if payload is not None:
                     self._call(service.cancel_device_login)
                 return
+            if path == "/api/auth/api-key/retry":
+                payload = self._read_json(allow_empty=True)
+                if payload is not None:
+                    self._call(service.begin_api_key_login)
+                return
             if path == "/api/auth/logout":
                 payload = self._read_json(allow_empty=True)
                 if payload is not None:
@@ -154,12 +159,21 @@ def create_server(
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Codex 控制器</title><style>body{margin:0;background:#0b1220;color:#edf4ff;font:15px system-ui}main{max-width:960px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.card{background:#121c2e;border:1px solid #263751;border-radius:12px;padding:16px}b{font-size:22px;display:block;margin-top:8px}.muted{color:#91a4bd}code{color:#42d392}button{border:0;border-radius:9px;padding:10px 14px;margin:4px;background:#2374e1;color:white;cursor:pointer}button.danger{background:#a63232}a{color:#7eb6ff}</style></head>
-<body><main><h1>Codex 控制器</h1><p class="muted">官方 app-server · ChatGPT Device Code · 多 Thread · 全局单活动 Turn</p>
+<body><main><h1>Codex 控制器</h1><p class="muted">官方 app-server · 显式双认证 · 多 Thread · 全局单活动 Turn</p>
 <div class="grid"><div class="card">服务<b id="ready">加载中</b></div><div class="card">认证<b id="auth">加载中</b></div><div class="card">排队<b id="queued">-</b></div><div class="card">恢复核对<b id="recovery">-</b></div></div>
-<h2>正式认证</h2><p>只允许与本机 Codex 同类的 ChatGPT managed 认证；HAOS 会建立独立会话，不复制本机凭据。</p>
-<button id="login">开始设备码登录</button><button id="cancel">取消登录</button><button class="danger" id="logout">退出登录</button>
-<div class="card"><div id="loginInfo" class="muted">尚未生成设备码。</div></div>
+<h2>正式认证</h2><p id="authHelp">认证模式由 Add-on options 显式选择，禁止自动降级或混用。</p>
+<button id="login">开始设备码登录</button><button id="cancel">取消登录</button><button id="retryApiKey">重试 API Key 登录</button><button class="danger" id="logout">退出登录</button>
+<div class="card"><div id="loginInfo" class="muted">正在读取认证配置。</div></div>
 <h2>安全状态</h2><p id="details" class="muted">加载中</p><script src="app.js"></script></main></body></html>"""
 
 
-DASHBOARD_JS = r"""const q=id=>document.getElementById(id);async function call(path){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'请求失败');return j.result}async function refresh(){try{const r=await fetch('api/status',{cache:'no-store'}),s=await r.json(),a=s.app_server.account;q('ready').textContent=s.ready?'就绪':'未就绪';q('auth').textContent=a.ready?'ChatGPT':'需要登录';q('queued').textContent=s.queue.jobs.queued;q('recovery').textContent=s.queue.jobs.recovery_required;const p=s.pending_login;q('loginInfo').innerHTML=p?`打开 <a target="_blank" rel="noreferrer" href="${p.verificationUrl}">${p.verificationUrl}</a><br>用户码：<code>${p.userCode}</code>`:'尚未生成设备码。';q('details').textContent=`Codex ${s.codex_version} · intake ${s.intake_enabled?'已启用':'关闭'} · Thread ${s.queue.threads} · app-server ${s.app_server.running?'运行':'停止'}`}catch(e){q('details').textContent=e.message}}q('login').onclick=async()=>{try{await call('api/auth/device/start');await refresh()}catch(e){alert(e.message)}};q('cancel').onclick=async()=>{try{await call('api/auth/device/cancel');await refresh()}catch(e){alert(e.message)}};q('logout').onclick=async()=>{if(confirm('确认退出 HAOS Controller 的独立 ChatGPT 会话？'))try{await call('api/auth/logout');await refresh()}catch(e){alert(e.message)}};refresh();setInterval(refresh,3000);"""
+DASHBOARD_JS = r"""const q=id=>document.getElementById(id);
+async function call(path){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'请求失败');return j.result}
+function showDeviceCode(p){const box=q('loginInfo');box.replaceChildren();if(!p){box.textContent='尚未生成设备码。';return}let url;try{url=new URL(p.verificationUrl)}catch(_){box.textContent='设备码响应无效。';return}if(url.protocol!=='https:'){box.textContent='设备码验证地址不是 HTTPS。';return}const link=document.createElement('a');link.target='_blank';link.rel='noreferrer';link.href=url.href;link.textContent=url.href;const code=document.createElement('code');code.textContent=p.userCode;box.append('打开 ',link,document.createElement('br'),'用户码：',code)}
+function showApiKey(s){q('loginInfo').textContent=s.api_key_configured?'API Key 已通过 Add-on options 私密配置；页面不会显示 Key 内容。':'尚未在 Add-on options 配置 API Key。'}
+async function refresh(){try{const r=await fetch('api/status',{cache:'no-store'}),s=await r.json(),a=s.app_server.account,api=s.configured_auth_mode==='api_key';q('ready').textContent=s.ready?'就绪':'未就绪';q('auth').textContent=a.auth_mode==='apiKey'?'API Key':a.auth_mode==='chatgpt'?'ChatGPT':'需要登录';q('queued').textContent=s.queue.jobs.queued;q('recovery').textContent=s.queue.jobs.recovery_required;q('login').hidden=api;q('cancel').hidden=api;q('retryApiKey').hidden=!api;q('authHelp').textContent=api?'当前选择 API Key。Key 只能在 Add-on options 中配置，页面不接收或显示秘密值。':'当前选择 ChatGPT Device Code。HAOS 使用独立会话，不复制本机凭据。';api?showApiKey(s):showDeviceCode(s.pending_login);q('details').textContent=`Codex ${s.codex_version} · 模式 ${s.configured_auth_mode} · 认证错误 ${s.auth_error||'无'} · intake ${s.intake_enabled?'已启用':'关闭'} · Thread ${s.queue.threads} · app-server ${s.app_server.running?'运行':'停止'}`}catch(e){q('details').textContent=e.message}}
+q('login').onclick=async()=>{try{await call('api/auth/device/start');await refresh()}catch(e){alert(e.message)}};
+q('cancel').onclick=async()=>{try{await call('api/auth/device/cancel');await refresh()}catch(e){alert(e.message)}};
+q('retryApiKey').onclick=async()=>{try{await call('api/auth/api-key/retry');await refresh()}catch(e){alert(e.message)}};
+q('logout').onclick=async()=>{if(confirm('确认退出 HAOS Controller 的独立 Codex 会话？'))try{await call('api/auth/logout');await refresh()}catch(e){alert(e.message)}};
+refresh();setInterval(refresh,3000);"""

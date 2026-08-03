@@ -1,5 +1,5 @@
 name: Codex Controller
-version: "0.1.0"
+version: "0.1.1"
 slug: codex_controller
 description: "基于官方 Codex app-server 的持久任务、认证与受限工具控制器。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_controller"
@@ -24,6 +24,8 @@ ports_description:
 options:
   internal_api_token: ""
   intake_enabled: false
+  auth_mode: chatgpt_device_code
+  openai_api_key: ""
   ledger_base_url: ""
   ledger_api_token: ""
   gateway_base_url: ""
@@ -37,6 +39,8 @@ options:
 schema:
   internal_api_token: password
   intake_enabled: bool
+  auth_mode: "list(chatgpt_device_code|api_key)"
+  openai_api_key: password
   ledger_base_url: str
   ledger_api_token: password
   gateway_base_url: str

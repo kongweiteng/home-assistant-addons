@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.3
+
+- 便携包固定读取器新增 `kanhuwan-renovation-ledger` v2 / SQLite Schema 3 支持，同时保留 v1 和早期 legacy 包兼容。
+- v2 会验证九个固定维度的分组标签、退款继承、`grouped_tags`、CSV、维度汇总、附件和审计，并完整恢复到私有只读 shadow。
+- v2 不迁移 Hub 主库、页面或 writer；兼容 shadow 的 `main_category` 为空占位，全部来源标签和来源版本均保留并重新校验。
+- 新增合成 v2 成功、无效分组标签、重复导入和 shadow 恢复回归。
+
 ## 0.1.2
 
 - 新增正式 `kanhuwan-renovation-ledger` v1 便携包的全不变量验证，不执行包内脚本，并逐项核对 SQLite、JSON、CSV、JSONL、manifest、退款关系、分类、标签、月份汇总、附件和审计前后值。

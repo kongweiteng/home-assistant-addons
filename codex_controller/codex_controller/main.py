@@ -12,6 +12,21 @@ from .store import ControllerStore
 from .tool_proxy import ToolProxyServer, ToolRouter
 
 
+def read_api_key_from_fd() -> str:
+    value = os.environ.get("CONTROLLER_OPENAI_API_KEY_FD", "")
+    if not value:
+        return ""
+    try:
+        descriptor = int(value)
+    except ValueError as exc:
+        raise RuntimeError("Controller API Key 文件描述符无效") from exc
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8", closefd=True) as stream:
+            return stream.read(4097)
+    except OSError as exc:
+        raise RuntimeError("Controller 无法读取 API Key") from exc
+
+
 def write_codex_config(codex_home: Path, socket_path: Path) -> None:
     codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
     config = codex_home / "config.toml"
@@ -59,6 +74,8 @@ def main() -> None:
         store,
         app_server,
         intake_enabled=os.environ.get("CONTROLLER_INTAKE_ENABLED", "false").lower() == "true",
+        auth_mode=os.environ.get("CONTROLLER_AUTH_MODE", "chatgpt_device_code"),
+        api_key=read_api_key_from_fd(),
     )
     service.start()
     server = create_server(

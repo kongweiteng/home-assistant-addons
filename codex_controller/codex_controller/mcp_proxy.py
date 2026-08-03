@@ -128,7 +128,7 @@ def main() -> None:
                 result = {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "ha-controller-tools", "version": "0.1.0"},
+                    "serverInfo": {"name": "ha-controller-tools", "version": "0.1.1"},
                 }
             elif method == "tools/list":
                 result = {"tools": tool_catalog()}

@@ -11,10 +11,25 @@ from .store import ControllerStore, StoreError
 
 
 class ControllerService:
-    def __init__(self, store: ControllerStore, app_server: AppServerClient, *, intake_enabled: bool):
+    AUTH_MODES = {"chatgpt_device_code", "api_key"}
+
+    def __init__(
+        self,
+        store: ControllerStore,
+        app_server: AppServerClient,
+        *,
+        intake_enabled: bool,
+        auth_mode: str = "chatgpt_device_code",
+        api_key: str = "",
+    ):
+        if auth_mode not in self.AUTH_MODES:
+            raise ValueError("Controller auth_mode 不受支持")
         self.store = store
         self.app_server = app_server
-        self.intake_enabled = intake_enabled
+        self.configured_intake_enabled = intake_enabled
+        self.configured_auth_mode = auth_mode
+        self._api_key = api_key if auth_mode == "api_key" else ""
+        self.auth_error: str | None = None
         self.pending_login: dict[str, Any] | None = None
         self.start_error: str | None = None
         self._stop = threading.Event()
@@ -29,6 +44,8 @@ class ControllerService:
             self.app_server.start()
         except AppServerError as exc:
             self.start_error = exc.code
+        else:
+            self._reconcile_initial_auth()
         self._scheduler = threading.Thread(target=self._scheduler_loop, name="codex-controller-scheduler", daemon=True)
         self._scheduler.start()
 
@@ -42,9 +59,27 @@ class ControllerService:
         return self.store.create_job(payload)
 
     def begin_device_login(self) -> dict[str, Any]:
+        if self.configured_auth_mode != "chatgpt_device_code":
+            raise AppServerError("auth_mode_rejected", "当前 options 未选择设备码登录", definitive=True)
         login = self.app_server.start_device_login()
         self.pending_login = login
+        self.auth_error = None
         return login
+
+    def begin_api_key_login(self) -> dict[str, Any]:
+        if self.configured_auth_mode != "api_key":
+            raise AppServerError("auth_mode_rejected", "当前 options 未选择 API Key 登录", definitive=True)
+        if not self._api_key:
+            self.auth_error = "api_key_missing"
+            raise AppServerError("api_key_missing", "请先在 Add-on options 中配置 API Key", definitive=True)
+        try:
+            result = self.app_server.start_api_key_login(self._api_key)
+        except AppServerError as exc:
+            self.auth_error = exc.code
+            raise
+        self.auth_error = None
+        self.pending_login = None
+        return result
 
     def cancel_device_login(self) -> dict[str, Any]:
         if self.pending_login is None:
@@ -61,13 +96,23 @@ class ControllerService:
 
     def status(self) -> dict[str, Any]:
         app = self.app_server.status()
-        if app["account"]["ready"]:
+        if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.1.0",
+            "version": "0.1.1",
             "codex_version": "0.146.0",
+            "configured_auth_mode": self.configured_auth_mode,
+            "api_key_configured": bool(self._api_key),
+            "auth_error": self.auth_error,
+            "intake_configured": self.configured_intake_enabled,
             "intake_enabled": self.intake_enabled,
-            "ready": bool(app["running"] and app["initialized"] and app["account"]["ready"] and self.start_error is None),
+            "ready": bool(
+                app["running"]
+                and app["initialized"]
+                and self._account_matches(app)
+                and self.start_error is None
+                and self.auth_error is None
+            ),
             "start_error": self.start_error,
             "app_server": app,
             "pending_login": self.pending_login,
@@ -96,12 +141,19 @@ class ControllerService:
                 handled = self.store.complete_turn(turn_id, status, error_code=error_code)
                 if not handled and allow_buffer:
                     self._buffer_event(turn_id, message)
-        elif method == "account/updated" and params.get("authMode") != "chatgpt":
-            self.intake_enabled = False
+        elif method == "account/updated":
+            expected = "chatgpt" if self.configured_auth_mode == "chatgpt_device_code" else "apikey"
+            actual = params.get("authMode")
+            if actual is None:
+                self.auth_error = None
+            elif actual != expected:
+                self.auth_error = "auth_mode_mismatch"
+            else:
+                self.auth_error = None
 
     def _scheduler_loop(self) -> None:
         while not self._stop.wait(0.5):
-            if not self.app_server.account_ready or self.start_error is not None:
+            if not self.intake_enabled or self.start_error is not None:
                 continue
             job = self.store.claim_next()
             if job is None:
@@ -142,3 +194,41 @@ class ControllerService:
             events = self._pending_turn_events.pop(turn_id, [])
         for message in events:
             self.handle_notification(message, allow_buffer=False)
+
+    @property
+    def intake_enabled(self) -> bool:
+        return bool(
+            self.configured_intake_enabled
+            and self.app_server.account_ready
+            and self._account_matches()
+            and self.auth_error is None
+        )
+
+    def _expected_account_type(self) -> str:
+        return "chatgpt" if self.configured_auth_mode == "chatgpt_device_code" else "apiKey"
+
+    def _account_matches(self, app_status: dict[str, Any] | None = None) -> bool:
+        if app_status is None:
+            actual = getattr(self.app_server, "auth_mode", None)
+        else:
+            account = app_status.get("account") if isinstance(app_status, dict) else None
+            actual = account.get("auth_mode") if isinstance(account, dict) else None
+        return actual == self._expected_account_type()
+
+    def _reconcile_initial_auth(self) -> None:
+        if self.configured_auth_mode == "chatgpt_device_code":
+            if self.app_server.account_ready and not self._account_matches():
+                self.auth_error = "auth_mode_mismatch"
+            return
+        if not self._api_key:
+            self.auth_error = "api_key_missing"
+            return
+        if self.app_server.account_ready:
+            self.auth_error = None if self._account_matches() else "auth_mode_mismatch"
+            return
+        try:
+            self.app_server.start_api_key_login(self._api_key)
+        except AppServerError as exc:
+            self.auth_error = exc.code
+        else:
+            self.auth_error = None

@@ -15,6 +15,20 @@ fi
 
 export CONTROLLER_API_TOKEN
 export CONTROLLER_INTAKE_ENABLED=$(jq -r '.intake_enabled // false' "$OPTIONS_FILE")
+export CONTROLLER_AUTH_MODE=$(jq -r '.auth_mode // "chatgpt_device_code"' "$OPTIONS_FILE")
+case "$CONTROLLER_AUTH_MODE" in
+    chatgpt_device_code)
+        unset CONTROLLER_OPENAI_API_KEY_FD
+        ;;
+    api_key)
+        exec 3< <(jq -j '.openai_api_key // ""' "$OPTIONS_FILE")
+        export CONTROLLER_OPENAI_API_KEY_FD=3
+        ;;
+    *)
+        bashio::log.fatal "auth_mode 只允许 chatgpt_device_code 或 api_key"
+        exit 1
+        ;;
+esac
 export CONTROLLER_LEDGER_BASE_URL=$(jq -r '.ledger_base_url // ""' "$OPTIONS_FILE")
 export CONTROLLER_LEDGER_API_TOKEN=$(jq -r '.ledger_api_token // ""' "$OPTIONS_FILE")
 export CONTROLLER_GATEWAY_BASE_URL=$(jq -r '.gateway_base_url // ""' "$OPTIONS_FILE")
@@ -31,5 +45,5 @@ export CONTROLLER_CODEX_HOME=/data/codex-home
 export CONTROLLER_WORKSPACE=/data/workspace
 export CONTROLLER_MCP_SOCKET=/data/runtime/tool-proxy.sock
 
-bashio::log.info "启动 Codex Controller；正式认证仅允许 ChatGPT Device Code，intake_enabled=${CONTROLLER_INTAKE_ENABLED}"
+bashio::log.info "启动 Codex Controller；auth_mode=${CONTROLLER_AUTH_MODE}，intake_enabled=${CONTROLLER_INTAKE_ENABLED}"
 exec python3 -m codex_controller.main

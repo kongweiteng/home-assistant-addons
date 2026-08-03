@@ -121,7 +121,7 @@ class RenovationHubDomainTests(unittest.TestCase):
         self.assertEqual(dashboard["counts"]["areas"], 1)
         self.assertEqual(dashboard["budget_remaining_cents"], 1_000_000)
         status = self.store.status()
-        self.assertEqual(status["version"], "0.1.2")
+        self.assertEqual(status["version"], "0.1.3")
         self.assertEqual(status["hub_schema_version"], 1)
         self.assertGreaterEqual(status["counts"]["audit_events"], 2)
 

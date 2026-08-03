@@ -4,6 +4,7 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -11,7 +12,9 @@ import threading
 import time
 import unittest
 
-from codex_controller.app_server import AppServerClient
+from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS
+from codex_controller.app_server import AppServerClient, AppServerError
+from codex_controller.main import read_api_key_from_fd
 from codex_controller.service import ControllerService
 from codex_controller.store import ControllerStore, StoreError
 from codex_controller.tool_proxy import ToolProxyError, ToolRouter, validate_base_url
@@ -32,6 +35,7 @@ def fixture_job(message_id: str = "fixture-message-1", text: str = "查询装修
 FAKE_APP_SERVER = r'''
 import json, sys
 thread_id = "thread-fixture"
+account_type = "chatgpt"
 for line in sys.stdin:
     message = json.loads(line)
     if "id" not in message:
@@ -41,15 +45,24 @@ for line in sys.stdin:
     if method == "initialize":
         result = {"userAgent":"codex-test","codexHome":"/data/codex-home","platformFamily":"unix","platformOs":"linux"}
     elif method == "account/read":
-        result = {"account":{"type":"chatgpt","email":None,"planType":"plus"},"requiresOpenaiAuth":True}
+        account = None if account_type is None else {"type":account_type,"email":None}
+        if account_type == "chatgpt":
+            account["planType"] = "plus"
+        result = {"account":account,"requiresOpenaiAuth":True}
     elif method == "account/login/start":
-        if message.get("params") != {"type":"chatgptDeviceCode"}:
+        params = message.get("params")
+        if params == {"type":"chatgptDeviceCode"}:
+            result = {"type":"chatgptDeviceCode","loginId":"login-fixture","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-1234"}
+        elif params == {"type":"apiKey","apiKey":"fixture-api-key-value"}:
+            account_type = "apiKey"
+            result = {"type":"apiKey"}
+        else:
             print(json.dumps({"id":request_id,"error":{"code":-32602,"message":"wrong auth"}}), flush=True)
             continue
-        result = {"type":"chatgptDeviceCode","loginId":"login-fixture","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-1234"}
     elif method == "account/login/cancel":
         result = {}
     elif method == "account/logout":
+        account_type = None
         result = {}
     elif method in ("thread/start", "thread/resume"):
         result = {"thread":{"id":thread_id,"turns":[]}}
@@ -146,19 +159,158 @@ class AppServerClientTests(unittest.TestCase):
         self.assertTrue(self.event.wait(2))
         self.assertIn("item/completed", [message.get("method") for message in self.notifications])
 
+    def test_api_key_login_is_exact_and_normalized(self) -> None:
+        self.client.start()
+        result = self.client.start_api_key_login("fixture-api-key-value")
+        self.assertEqual(result, {"type": "apiKey", "ready": True})
+        self.assertEqual(self.client.auth_mode, "apiKey")
+        self.assertTrue(self.client.account_ready)
+
+    def test_api_key_rejection_does_not_echo_secret(self) -> None:
+        self.client.start()
+        secret = "fixture-rejected-api-key"
+        with self.assertRaises(AppServerError) as context:
+            self.client.start_api_key_login(secret)
+        self.assertEqual(context.exception.code, "app_server_request_failed")
+        self.assertNotIn(secret, str(context.exception))
+
     def test_child_environment_excludes_internal_bearers(self) -> None:
         environment = self.client.build_child_env(
             {
                 "PATH": "/usr/bin",
                 "CONTROLLER_LEDGER_API_TOKEN": "secret-ledger",
                 "CONTROLLER_OPERATIONS_API_TOKEN": "secret-broker",
+                "CONTROLLER_OPENAI_API_KEY": "secret-openai",
                 "CONTROLLER_MCP_SOCKET": "/secret/path",
             }
         )
         self.assertEqual(environment["PATH"], "/usr/bin")
         self.assertNotIn("CONTROLLER_LEDGER_API_TOKEN", environment)
         self.assertNotIn("CONTROLLER_OPERATIONS_API_TOKEN", environment)
+        self.assertNotIn("CONTROLLER_OPENAI_API_KEY", environment)
         self.assertNotIn("CONTROLLER_MCP_SOCKET", environment)
+
+
+class ControllerAuthenticationTests(unittest.TestCase):
+    class StubApp:
+        def __init__(self, *, auth_mode: str | None = None) -> None:
+            self.auth_mode = auth_mode
+            self.account_ready = auth_mode is not None
+            self.notification_handler = None
+            self.api_key_calls: list[str] = []
+
+        def start(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+        def status(self) -> dict:
+            return {
+                "running": True,
+                "initialized": True,
+                "protocol_error": None,
+                "account": {"auth_mode": self.auth_mode, "plan_type": None, "ready": self.account_ready},
+            }
+
+        def start_api_key_login(self, api_key: str) -> dict:
+            self.api_key_calls.append(api_key)
+            self.auth_mode = "apiKey"
+            self.account_ready = True
+            return {"type": "apiKey", "ready": True}
+
+    def make_service(self, app: object, **kwargs: object) -> tuple[tempfile.TemporaryDirectory, ControllerService]:
+        temporary = tempfile.TemporaryDirectory()
+        store = ControllerStore(Path(temporary.name) / "controller.sqlite3")
+        service = ControllerService(store, app, intake_enabled=True, **kwargs)  # type: ignore[arg-type]
+        return temporary, service
+
+    def test_missing_api_key_fails_closed_without_secret_state(self) -> None:
+        app = self.StubApp()
+        temporary, service = self.make_service(app, auth_mode="api_key", api_key="")
+        try:
+            service.start()
+            status = service.status()
+            self.assertEqual(status["auth_error"], "api_key_missing")
+            self.assertFalse(status["api_key_configured"])
+            self.assertFalse(status["intake_enabled"])
+        finally:
+            service.stop()
+            temporary.cleanup()
+
+    def test_unlogged_api_key_mode_applies_key_without_exposing_it(self) -> None:
+        secret = "fixture-api-key-value"
+        app = self.StubApp()
+        temporary, service = self.make_service(app, auth_mode="api_key", api_key=secret)
+        try:
+            service.start()
+            status = service.status()
+            self.assertEqual(app.api_key_calls, [secret])
+            self.assertTrue(status["ready"])
+            self.assertTrue(status["intake_enabled"])
+            self.assertNotIn(secret, json.dumps(status, ensure_ascii=False))
+            self.assertNotIn(secret.encode(), (Path(temporary.name) / "controller.sqlite3").read_bytes())
+        finally:
+            service.stop()
+            temporary.cleanup()
+
+    def test_existing_wrong_account_fails_closed_until_explicit_retry(self) -> None:
+        secret = "fixture-api-key-value"
+        app = self.StubApp(auth_mode="chatgpt")
+        temporary, service = self.make_service(app, auth_mode="api_key", api_key=secret)
+        try:
+            service.start()
+            self.assertEqual(service.status()["auth_error"], "auth_mode_mismatch")
+            self.assertFalse(service.intake_enabled)
+            self.assertEqual(app.api_key_calls, [])
+            service.begin_api_key_login()
+            self.assertEqual(app.api_key_calls, [secret])
+            self.assertTrue(service.intake_enabled)
+        finally:
+            service.stop()
+            temporary.cleanup()
+
+    def test_modes_cannot_call_each_others_login_entry(self) -> None:
+        app = self.StubApp()
+        temporary, service = self.make_service(app, auth_mode="api_key", api_key="fixture-api-key-value")
+        try:
+            with self.assertRaisesRegex(AppServerError, "未选择设备码"):
+                service.begin_device_login()
+        finally:
+            service.stop()
+            temporary.cleanup()
+
+    def test_api_key_is_read_from_fd_and_not_named_environment_value(self) -> None:
+        read_fd, write_fd = os.pipe()
+        secret = b"fixture-api-key-value"
+        os.write(write_fd, secret)
+        os.close(write_fd)
+        original = os.environ.get("CONTROLLER_OPENAI_API_KEY_FD")
+        os.environ["CONTROLLER_OPENAI_API_KEY_FD"] = str(read_fd)
+        try:
+            self.assertEqual(read_api_key_from_fd(), secret.decode())
+            self.assertNotIn("CONTROLLER_OPENAI_API_KEY", os.environ)
+        finally:
+            if original is None:
+                os.environ.pop("CONTROLLER_OPENAI_API_KEY_FD", None)
+            else:
+                os.environ["CONTROLLER_OPENAI_API_KEY_FD"] = original
+
+    def test_ingress_supports_both_modes_without_key_input(self) -> None:
+        self.assertIn("api/auth/device/start", DASHBOARD_JS)
+        self.assertIn("api/auth/api-key/retry", DASHBOARD_JS)
+        self.assertIn("页面不会显示 Key 内容", DASHBOARD_JS)
+        self.assertNotIn("<input", DASHBOARD_HTML.lower())
+        self.assertNotIn("openai_api_key", DASHBOARD_HTML + DASHBOARD_JS)
+
+    def test_addon_config_and_run_script_keep_key_out_of_environment(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "codex_controller"
+        config = (root / "config.yaml").read_text(encoding="utf-8")
+        run_script = (root / "run.sh").read_text(encoding="utf-8")
+        self.assertIn('auth_mode: "list(chatgpt_device_code|api_key)"', config)
+        self.assertIn("openai_api_key: password", config)
+        self.assertIn("CONTROLLER_OPENAI_API_KEY_FD", run_script)
+        self.assertNotIn("export CONTROLLER_OPENAI_API_KEY=", run_script)
 
 
 class ToolRouterTests(unittest.TestCase):

@@ -38,6 +38,7 @@ class AppServerClient:
         "https_proxy",
         "no_proxy",
     }
+    SUPPORTED_ACCOUNT_TYPES = {"chatgpt", "apiKey"}
 
     def __init__(
         self,
@@ -105,7 +106,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.0"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.1"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -166,9 +167,13 @@ class AppServerClient:
             raise AppServerError("app_server_protocol_error", "账户响应无效")
         account = result.get("account")
         mode = account.get("type") if isinstance(account, dict) else None
-        self.auth_mode = mode
-        self.plan_type = account.get("planType") if isinstance(account, dict) and mode == "chatgpt" else None
-        self.account_ready = mode == "chatgpt"
+        self.auth_mode = self._normalize_auth_mode(mode)
+        self.plan_type = (
+            account.get("planType")
+            if isinstance(account, dict) and self.auth_mode == "chatgpt"
+            else None
+        )
+        self.account_ready = self.auth_mode in self.SUPPORTED_ACCOUNT_TYPES
         return self.account_status()
 
     def start_device_login(self) -> dict[str, Any]:
@@ -179,6 +184,24 @@ class AppServerClient:
         if any(not isinstance(result.get(field), str) or not result[field] for field in required):
             raise AppServerError("app_server_protocol_error", "设备码登录响应字段不完整")
         return {field: result[field] for field in ("type", *required)}
+
+    def start_api_key_login(self, api_key: str) -> dict[str, Any]:
+        if (
+            not isinstance(api_key, str)
+            or not api_key
+            or len(api_key) > 4096
+            or api_key.strip() != api_key
+            or "\n" in api_key
+            or "\r" in api_key
+        ):
+            raise AppServerError("api_key_missing", "API Key 未配置或格式无效", definitive=True)
+        result = self.request("account/login/start", {"type": "apiKey", "apiKey": api_key})
+        if not isinstance(result, dict) or result.get("type") != "apiKey":
+            raise AppServerError("auth_mode_rejected", "app-server 未接受 API Key 登录")
+        account = self.refresh_account()
+        if account["auth_mode"] != "apiKey":
+            raise AppServerError("auth_mode_rejected", "app-server 账户类型与 API Key 模式不匹配")
+        return {"type": "apiKey", "ready": True}
 
     def cancel_login(self, login_id: str) -> Any:
         if not login_id or len(login_id) > 256:
@@ -319,12 +342,20 @@ class AppServerClient:
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         if method == "account/updated":
             mode = params.get("authMode")
-            self.auth_mode = mode if isinstance(mode, str) else None
+            self.auth_mode = self._normalize_auth_mode(mode)
             self.plan_type = params.get("planType") if self.auth_mode == "chatgpt" else None
-            self.account_ready = self.auth_mode == "chatgpt"
+            self.account_ready = self.auth_mode in self.SUPPORTED_ACCOUNT_TYPES
         elif method == "account/login/completed":
             threading.Thread(target=self._safe_refresh_account, daemon=True).start()
         self.notification_handler(message)
+
+    @staticmethod
+    def _normalize_auth_mode(value: Any) -> str | None:
+        if value == "apikey":
+            return "apiKey"
+        if value in {"apiKey", "chatgpt"}:
+            return str(value)
+        return None
 
     def _safe_refresh_account(self) -> None:
         try:

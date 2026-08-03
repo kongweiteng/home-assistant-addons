@@ -33,21 +33,24 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 - `/data/media-previews`：图片缩略图和视频封面。
 - `/data/media-staging`：尚未完成校验的浏览器或 Controller 流式上传文件。
 - `/media/renovation-hub/originals`：图片和视频原件，只使用服务端生成的内容寻址文件名。
-- `/share/private/renovation-bookkeeping/current/kanhuwan-renovation-ledger.zip`：稳定 Ledger v1 便携包，不包含大视频。
+- `/share/private/renovation-bookkeeping/current/kanhuwan-renovation-ledger.zip`：Hermes 当前稳定便携包；Hub 只读入口支持格式 v1/v2，不包含大视频。
 
 原始媒体不写入 SQLite 或便携账本 ZIP。正式部署前必须单独确认 `/media` 后端、容量、备份与恢复方式。
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`format_version=1`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub 导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.1.3` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
 - SQLite `integrity_check`、外键、流水、退款关系、有效/撤销状态、订金和退款上限。
 - `ledger.json`、三个 CSV、`audit_log.jsonl` 与 SQLite 的逐字段一致性。
 - 分类、标签、月份汇总、附件元数据/文件哈希、审计数量/顺序/前后值。
+- v2 的 SQLite Schema 3、无主分类约束、九个固定标签维度、标签数量/长度/顺序、`grouped_tags`、`grouped_tags_json` 和 `tags + dimensions` 汇总。
 
 成功导入后，`/data/shadow/<来源 SHA-256>/` 保存只读来源快照、全部附件、Hub 兼容 `ledger.sqlite3` 和 `report.json`。报告只包含结构计数、校验布尔值和摘要哈希，不包含金额、商家、备注、附件正文或绝对私有路径。重复导入会重新校验来源快照、规范化数据库和附件，不会仅返回旧报告。
+
+v2 的 Hub 兼容 shadow 数据库会把 `main_category` 保留为空占位，并完整保存全部分组标签。该数据库只用于只读比对，不能作为主库迁移或页面 writer 的输入；正式迁移 v2 需要后续独立数据模型设计和授权。
 
 ## Writer 状态
 

@@ -29,6 +29,20 @@ class AppServerSchemaCompatibilityTests(unittest.TestCase):
             if variant.get("properties", {}).get("type", {}).get("enum")
         }
         self.assertIn("chatgptDeviceCode", login_types)
+        self.assertIn("apiKey", login_types)
+        api_key_login = next(
+            variant for variant in login["oneOf"]
+            if variant.get("properties", {}).get("type", {}).get("enum") == ["apiKey"]
+        )
+        self.assertIn("apiKey", api_key_login["required"])
+
+        login_response = self.load("v2/LoginAccountResponse.json")
+        response_types = {
+            variant["properties"]["type"]["enum"][0]
+            for variant in login_response["oneOf"]
+            if variant.get("properties", {}).get("type", {}).get("enum")
+        }
+        self.assertIn("apiKey", response_types)
 
         account = self.load("v2/GetAccountResponse.json")
         account_types = {
@@ -36,6 +50,7 @@ class AppServerSchemaCompatibilityTests(unittest.TestCase):
             for variant in account["definitions"]["Account"]["oneOf"]
         }
         self.assertIn("chatgpt", account_types)
+        self.assertIn("apiKey", account_types)
 
         thread_start_document = self.load("v2/ThreadStartParams.json")
         thread_start = thread_start_document["properties"]

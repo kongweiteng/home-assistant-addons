@@ -2,7 +2,7 @@
 
 Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-on，用于逐步接管 Hermes 当前的装修记账能力，并扩展项目、装修阶段、空间、施工时间线和图片视频档案。
 
-它保留付款、订金、退款、主分类、多标签、附件、修改、撤销、审计、查询、汇总、中文 PNG 图表和 Ledger v1 便携包语义，同时提供完整的桌面与手机管理页面。正式 Hermes 便携包使用 `kanhuwan-renovation-ledger` + `format_version=1`；Hub 早期合成包的 `kanhuwan-renovation-ledger@1` 读取兼容仍保留。Codex 只能调用结构化工具，不能直接执行 SQL、访问数据库目录或取得媒体原件路径。
+它保留付款、订金、退款、主分类、多标签、附件、修改、撤销、审计、查询、汇总、中文 PNG 图表和 Ledger v1 主库语义，同时提供完整的桌面与手机管理页面。正式 Hermes 便携包的只读影子入口同时支持 `kanhuwan-renovation-ledger` v1/v2；Hub 早期合成包的 `kanhuwan-renovation-ledger@1` 读取兼容仍保留。Codex 只能调用结构化工具，不能直接执行 SQL、访问数据库目录或取得媒体原件路径。
 
 ## 主要能力
 
@@ -13,12 +13,13 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 - Weixin Gateway 的一次性媒体引用由 Codex Controller 主进程流式转发，媒体正文、内部 bearer 和路径不进入模型或 app-server。
 - 页面与 Codex 工具复用同一业务层、幂等键、乐观版本、单 writer 和审计规则。
 - 便携包导入不执行包内 `verify.py`，由 Hub 自身交叉核对 SQLite、JSON、CSV、JSONL、manifest、附件、退款、分类、标签、月份汇总和审计顺序。
+- v2 分组式多标签只进入私有 shadow：完整保留九个维度的 `维度:值` 标签、退款继承、`grouped_tags`、维度汇总、附件和审计，不写主库、不改变页面或 writer。
 - 正式包只写入按来源 SHA-256 隔离的私有影子目录；原始快照、附件和 Hub 兼容数据库同时保留，重复导入会重新校验而不是盲信缓存报告。
 - React 19、TypeScript 与 Vite 前端在镜像构建阶段编译，运行镜像只提供静态资源和 Python 服务。
 
 ## 当前阶段
 
-- 版本：`0.1.2`，实验候选。
+- 版本：`0.1.3`，实验候选。
 - 默认 `writer_mode=read_only`。
 - P1～P6 本地源码、合成验证、完整前端门禁、恢复测试和 amd64/aarch64 镜像构建均已完成。
 - 维护者 HAOS 已完成本地 Store 只读影子安装、Ingress、权限、真实未登录 Controller 路由和重启持久化验证；未创建 GitHub Release。

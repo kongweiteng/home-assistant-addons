@@ -1,0 +1,14 @@
+{"method":"initialize","id":1,"params":{"clientInfo":{"name":"ha_codex_controller","title":"Home Assistant Codex Controller","version":"0.1.0"}}}
+{"id":1,"result":{"userAgent":"codex-test","codexHome":"/data/codex-home","platformFamily":"unix","platformOs":"linux"}}
+{"method":"initialized","params":{}}
+{"method":"account/read","id":2,"params":{}}
+{"id":2,"result":{"account":null,"requiresOpenaiAuth":true}}
+{"method":"account/login/start","id":3,"params":{"type":"chatgptDeviceCode"}}
+{"id":3,"result":{"type":"chatgptDeviceCode","loginId":"login-fixture","verificationUrl":"https://auth.openai.com/codex/device","userCode":"ABCD-1234"}}
+{"method":"account/updated","params":{"authMode":"chatgpt","planType":"plus"}}
+{"method":"thread/start","id":4,"params":{"cwd":"/data/workspace"}}
+{"id":4,"result":{"thread":{"id":"thread-fixture","turns":[]}}}
+{"method":"turn/start","id":5,"params":{"threadId":"thread-fixture","input":[{"type":"text","text":"查询装修支出"}]}}
+{"id":5,"result":{"turn":{"id":"turn-fixture","status":"inProgress"}}}
+{"method":"item/completed","params":{"threadId":"thread-fixture","turnId":"turn-fixture","item":{"type":"agentMessage","id":"item-fixture","text":"查询完成。"}}}
+{"method":"turn/completed","params":{"threadId":"thread-fixture","turn":{"id":"turn-fixture","status":"completed"}}}

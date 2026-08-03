@@ -1,0 +1,37 @@
+name: Renovation Ledger
+version: "0.1.0"
+slug: renovation_ledger
+description: "独立、可审计、单写入者的装修账本与便携导出服务。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/renovation_ledger"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+stage: experimental
+backup: cold
+ingress: true
+ingress_port: 8101
+panel_icon: mdi:notebook-edit-outline
+panel_title: 装修账本
+panel_admin: true
+watchdog: "http://[HOST]:[PORT:8101]/healthz"
+ports:
+  8101/tcp: null
+ports_description:
+  8101/tcp: "仅供 Ingress 与 Add-on 内部认证 API 使用，不映射宿主端口"
+map:
+  - share:rw
+options:
+  api_token: ""
+  writer_mode: read_only
+  max_request_bytes: 33554432
+  max_attachment_bytes: 20971520
+  portable_history_limit: 20
+schema:
+  api_token: password
+  writer_mode: "list(read_only|primary_writer|suspended)"
+  max_request_bytes: "int(4096,52428800)"
+  max_attachment_bytes: "int(1024,52428800)"
+  portable_history_limit: "int(1,200)"

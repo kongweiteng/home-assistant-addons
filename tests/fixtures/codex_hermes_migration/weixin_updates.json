@@ -1,0 +1,29 @@
+{
+  "ret": 0,
+  "get_updates_buf": "opaque-next-cursor",
+  "msgs": [
+    {
+      "message_id": "fixture-message-1",
+      "from_user_id": "fixture-owner",
+      "to_user_id": "fixture-account",
+      "context_token": "fixture-context-token",
+      "item_list": [
+        {
+          "type": 1,
+          "text_item": {
+            "text": "查询装修支出"
+          }
+        },
+        {
+          "type": 2,
+          "image_item": {
+            "aeskey": "00000000000000000000000000000000",
+            "media": {
+              "full_url": "https://novac2c.cdn.weixin.qq.com/c2c/fixture-image"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

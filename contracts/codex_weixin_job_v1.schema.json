@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/contracts/codex-weixin-job-v1.schema.json",
+  "title": "Codex Weixin Job v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "message_id",
+    "conversation_key",
+    "received_at",
+    "text",
+    "attachments",
+    "reply_capabilities"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "message_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "conversation_key": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "received_at": {"type": "string", "format": "date-time"},
+    "text": {"type": "string", "maxLength": 32000},
+    "attachments": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attachment_ref", "media_type", "size_bytes", "sha256"],
+        "properties": {
+          "attachment_ref": {"type": "string", "minLength": 16, "maxLength": 256},
+          "media_type": {"enum": ["image", "file", "video", "audio"]},
+          "size_bytes": {"type": "integer", "minimum": 1, "maximum": 52428800},
+          "sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+          "display_name": {"type": "string", "maxLength": 255}
+        }
+      }
+    },
+    "reply_capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["text", "image", "file"]}
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/contracts/ha-operations-receipt-v1.schema.json",
+  "title": "HA Operations Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "receipt_id",
+    "proposal_hash",
+    "idempotency_key",
+    "state",
+    "executed_at",
+    "verification"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "receipt_id": {"type": "string", "minLength": 12, "maxLength": 128},
+    "proposal_hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "idempotency_key": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "state": {"enum": ["executed", "verified", "rolled_back", "failed"]},
+    "executed_at": {"type": "string", "format": "date-time"},
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "checks"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "not_run"]},
+        "checks": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "status"],
+            "properties": {
+              "name": {"type": "string", "maxLength": 128},
+              "status": {"enum": ["passed", "failed", "skipped"]},
+              "summary": {"type": "string", "maxLength": 1024}
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,52 @@
+name: Weixin Gateway
+version: "0.1.0"
+slug: weixin_gateway
+description: "保留个人微信 iLink 身份的最小消息与媒体网关。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+stage: experimental
+backup: cold
+ingress: true
+ingress_port: 8103
+panel_icon: mdi:wechat
+panel_title: 微信网关
+panel_admin: true
+watchdog: "http://[HOST]:[PORT:8103]/healthz"
+ports:
+  8103/tcp: null
+ports_description:
+  8103/tcp: "仅供 Home Assistant Ingress 和受认证附件 API 使用"
+options:
+  attachment_api_token: ""
+  poller_enabled: false
+  activation_confirmation: ""
+  controller_base_url: ""
+  controller_api_token: ""
+  account_id: ""
+  ilink_token: ""
+  ilink_base_url: "https://ilinkai.weixin.qq.com"
+  cdn_base_url: "https://novac2c.cdn.weixin.qq.com/c2c"
+  self_user_id: ""
+  allowed_user_ids: []
+  max_media_bytes: 20971520
+  spool_ttl_seconds: 86400
+schema:
+  attachment_api_token: password
+  poller_enabled: bool
+  activation_confirmation: str
+  controller_base_url: str
+  controller_api_token: password
+  account_id: str
+  ilink_token: password
+  ilink_base_url: url
+  cdn_base_url: url
+  self_user_id: str
+  allowed_user_ids:
+    - str
+  max_media_bytes: "int(1024,52428800)"
+  spool_ttl_seconds: "int(300,604800)"

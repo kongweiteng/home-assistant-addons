@@ -1,0 +1,27 @@
+{
+  "format_id": "kanhuwan-renovation-ledger@1",
+  "currency": "CNY",
+  "transactions": [
+    {
+      "legacy_id": 1,
+      "type": "payment",
+      "amount_cents": 100000,
+      "occurred_on": "2026-01-02",
+      "main_category": "水电工程",
+      "merchant": "示例商家",
+      "note": "合成测试数据",
+      "is_deposit": false,
+      "status": "active",
+      "tags": ["智能家居"]
+    },
+    {
+      "legacy_id": 2,
+      "type": "refund",
+      "amount_cents": 10000,
+      "occurred_on": "2026-01-05",
+      "original_legacy_id": 1,
+      "note": "合成退款",
+      "status": "active"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+name: Codex Controller
+version: "0.1.0"
+slug: codex_controller
+description: "基于官方 Codex app-server 的持久任务、认证与受限工具控制器。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_controller"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+stage: experimental
+backup: cold
+ingress: true
+ingress_port: 8102
+panel_icon: mdi:robot-outline
+panel_title: Codex 控制器
+panel_admin: true
+watchdog: "http://[HOST]:[PORT:8102]/healthz"
+ports:
+  8102/tcp: null
+ports_description:
+  8102/tcp: "仅供 Home Assistant Ingress 和内部作业 API 使用"
+options:
+  internal_api_token: ""
+  intake_enabled: false
+  ledger_base_url: ""
+  ledger_api_token: ""
+  gateway_base_url: ""
+  gateway_attachment_token: ""
+  operations_base_url: ""
+  operations_api_token: ""
+  max_request_bytes: 1048576
+  max_queue: 200
+  max_result_chars: 12000
+schema:
+  internal_api_token: password
+  intake_enabled: bool
+  ledger_base_url: str
+  ledger_api_token: password
+  gateway_base_url: str
+  gateway_attachment_token: password
+  operations_base_url: str
+  operations_api_token: password
+  max_request_bytes: "int(4096,52428800)"
+  max_queue: "int(1,5000)"
+  max_result_chars: "int(1000,32000)"

@@ -1,0 +1,14 @@
+# Codex、微信与装修账本共享契约
+
+本目录保存 Codex Controller、Weixin Gateway、Renovation Ledger 和 HA Operations Broker 之间的公开、脱敏、版本化契约。
+
+- `codex_weixin_job_v1.schema.json`：微信消息进入 Controller 的作业格式。
+- `renovation_ledger_tools_v1.json`：Codex 可以调用的确定性账本工具清单。
+- `ha_operations_receipt_v1.schema.json`：HA Operations Broker 执行或验证结果的收据格式。
+
+规则：
+
+1. `message_id` 是微信消息到 Codex Turn、账本写入和 HA 操作的幂等根。
+2. 原始微信用户 ID、Token、账目正文、附件内容和内部 bearer 不得进入契约 fixture。
+3. 删除字段、收紧类型或改变错误语义必须升级契约版本并重新完成开发前评审。
+4. JSON Schema 只描述跨组件边界；每个服务仍需在运行时执行大小、权限、路径和业务不变量校验。

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "format_id": "kanhuwan-renovation-ledger@1",
+  "tools": [
+    {"name": "ledger_add_payment", "write": true, "required": ["idempotency_key", "amount_cents", "occurred_on", "main_category"]},
+    {"name": "ledger_add_refund", "write": true, "required": ["idempotency_key", "original_payment_id", "amount_cents", "occurred_on"]},
+    {"name": "ledger_correct_payment", "write": true, "required": ["idempotency_key", "payment_id", "changes", "reason"]},
+    {"name": "ledger_undo", "write": true, "required": ["idempotency_key", "transaction_id", "reason"]},
+    {"name": "ledger_attach", "write": true, "required": ["idempotency_key", "transaction_id", "attachment_ref"]},
+    {"name": "ledger_show", "write": false, "required": ["transaction_id"]},
+    {"name": "ledger_query", "write": false, "required": []},
+    {"name": "ledger_summary", "write": false, "required": []},
+    {"name": "ledger_generate_chart", "write": false, "required": []},
+    {"name": "ledger_export", "write": false, "required": []},
+    {"name": "ledger_verify_export", "write": false, "required": []},
+    {"name": "ledger_import_inspect", "write": false, "required": ["import_ref"]},
+    {"name": "ledger_import_shadow", "write": true, "required": ["idempotency_key", "import_ref"]}
+  ]
+}

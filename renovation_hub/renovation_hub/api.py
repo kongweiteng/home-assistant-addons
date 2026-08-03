@@ -1,4 +1,4 @@
-"""Ingress status page and authenticated internal Ledger tool API."""
+"""Renovation Hub HTTP entrypoints and legacy Ledger tool API."""
 
 from __future__ import annotations
 
@@ -8,9 +8,10 @@ import hmac
 import json
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from .core import LedgerError, LedgerStore
+from .hub import RenovationHubStore
+from .ledger import LedgerError, LedgerStore
 
 
 def create_server(
@@ -22,13 +23,14 @@ def create_server(
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "RenovationLedger/0.1"
+        server_version = "RenovationHub/0.1"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
 
         def do_GET(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
+            parsed = urlsplit(self.path)
+            path = parsed.path
             if path == "/healthz":
                 self._json(HTTPStatus.OK, store.status())
                 return
@@ -37,6 +39,31 @@ def create_server(
                 return
             if path == "/api/status":
                 self._json(HTTPStatus.OK, store.status())
+                return
+            if isinstance(store, RenovationHubStore) and path.startswith("/api/v1/"):
+                try:
+                    query = self._query(parsed.query)
+                    if path == "/api/v1/projects":
+                        result: Any = {"items": store.list_projects(query)}
+                    elif path == "/api/v1/stages":
+                        result = {"items": store.list_stages(str(query.get("project_id") or ""))}
+                    elif path == "/api/v1/areas":
+                        result = {"items": store.list_areas(str(query.get("project_id") or ""))}
+                    elif path == "/api/v1/timeline":
+                        if "limit" in query:
+                            query["limit"] = int(query["limit"])
+                        result = {"items": store.timeline(query)}
+                    elif path == "/api/v1/dashboard":
+                        result = store.dashboard(str(query.get("project_id") or ""))
+                    else:
+                        self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                        return
+                except (LedgerError, ValueError) as exc:
+                    status = HTTPStatus(exc.status) if isinstance(exc, LedgerError) else HTTPStatus.BAD_REQUEST
+                    code = exc.code if isinstance(exc, LedgerError) else "invalid_input"
+                    self._json(status, {"error": {"code": code, "message": str(exc)}})
+                else:
+                    self._json(HTTPStatus.OK, {"version": 1, "result": result})
                 return
             if path == "/internal/v1/status":
                 if self._authorized():
@@ -117,6 +144,10 @@ def create_server(
                 return
             self._file(HTTPStatus.OK, content_type, root / reference)
 
+        @staticmethod
+        def _query(value: str) -> dict[str, Any]:
+            return {key: items[-1] for key, items in parse_qs(value, keep_blank_values=False).items() if items}
+
         def _file(self, status: HTTPStatus, content_type: str, path: Path) -> None:
             try:
                 resolved = path.resolve(strict=True)
@@ -186,6 +217,33 @@ def dispatch_tool(store: LedgerStore, payload: dict[str, Any]) -> dict[str, Any]
             raise LedgerError("import_invalid", "import_ref 非法")
         path = store.import_dir / reference
         return store.inspect_import(path) if name == "ledger_import_inspect" else store.import_shadow(path)
+    if isinstance(store, RenovationHubStore):
+        if name == "renovation_project_create":
+            return store.create_project(arguments, actor_hash=actor_hash)
+        if name == "renovation_project_update":
+            return store.update_project(arguments, actor_hash=actor_hash)
+        if name == "renovation_project_list":
+            return {"items": store.list_projects(arguments)}
+        if name == "renovation_stage_create":
+            return store.create_stage(arguments, actor_hash=actor_hash)
+        if name == "renovation_stage_update":
+            return store.update_stage(arguments, actor_hash=actor_hash)
+        if name == "renovation_stage_list":
+            return {"items": store.list_stages(str(arguments.get("project_id") or ""))}
+        if name == "renovation_area_create":
+            return store.create_area(arguments, actor_hash=actor_hash)
+        if name == "renovation_area_update":
+            return store.update_area(arguments, actor_hash=actor_hash)
+        if name == "renovation_area_list":
+            return {"items": store.list_areas(str(arguments.get("project_id") or ""))}
+        if name == "renovation_event_create":
+            return store.create_event(arguments, actor_hash=actor_hash)
+        if name == "renovation_event_update":
+            return store.update_event(arguments, actor_hash=actor_hash)
+        if name == "renovation_timeline":
+            return {"items": store.timeline(arguments)}
+        if name == "renovation_dashboard":
+            return store.dashboard(str(arguments.get("project_id") or ""))
     raise LedgerError("unknown_tool", "工具不在允许清单", status=404)
 
 

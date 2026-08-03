@@ -1,4 +1,4 @@
-"""Deterministic SQLite ledger, audit trail, charts and portable exports."""
+"""Legacy-compatible ledger module for Renovation Hub."""
 
 from __future__ import annotations
 
@@ -273,7 +273,7 @@ class LedgerStore:
                 "audit_events": connection.execute("SELECT count(*) FROM audit_log").fetchone()[0],
             }
         return {
-            "service": "renovation_ledger",
+            "service": "renovation_hub",
             "version": "0.1.0",
             "schema_version": int(meta["schema_version"]),
             "format_id": meta["format_id"],
@@ -385,6 +385,32 @@ class LedgerStore:
             ),
         )
 
+    def _after_transaction_insert(
+        self,
+        connection: sqlite3.Connection,
+        transaction_id: str,
+        payload: dict[str, Any],
+        *,
+        original_payment_id: str | None = None,
+    ) -> None:
+        """Extension hook for Hub-owned transaction context."""
+
+    def _validate_transaction_version(
+        self,
+        connection: sqlite3.Connection,
+        transaction_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Extension hook for optimistic page edits without changing Ledger v1."""
+
+    def _after_transaction_update(
+        self,
+        connection: sqlite3.Connection,
+        transaction_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Extension hook paired with ``_validate_transaction_version``."""
+
     def add_payment(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
         key = _idempotency_key(payload.get("idempotency_key"))
         clean = {
@@ -419,12 +445,23 @@ class LedgerStore:
                 ),
             )
             self._set_tags(connection, transaction_id, clean["tags"])
+            self._after_transaction_insert(connection, transaction_id, payload)
             row = connection.execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone()
             result = self._row_json(connection, row)
             self._audit(connection, action="add_payment", target_id=transaction_id, actor_hash=actor_hash, idempotency_key=key, reason="", before=None, after=result)
             return result
 
-        result, replayed = self._run_idempotent(key=key, request={"tool": "ledger_add_payment", **clean}, operation=operation)
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={
+                "tool": "ledger_add_payment",
+                **clean,
+                "project_id": payload.get("project_id"),
+                "stage_id": payload.get("stage_id"),
+                "area_id": payload.get("area_id"),
+            },
+            operation=operation,
+        )
         return self._after_write(result, replayed=replayed)
 
     def add_refund(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
@@ -468,12 +505,28 @@ class LedgerStore:
                     now,
                 ),
             )
+            self._after_transaction_insert(
+                connection,
+                transaction_id,
+                payload,
+                original_payment_id=payment["id"],
+            )
             row = connection.execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone()
             result = self._row_json(connection, row)
             self._audit(connection, action="add_refund", target_id=transaction_id, actor_hash=actor_hash, idempotency_key=key, reason="", before=None, after=result)
             return result
 
-        result, replayed = self._run_idempotent(key=key, request={"tool": "ledger_add_refund", **clean}, operation=operation)
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={
+                "tool": "ledger_add_refund",
+                **clean,
+                "project_id": payload.get("project_id"),
+                "stage_id": payload.get("stage_id"),
+                "area_id": payload.get("area_id"),
+            },
+            operation=operation,
+        )
         return self._after_write(result, replayed=replayed)
 
     def correct_payment(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
@@ -506,6 +559,7 @@ class LedgerStore:
             row = connection.execute("SELECT * FROM transactions WHERE id=? AND type='payment' AND status='active'", (payment_id,)).fetchone()
             if row is None:
                 raise LedgerError("payment_not_found", "付款不存在或已撤销", status=404)
+            self._validate_transaction_version(connection, payment_id, payload)
             before = self._row_json(connection, row)
             if "amount_cents" in clean_changes:
                 refunded = connection.execute("SELECT coalesce(sum(amount_cents),0) FROM transactions WHERE type='refund' AND status='active' AND original_payment_id=?", (payment_id,)).fetchone()[0]
@@ -520,12 +574,17 @@ class LedgerStore:
                 connection.execute(f"UPDATE transactions SET {sql} WHERE id=?", (*columns.values(), payment_id))
             if "tags" in clean_changes:
                 self._set_tags(connection, payment_id, clean_changes["tags"])
+            self._after_transaction_update(connection, payment_id, payload)
             updated = connection.execute("SELECT * FROM transactions WHERE id=?", (payment_id,)).fetchone()
             result = self._row_json(connection, updated)
             self._audit(connection, action="correct_payment", target_id=payment_id, actor_hash=actor_hash, idempotency_key=key, reason=reason, before=before, after=result)
             return result
 
-        result, replayed = self._run_idempotent(key=key, request={"tool": "ledger_correct_payment", "payment_id": payment_id, "changes": clean_changes, "reason": reason}, operation=operation)
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={"tool": "ledger_correct_payment", "payment_id": payment_id, "version": payload.get("version"), "changes": clean_changes, "reason": reason},
+            operation=operation,
+        )
         return self._after_write(result, replayed=replayed)
 
     def undo(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
@@ -537,18 +596,24 @@ class LedgerStore:
             row = connection.execute("SELECT * FROM transactions WHERE id=? AND status='active'", (transaction_id,)).fetchone()
             if row is None:
                 raise LedgerError("transaction_not_found", "流水不存在或已撤销", status=404)
+            self._validate_transaction_version(connection, transaction_id, payload)
             before = self._row_json(connection, row)
             if row["type"] == "payment":
                 refunds = connection.execute("SELECT count(*) FROM transactions WHERE type='refund' AND status='active' AND original_payment_id=?", (transaction_id,)).fetchone()[0]
                 if refunds:
                     raise LedgerError("payment_has_refunds", "付款存在有效退款，不能直接撤销", status=409)
             connection.execute("UPDATE transactions SET status='voided',updated_at=? WHERE id=?", (utc_now(), transaction_id))
+            self._after_transaction_update(connection, transaction_id, payload)
             updated = connection.execute("SELECT * FROM transactions WHERE id=?", (transaction_id,)).fetchone()
             result = self._row_json(connection, updated)
             self._audit(connection, action="undo", target_id=transaction_id, actor_hash=actor_hash, idempotency_key=key, reason=reason, before=before, after=result)
             return result
 
-        result, replayed = self._run_idempotent(key=key, request={"tool": "ledger_undo", "transaction_id": transaction_id, "reason": reason}, operation=operation)
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={"tool": "ledger_undo", "transaction_id": transaction_id, "version": payload.get("version"), "reason": reason},
+            operation=operation,
+        )
         return self._after_write(result, replayed=replayed)
 
     def attach_content(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:

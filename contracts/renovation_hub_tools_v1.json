@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "service": "renovation_hub",
+  "legacy_contract": "renovation_ledger_tools_v1.json",
+  "tools": [
+    {"name": "renovation_project_create", "write": true, "required": ["idempotency_key", "name"]},
+    {"name": "renovation_project_update", "write": true, "required": ["idempotency_key", "project_id", "version", "changes"]},
+    {"name": "renovation_project_list", "write": false, "required": []},
+    {"name": "renovation_stage_create", "write": true, "required": ["idempotency_key", "project_id", "name"]},
+    {"name": "renovation_stage_update", "write": true, "required": ["idempotency_key", "stage_id", "version", "changes"]},
+    {"name": "renovation_stage_list", "write": false, "required": ["project_id"]},
+    {"name": "renovation_area_create", "write": true, "required": ["idempotency_key", "project_id", "name"]},
+    {"name": "renovation_area_update", "write": true, "required": ["idempotency_key", "area_id", "version", "changes"]},
+    {"name": "renovation_area_list", "write": false, "required": ["project_id"]},
+    {"name": "renovation_event_create", "write": true, "required": ["idempotency_key", "project_id", "title", "occurred_at"]},
+    {"name": "renovation_event_update", "write": true, "required": ["idempotency_key", "event_id", "version", "changes"]},
+    {"name": "renovation_timeline", "write": false, "required": ["project_id"]},
+    {"name": "renovation_dashboard", "write": false, "required": ["project_id"]},
+    {"name": "renovation_media_ingest", "write": true, "required": ["idempotency_key", "attachment_ref", "project_id"]}
+  ]
+}

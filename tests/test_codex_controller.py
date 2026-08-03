@@ -163,7 +163,7 @@ class AppServerClientTests(unittest.TestCase):
 
 class ToolRouterTests(unittest.TestCase):
     def test_internal_url_rejects_ip_paths_and_credentials(self) -> None:
-        self.assertEqual(validate_base_url("http://renovation-ledger:8101"), "http://renovation-ledger:8101")
+        self.assertEqual(validate_base_url("http://renovation-hub:8101"), "http://renovation-hub:8101")
         for value in ("https://service", "http://127.0.0.1:8101", "http://user@service", "http://service/private"):
             with self.assertRaises(ToolProxyError):
                 validate_base_url(value)
@@ -176,7 +176,8 @@ class ToolRouterTests(unittest.TestCase):
             return {"version": 1, "result": {"ok": True}}
 
         token = "x" * 32
-        router = ToolRouter(ledger_base_url="http://renovation-ledger:8101", ledger_token=token, request_json=fake_request)
+        router = ToolRouter(ledger_base_url="http://renovation-hub:8101", ledger_token=token, request_json=fake_request)
+        self.assertIn("renovation_dashboard", router.available_tools())
         result = router.call("ledger_summary", {})
         self.assertTrue(result["result"]["ok"])
         self.assertEqual(observed[0][2], token)
@@ -221,7 +222,7 @@ class ToolRouterTests(unittest.TestCase):
         thread.start()
         try:
             router = ToolRouter(
-                ledger_base_url="http://renovation-ledger:8101",
+                ledger_base_url="http://renovation-hub:8101",
                 ledger_token="l" * 32,
                 gateway_base_url=f"http://localhost:{server.server_port}",
                 gateway_token=gateway_token,
@@ -259,7 +260,7 @@ class ToolRouterTests(unittest.TestCase):
             thread.join(timeout=2)
 
     def test_attachment_tool_is_hidden_without_gateway_credentials(self) -> None:
-        router = ToolRouter(ledger_base_url="http://renovation-ledger:8101", ledger_token="l" * 32)
+        router = ToolRouter(ledger_base_url="http://renovation-hub:8101", ledger_token="l" * 32)
         self.assertNotIn("ledger_attach", router.available_tools())
         with self.assertRaises(ToolProxyError) as context:
             router.call(
@@ -267,6 +268,33 @@ class ToolRouterTests(unittest.TestCase):
                 {"idempotency_key": "fixture", "transaction_id": "fixture", "attachment_ref": "a" * 43},
             )
         self.assertEqual(context.exception.code, "gateway_unavailable")
+
+    def test_media_tool_streams_reference_without_base64_arguments(self) -> None:
+        observed: list[tuple] = []
+
+        def fake_stream(*args: object) -> dict:
+            observed.append(args)
+            return {"version": 1, "result": {"media": {"id": "fixture-media"}}}
+
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            gateway_base_url="http://weixin-gateway:8103",
+            gateway_token="g" * 32,
+            stream_media=fake_stream,
+        )
+        result = router.call(
+            "renovation_media_ingest",
+            {
+                "idempotency_key": "fixture-media-" + "0" * 24,
+                "attachment_ref": "a" * 43,
+                "project_id": "fixture-project",
+            },
+        )
+        self.assertEqual(result["result"]["media"]["id"], "fixture-media")
+        forwarded = observed[0][5]
+        self.assertNotIn("attachment_ref", forwarded)
+        self.assertNotIn("content_base64", forwarded)
 
 
 class ControllerServiceRaceTests(unittest.TestCase):

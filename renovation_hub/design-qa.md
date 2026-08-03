@@ -1,0 +1,50 @@
+# Renovation Hub Design QA
+
+## Comparison target
+
+- Source visual truth: `design/renovation-hub-fusion-source.png`
+- Desktop implementation: `design/implementation-desktop.png`
+- Mobile implementation: `design/implementation-mobile.png`
+- Mobile media implementation: `design/implementation-mobile-media.png`
+- Full-view comparison evidence: `design/qa-comparison-desktop.png`
+- Focused region comparison evidence: `design/qa-comparison-top.png`
+- Desktop viewport and state: `1586 x 992`, 总览页、合成项目、桌面导航、无弹窗。
+- Mobile viewport and state: `390 x 844`, 总览页与图片视频页、底部导航、无弹窗。
+
+## Findings
+
+没有可执行的 P0、P1 或 P2 视觉问题。
+
+- 字体与排版：实现使用系统中文字体栈和等宽金额数字，标题、正文、辅助文字与源稿层级一致；未发现错误换行、截断、拥挤行高或不可读的小字。
+- 间距与布局：桌面侧栏、顶部工具栏、四张指标卡、施工进度、空间影像、近期动态和资金表格的层级与源稿一致；卡片间距、圆角、边框和纵向节奏稳定。手机端改为单栏卡片与底部导航，没有重叠、裁剪或横向溢出。
+- 颜色与视觉 token：暖白背景、陶土红主操作色、绿色施工状态、紫色媒体状态和浅灰边框均映射源稿；当前对比度和状态区分清楚。
+- 图片质量与资产忠实度：六张真实装修图片和视频封面均使用清晰位图、正确裁切与一致遮罩；没有用 CSS 图形、占位框、Emoji 或手写 SVG 替代源稿中的装修影像。图标统一使用 Tabler Icons。
+- 文案与内容：六个页面的中文标题、说明、按钮和状态文案符合独立装修管理应用语境。金额和媒体数量使用合成事实数据，因此与源稿样例数字不同，这属于数据差异而非视觉漂移。
+- 交互与响应式：桌面和手机导航、筛选、账目新增/编辑/退款、阶段编辑、媒体上传及弹窗在本地浏览器中可操作；手机端保留新增、上传和阶段维护入口。
+- 可访问性：关键操作使用语义化按钮、表单标签和对话框；键盘焦点可进入关闭和提交操作，图片包含替代文本，移动端点击目标尺寸可用。
+
+## Open questions
+
+- 源稿资金构成包含若干零金额预算分类，而当前合成账本只展示实际出现的分类。首版没有独立分类预算模型，因此当前行为按真实数据优先处理；未来增加分类预算后，可把零金额分类作为 P3 信息密度增强。
+- 源稿只有桌面视觉真值；手机版依据同一设计语言和已确认的完整交互要求做响应式转译，未发现需要重新确认的方向性偏差。
+
+## Patches made since the previous QA pass
+
+- 桌面网格、卡片比例、顶部工具栏和侧栏密度已对齐融合源稿。
+- 空间影像已替换为真实装修素材，并补齐视频封面、时长和空间信息。
+- 手机端已采用单栏内容、固定底部导航和全宽主操作，账目与上传弹窗保持完整表单能力。
+- 资金、阶段、时间线和媒体页面使用同一套颜色、圆角、边框、图标和排版 token。
+
+## Implementation checklist
+
+- [x] 同视口桌面全景比较。
+- [x] 顶部工具栏、指标卡、施工进度和空间影像重点区域比较。
+- [x] 字体、间距、颜色、图片质量和应用文案专项检查。
+- [x] `390 x 844` 手机总览、媒体页、底部导航和关键弹窗检查。
+- [x] 浏览器账目新增、编辑、退款、阶段修改和图片上传链路检查。
+
+## Follow-up polish
+
+- P3：未来引入分类预算模型后，可在资金构成中显示零金额分类和分类预算余额，使信息密度进一步接近源稿。
+
+final result: passed

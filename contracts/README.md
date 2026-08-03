@@ -1,9 +1,10 @@
 # Codex、微信与装修账本共享契约
 
-本目录保存 Codex Controller、Weixin Gateway、Renovation Ledger 和 HA Operations Broker 之间的公开、脱敏、版本化契约。
+本目录保存 Codex Controller、Weixin Gateway、Renovation Hub 和 HA Operations Broker 之间的公开、脱敏、版本化契约。
 
 - `codex_weixin_job_v1.schema.json`：微信消息进入 Controller 的作业格式。
-- `renovation_ledger_tools_v1.json`：Codex 可以调用的确定性账本工具清单。
+- `renovation_ledger_tools_v1.json`：Renovation Hub 保留给 Codex 的确定性 Ledger v1 兼容工具清单。
+- `renovation_hub_tools_v1.json`：项目、阶段、空间、施工事件、时间线和驾驶舱工具清单。
 - `ha_operations_receipt_v1.schema.json`：HA Operations Broker 执行或验证结果的收据格式。
 
 规则：

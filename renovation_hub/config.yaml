@@ -1,8 +1,8 @@
-name: Renovation Ledger
+name: Renovation Hub
 version: "0.1.0"
-slug: renovation_ledger
-description: "独立、可审计、单写入者的装修账本与便携导出服务。"
-url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/renovation_ledger"
+slug: renovation_hub
+description: "独立、可审计的装修项目、账目、阶段、时间线与媒体档案。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/renovation_hub"
 arch:
   - amd64
   - aarch64
@@ -13,8 +13,8 @@ stage: experimental
 backup: cold
 ingress: true
 ingress_port: 8101
-panel_icon: mdi:notebook-edit-outline
-panel_title: 装修账本
+panel_icon: mdi:home-city-outline
+panel_title: 筑记 · 装修档案
 panel_admin: true
 watchdog: "http://[HOST]:[PORT:8101]/healthz"
 ports:
@@ -23,15 +23,18 @@ ports_description:
   8101/tcp: "仅供 Ingress 与 Add-on 内部认证 API 使用，不映射宿主端口"
 map:
   - share:rw
+  - media:rw
 options:
   api_token: ""
   writer_mode: read_only
   max_request_bytes: 33554432
   max_attachment_bytes: 20971520
+  max_media_bytes: 1073741824
   portable_history_limit: 20
 schema:
   api_token: password
   writer_mode: "list(read_only|primary_writer|suspended)"
   max_request_bytes: "int(4096,52428800)"
   max_attachment_bytes: "int(1024,52428800)"
+  max_media_bytes: "int(1048576,4294967296)"
   portable_history_limit: "int(1,200)"

@@ -1,0 +1,500 @@
+"""aiohttp web application for Renovation Hub."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import secrets
+from typing import Any
+
+from aiohttp import web
+
+from .api import dispatch_tool, render_dashboard
+from .hub import RenovationHubStore
+from .ledger import LedgerError
+from .media import MediaService
+
+
+STORE_KEY = web.AppKey("store", RenovationHubStore)
+MEDIA_KEY = web.AppKey("media", MediaService)
+API_TOKEN_KEY = web.AppKey("api_token", str)
+STATIC_DIR_KEY = web.AppKey("static_dir", object)
+CSRF_TOKEN_KEY = web.AppKey("csrf_token", str)
+PAGE_ACTOR = "sha256:renovation-hub-ingress-admin"
+
+
+def create_app(
+    *,
+    store: RenovationHubStore,
+    media: MediaService,
+    api_token: str,
+    max_request_bytes: int,
+    static_dir: str | Path | None = None,
+) -> web.Application:
+    app = web.Application(
+        client_max_size=max_request_bytes,
+        middlewares=[security_headers_middleware, error_middleware],
+    )
+    app[STORE_KEY] = store
+    app[MEDIA_KEY] = media
+    app[API_TOKEN_KEY] = api_token
+    app[STATIC_DIR_KEY] = Path(static_dir) if static_dir else None
+    app[CSRF_TOKEN_KEY] = secrets.token_urlsafe(32)
+
+    app.router.add_get("/healthz", health)
+    app.router.add_get("/api/status", health)
+    app.router.add_get("/api/v1/session", page_session)
+    app.router.add_get("/api/v1/projects", projects)
+    app.router.add_post("/api/v1/projects", project_create)
+    app.router.add_patch("/api/v1/projects/{project_id}", project_update)
+    app.router.add_get("/api/v1/stages", stages)
+    app.router.add_post("/api/v1/stages", stage_create)
+    app.router.add_patch("/api/v1/stages/{stage_id}", stage_update)
+    app.router.add_get("/api/v1/areas", areas)
+    app.router.add_post("/api/v1/areas", area_create)
+    app.router.add_patch("/api/v1/areas/{area_id}", area_update)
+    app.router.add_get("/api/v1/events", timeline)
+    app.router.add_post("/api/v1/events", event_create)
+    app.router.add_patch("/api/v1/events/{event_id}", event_update)
+    app.router.add_get("/api/v1/timeline", timeline)
+    app.router.add_get("/api/v1/dashboard", dashboard)
+    app.router.add_get("/api/v1/ledger", ledger)
+    app.router.add_get("/api/v1/ledger/transactions", ledger)
+    app.router.add_post("/api/v1/ledger/transactions", ledger_create)
+    app.router.add_patch("/api/v1/ledger/transactions/{transaction_id}", ledger_update)
+    app.router.add_post("/api/v1/ledger/refunds", ledger_refund)
+    app.router.add_post("/api/v1/ledger/transactions/{transaction_id}/undo", ledger_undo)
+    app.router.add_get("/api/v1/reports/summary", report_summary)
+    app.router.add_get("/api/v1/search", search)
+    app.router.add_get("/api/v1/media", media_list)
+    app.router.add_get("/api/v1/media/{media_id}/content", media_content)
+    app.router.add_get("/api/v1/media/{media_id}/preview", media_preview)
+    app.router.add_post("/api/v1/uploads", upload_create)
+    app.router.add_put("/api/v1/uploads/{upload_id}/content", upload_content)
+    app.router.add_post("/api/v1/uploads/{upload_id}/complete", upload_complete)
+
+    app.router.add_get("/internal/v1/status", internal_status)
+    app.router.add_post("/internal/v1/tools/call", tools_call)
+    app.router.add_post("/internal/v1/admin/writer-mode", writer_mode)
+    app.router.add_get("/internal/v1/media/replay", media_replay)
+    app.router.add_post("/internal/v1/media/ingest", media_ingest)
+    app.router.add_get("/{tail:.*}", spa)
+    return app
+
+
+@web.middleware
+async def error_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    try:
+        return await handler(request)
+    except LedgerError as exc:
+        return web.json_response({"error": {"code": exc.code, "message": str(exc)}}, status=exc.status)
+    except web.HTTPException:
+        raise
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "internal_error", "message": "装修档案操作失败，未返回私有详情。"}},
+            status=500,
+        )
+
+
+@web.middleware
+async def security_headers_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    response = await handler(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; "
+        "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'"
+    )
+    return response
+
+
+def _store(request: web.Request) -> RenovationHubStore:
+    return request.app[STORE_KEY]
+
+
+def _media(request: web.Request) -> MediaService:
+    return request.app[MEDIA_KEY]
+
+
+def _authorized(request: web.Request) -> None:
+    expected = f"Bearer {request.app[API_TOKEN_KEY]}"
+    if not hmac.compare_digest(request.headers.get("Authorization", ""), expected):
+        raise web.HTTPUnauthorized(
+            text=json.dumps({"error": {"code": "not_authorized"}}),
+            content_type="application/json",
+        )
+
+
+def _require_csrf(request: web.Request) -> None:
+    expected = request.app[CSRF_TOKEN_KEY]
+    supplied = request.headers.get("X-CSRF-Token", "")
+    cookie = request.cookies.get("renovation_hub_csrf")
+    if not hmac.compare_digest(supplied, expected) or (cookie and not hmac.compare_digest(cookie, expected)):
+        raise LedgerError("csrf_invalid", "页面会话已过期，请刷新后重试", status=403)
+    if request.headers.get("Sec-Fetch-Site") == "cross-site":
+        raise LedgerError("csrf_invalid", "拒绝跨站写请求", status=403)
+
+
+def _query(request: web.Request) -> dict[str, Any]:
+    result: dict[str, Any] = dict(request.query)
+    if "limit" in result:
+        try:
+            result["limit"] = int(result["limit"])
+        except ValueError as exc:
+            raise LedgerError("invalid_input", "limit 必须是整数") from exc
+    return result
+
+
+async def _json(request: web.Request, *, internal: bool = False) -> dict[str, Any]:
+    if internal:
+        _authorized(request)
+    if request.content_length is None or request.content_length < 1:
+        raise LedgerError("request_size_invalid", "请求正文大小无效", status=400)
+    try:
+        result = await request.json(loads=json.loads)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise LedgerError("invalid_json", "请求 JSON 无效") from exc
+    if not isinstance(result, dict):
+        raise LedgerError("json_object_required", "请求必须是 JSON 对象")
+    return result
+
+
+async def _page_json(request: web.Request, *, idempotent: bool = True) -> dict[str, Any]:
+    _require_csrf(request)
+    payload = await _json(request)
+    if idempotent:
+        payload["idempotency_key"] = request.headers.get("Idempotency-Key", "")
+    return payload
+
+
+def _result(value: Any, *, status: int = 200) -> web.Response:
+    return web.json_response({"version": 1, "result": value}, status=status)
+
+
+async def health(request: web.Request) -> web.Response:
+    return web.json_response(_store(request).status())
+
+
+async def page_session(request: web.Request) -> web.Response:
+    status = _store(request).status()
+    token = request.app[CSRF_TOKEN_KEY]
+    response = _result(
+        {
+            "csrf_token": token,
+            "writer_mode": status["writer_mode"],
+            "writable": status["writer_mode"] == "primary_writer",
+            "portable_export_state": status["portable_export_state"],
+        }
+    )
+    response.set_cookie(
+        "renovation_hub_csrf",
+        token,
+        secure=True,
+        httponly=False,
+        samesite="Strict",
+        path="/",
+    )
+    return response
+
+
+async def projects(request: web.Request) -> web.Response:
+    return _result({"items": _store(request).list_projects(_query(request))})
+
+
+async def project_create(request: web.Request) -> web.Response:
+    return _result(_store(request).create_project(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def project_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["project_id"] = request.match_info["project_id"]
+    return _result(_store(request).update_project(payload, actor_hash=PAGE_ACTOR))
+
+
+async def stages(request: web.Request) -> web.Response:
+    return _result({"items": _store(request).list_stages(request.query.get("project_id", ""))})
+
+
+async def stage_create(request: web.Request) -> web.Response:
+    return _result(_store(request).create_stage(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def stage_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["stage_id"] = request.match_info["stage_id"]
+    return _result(_store(request).update_stage(payload, actor_hash=PAGE_ACTOR))
+
+
+async def areas(request: web.Request) -> web.Response:
+    return _result({"items": _store(request).list_areas(request.query.get("project_id", ""))})
+
+
+async def area_create(request: web.Request) -> web.Response:
+    return _result(_store(request).create_area(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def area_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["area_id"] = request.match_info["area_id"]
+    return _result(_store(request).update_area(payload, actor_hash=PAGE_ACTOR))
+
+
+async def timeline(request: web.Request) -> web.Response:
+    return _result({"items": _store(request).timeline(_query(request))})
+
+
+async def event_create(request: web.Request) -> web.Response:
+    return _result(_store(request).create_event(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def event_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["event_id"] = request.match_info["event_id"]
+    return _result(_store(request).update_event(payload, actor_hash=PAGE_ACTOR))
+
+
+async def dashboard(request: web.Request) -> web.Response:
+    return _result(_store(request).dashboard(request.query.get("project_id", "")))
+
+
+async def ledger(request: web.Request) -> web.Response:
+    query = _query(request)
+    return _result({"items": _store(request).query(query), "summary": _store(request).summary(query)})
+
+
+async def ledger_create(request: web.Request) -> web.Response:
+    return _result(_store(request).add_payment(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def ledger_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["payment_id"] = request.match_info["transaction_id"]
+    return _result(_store(request).correct_payment(payload, actor_hash=PAGE_ACTOR))
+
+
+async def ledger_refund(request: web.Request) -> web.Response:
+    return _result(_store(request).add_refund(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def ledger_undo(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["transaction_id"] = request.match_info["transaction_id"]
+    return _result(_store(request).undo(payload, actor_hash=PAGE_ACTOR))
+
+
+async def report_summary(request: web.Request) -> web.Response:
+    return _result(_store(request).summary(_query(request)))
+
+
+async def search(request: web.Request) -> web.Response:
+    query = _query(request)
+    project_id = str(query.get("project_id") or "")
+    return _result(
+        {
+            "ledger": _store(request).query(query),
+            "timeline": _store(request).timeline(query),
+            "media": _media(request).list({**query, "project_id": project_id}),
+        }
+    )
+
+
+async def media_list(request: web.Request) -> web.Response:
+    return _result({"items": _media(request).list(_query(request))})
+
+
+async def media_content(request: web.Request) -> web.StreamResponse:
+    path, mime = _media(request).content_path(request.match_info["media_id"])
+    return web.FileResponse(path, headers={"Content-Type": mime, "Accept-Ranges": "bytes"})
+
+
+async def media_preview(request: web.Request) -> web.StreamResponse:
+    path, mime = _media(request).content_path(request.match_info["media_id"], preview=True)
+    return web.FileResponse(path, headers={"Content-Type": mime})
+
+
+async def upload_create(request: web.Request) -> web.Response:
+    return _result(_media(request).create_browser_upload(await _page_json(request)), status=201)
+
+
+async def upload_content(request: web.Request) -> web.Response:
+    _require_csrf(request)
+    upload = _media(request).browser_upload(request.match_info["upload_id"])
+    if upload["state"] not in {"created", "uploading"}:
+        raise LedgerError("upload_state_conflict", "上传会话不可写入", status=409)
+    if request.content_length is None:
+        raise LedgerError("media_size_invalid", "媒体必须提供 Content-Length", status=411)
+    if request.content_length != upload["expected_bytes"]:
+        raise LedgerError("media_size_invalid", "媒体正文大小与上传会话不一致", status=400)
+    if request.content_type != upload["mime_type"]:
+        raise LedgerError("media_type_rejected", "媒体类型与上传会话不一致", status=415)
+    _media(request).mark_uploading(upload["id"])
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        with Path(upload["path"]).open("xb") as handle:
+            async for chunk in request.content.iter_chunked(1024 * 1024):
+                received += len(chunk)
+                if received > upload["expected_bytes"]:
+                    raise LedgerError("media_size_invalid", "媒体正文超过声明大小", status=413)
+                digest.update(chunk)
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        received_sha256 = digest.hexdigest()
+        if received != upload["expected_bytes"]:
+            raise LedgerError("upload_incomplete", "媒体上传不完整", status=400)
+        if received_sha256 != upload["expected_sha256"]:
+            raise LedgerError("sha256_mismatch", "媒体摘要不一致", status=400)
+        _media(request).mark_browser_uploaded(
+            upload["id"],
+            received_bytes=received,
+            received_sha256=received_sha256,
+        )
+    except Exception:
+        _media(request).fail_upload(upload["id"], "upload_failed")
+        raise
+    return _result({"upload_id": upload["id"], "state": "uploaded", "received_bytes": received})
+
+
+async def upload_complete(request: web.Request) -> web.Response:
+    _require_csrf(request)
+    return _result(
+        await asyncio.to_thread(
+            _media(request).complete_browser_upload,
+            request.match_info["upload_id"],
+            actor_hash=PAGE_ACTOR,
+        )
+    )
+
+
+async def internal_status(request: web.Request) -> web.Response:
+    _authorized(request)
+    return _result(_store(request).status())
+
+
+async def tools_call(request: web.Request) -> web.Response:
+    payload = await _json(request, internal=True)
+    return _result(dispatch_tool(_store(request), payload))
+
+
+async def writer_mode(request: web.Request) -> web.Response:
+    payload = await _json(request, internal=True)
+    target = payload.get("target")
+    if target == "primary_writer" and payload.get("confirmation") != "ACTIVATE_PRIMARY_WRITER":
+        raise LedgerError("confirmation_required", "切换正式 writer 需要精确确认", status=409)
+    return _result(_store(request).set_writer_mode(str(target)))
+
+
+async def media_replay(request: web.Request) -> web.Response:
+    _authorized(request)
+    result = _media(request).replay(
+        request.query.get("idempotency_key", ""),
+        request.query.get("source_ref_hash", ""),
+    )
+    if result is None:
+        raise web.HTTPNotFound(
+            text=json.dumps({"error": {"code": "not_found"}}),
+            content_type="application/json",
+        )
+    return _result(result)
+
+
+def _decode_header(value: str, field: str, maximum: int) -> str:
+    try:
+        decoded = base64.urlsafe_b64decode(value.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise LedgerError("media_invalid", f"{field} 头无效") from exc
+    if not decoded or len(decoded) > maximum:
+        raise LedgerError("media_invalid", f"{field} 头无效")
+    return decoded
+
+
+async def media_ingest(request: web.Request) -> web.Response:
+    _authorized(request)
+    filename = _decode_header(request.headers.get("X-Attachment-Filename", ""), "filename", 255)
+    metadata_text = _decode_header(request.headers.get("X-Renovation-Metadata", ""), "metadata", 8192)
+    try:
+        metadata = json.loads(metadata_text)
+    except json.JSONDecodeError as exc:
+        raise LedgerError("media_invalid", "媒体元数据无效") from exc
+    if not isinstance(metadata, dict):
+        raise LedgerError("media_invalid", "媒体元数据必须是对象")
+    expected_bytes = request.content_length
+    if expected_bytes is None:
+        raise LedgerError("media_size_invalid", "媒体必须提供 Content-Length", status=411)
+    expected_digest = request.headers.get("X-Attachment-Sha256", "")
+    if expected_digest.startswith("sha256:"):
+        expected_digest = expected_digest.split(":", 1)[1]
+    if len(expected_digest) != 64:
+        raise LedgerError("media_invalid", "媒体摘要头无效")
+    prepared = _media(request).prepare_upload(
+        idempotency_key=metadata.get("idempotency_key"),
+        source_ref_hash=metadata.get("source_ref_hash"),
+        original_filename=filename,
+        mime_type=request.content_type,
+        expected_bytes=expected_bytes,
+    )
+    if prepared["replay"]:
+        result = dict(prepared["result"])
+        result["idempotent_replay"] = True
+        return _result(result)
+    upload_id = prepared["upload_id"]
+    _media(request).mark_uploading(upload_id)
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        with Path(prepared["path"]).open("xb") as handle:
+            async for chunk in request.content.iter_chunked(1024 * 1024):
+                received += len(chunk)
+                if received > prepared["expected_bytes"]:
+                    raise LedgerError("media_size_invalid", "媒体正文超过声明大小", status=413)
+                digest.update(chunk)
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        _media(request).fail_upload(upload_id, "upload_failed")
+        raise
+    metadata["idempotency_key"] = metadata.get("idempotency_key")
+    metadata["source_ref_hash"] = metadata.get("source_ref_hash")
+    result = await asyncio.to_thread(
+        _media(request).finalize_upload,
+        prepared,
+        received_bytes=received,
+        sha256=digest.hexdigest(),
+        expected_sha256=expected_digest,
+        metadata=metadata,
+        actor_hash="sha256:codex-controller",
+    )
+    return _result(result)
+
+
+async def spa(request: web.Request) -> web.StreamResponse:
+    static_dir = request.app[STATIC_DIR_KEY]
+    if isinstance(static_dir, Path):
+        requested = request.match_info.get("tail", "")
+        candidate = (static_dir / requested).resolve()
+        try:
+            candidate.relative_to(static_dir.resolve())
+        except ValueError:
+            raise web.HTTPNotFound()
+        if candidate.is_file():
+            return web.FileResponse(candidate)
+        index = static_dir / "index.html"
+        if index.is_file():
+            return web.FileResponse(index)
+    return web.Response(
+        text=render_dashboard(_store(request).status()),
+        content_type="text/html",
+        charset="utf-8",
+    )

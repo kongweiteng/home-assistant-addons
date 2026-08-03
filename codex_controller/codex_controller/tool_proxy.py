@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import re
 import socketserver
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -30,6 +31,22 @@ LEDGER_TOOLS = {
     "ledger_import_inspect",
     "ledger_import_shadow",
 }
+RENOVATION_TOOLS = {
+    "renovation_project_create",
+    "renovation_project_update",
+    "renovation_project_list",
+    "renovation_stage_create",
+    "renovation_stage_update",
+    "renovation_stage_list",
+    "renovation_area_create",
+    "renovation_area_update",
+    "renovation_area_list",
+    "renovation_event_create",
+    "renovation_event_update",
+    "renovation_timeline",
+    "renovation_dashboard",
+    "renovation_media_ingest",
+}
 OPERATIONS_TOOLS = {
     "ha_operations_preflight",
     "ha_operations_authorization_request",
@@ -38,6 +55,8 @@ OPERATIONS_TOOLS = {
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MEDIA_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "video/mp4", "video/quicktime", "video/webm"}
+DEFAULT_MAX_GATEWAY_MEDIA_BYTES = 1024 * 1024 * 1024
 
 
 class ToolProxyError(RuntimeError):
@@ -79,6 +98,8 @@ class ToolRouter:
         operations_token: str = "",
         request_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
+        stream_media: Callable[..., dict[str, Any]] | None = None,
+        max_media_bytes: int = DEFAULT_MAX_GATEWAY_MEDIA_BYTES,
     ):
         self.ledger_base_url = validate_base_url(ledger_base_url)
         self.ledger_token = ledger_token
@@ -88,6 +109,8 @@ class ToolRouter:
         self.operations_token = operations_token
         self.request_json = request_json or _request_json
         self.request_bytes = request_bytes or _request_bytes
+        self.stream_media = stream_media or _stream_gateway_to_hub
+        self.max_media_bytes = max_media_bytes
 
     def available_tools(self) -> list[str]:
         tools: list[str] = []
@@ -96,6 +119,7 @@ class ToolRouter:
             if not self.gateway_base_url or len(self.gateway_token) < 32:
                 ledger_tools.discard("ledger_attach")
             tools.extend(sorted(ledger_tools))
+            tools.extend(sorted(RENOVATION_TOOLS))
         if self.operations_base_url and len(self.operations_token) >= 32:
             tools.extend(sorted(OPERATIONS_TOOLS))
         return tools
@@ -103,9 +127,26 @@ class ToolRouter:
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")
-        if name in LEDGER_TOOLS:
+        if name == "renovation_media_ingest":
             if not self.ledger_base_url or len(self.ledger_token) < 32:
-                raise ToolProxyError("ledger_unavailable", "Renovation Ledger 未配置")
+                raise ToolProxyError("ledger_unavailable", "Renovation Hub 媒体接口未配置")
+            if not self.gateway_base_url or len(self.gateway_token) < 32:
+                raise ToolProxyError("gateway_unavailable", "Weixin Gateway 附件接口未配置")
+            reference = arguments.get("attachment_ref")
+            if not isinstance(reference, str) or not ATTACHMENT_REF_RE.fullmatch(reference):
+                raise ToolProxyError("attachment_ref_invalid", "attachment_ref 无效")
+            return self.stream_media(
+                self.gateway_base_url,
+                self.gateway_token,
+                self.ledger_base_url,
+                self.ledger_token,
+                reference,
+                {key: value for key, value in arguments.items() if key != "attachment_ref"},
+                self.max_media_bytes,
+            )
+        if name in LEDGER_TOOLS or name in RENOVATION_TOOLS:
+            if not self.ledger_base_url or len(self.ledger_token) < 32:
+                raise ToolProxyError("ledger_unavailable", "Renovation Hub 账本接口未配置")
             ledger_arguments = dict(arguments)
             if name == "ledger_attach":
                 ledger_arguments = self._resolve_gateway_attachment(arguments)
@@ -225,6 +266,118 @@ def _request_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[d
         "size_bytes": len(data),
         "sha256": digest_header,
     }, data
+
+
+def _stream_gateway_to_hub(
+    gateway_base_url: str,
+    gateway_token: str,
+    hub_base_url: str,
+    hub_token: str,
+    reference: str,
+    arguments: dict[str, Any],
+    max_bytes: int,
+) -> dict[str, Any]:
+    idempotency_key = arguments.get("idempotency_key")
+    if not isinstance(idempotency_key, str) or len(idempotency_key) < 16 or len(idempotency_key) > 256:
+        raise ToolProxyError("invalid_idempotency_key", "媒体写入需要稳定 idempotency_key")
+    source_ref_hash = hashlib.sha256(reference.encode("utf-8")).hexdigest()
+    replay_url = f"{hub_base_url}/internal/v1/media/replay?{urlencode({'idempotency_key': idempotency_key, 'source_ref_hash': source_ref_hash})}"
+    replay_request = Request(replay_url, method="GET", headers={"Authorization": f"Bearer {hub_token}", "Accept": "application/json"})
+    try:
+        with urlopen(replay_request, timeout=10) as response:
+            replay_data = response.read(2 * 1024 * 1024 + 1)
+    except HTTPError as exc:
+        if exc.code != 404:
+            exc.close()
+            raise ToolProxyError("upstream_rejected", f"Renovation Hub 拒绝媒体幂等检查：HTTP {exc.code}") from exc
+        exc.close()
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ToolProxyError("upstream_unavailable", "Renovation Hub 媒体接口不可用") from exc
+    else:
+        return _decode_json_response(replay_data)
+
+    request = Request(
+        f"{gateway_base_url}/internal/v1/attachments/{quote(reference, safe='')}",
+        method="GET",
+        headers={"Authorization": f"Bearer {gateway_token}", "Accept": "application/octet-stream"},
+    )
+    try:
+        gateway_response = urlopen(request, timeout=60)
+    except HTTPError as exc:
+        exc.close()
+        raise ToolProxyError("attachment_unavailable", f"Gateway 拒绝附件读取：HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ToolProxyError("gateway_unavailable", "Weixin Gateway 附件接口不可用") from exc
+    connection: http.client.HTTPConnection | None = None
+    try:
+        length_header = gateway_response.headers.get("Content-Length", "")
+        try:
+            declared_length = int(length_header)
+        except ValueError as exc:
+            raise ToolProxyError("attachment_invalid", "Gateway 媒体长度无效") from exc
+        if declared_length < 1 or declared_length > max_bytes:
+            raise ToolProxyError("attachment_too_large", "Gateway 媒体超过 Controller 上限")
+        encoded_filename = gateway_response.headers.get("X-Attachment-Filename", "")
+        digest_header = gateway_response.headers.get("X-Attachment-Sha256", "")
+        mime_type = gateway_response.headers.get_content_type()
+        try:
+            filename = base64.urlsafe_b64decode(encoded_filename.encode("ascii")).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ToolProxyError("attachment_invalid", "Gateway 媒体文件名无效") from exc
+        if not filename or len(filename) > 255 or Path(filename).name != filename or mime_type not in MEDIA_MIME_TYPES:
+            raise ToolProxyError("attachment_invalid", "Gateway 媒体元数据无效")
+        metadata = {
+            **arguments,
+            "source": "weixin",
+            "source_ref_hash": source_ref_hash,
+        }
+        metadata_header = base64.urlsafe_b64encode(json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).decode("ascii")
+        target = urlsplit(hub_base_url)
+        connection = http.client.HTTPConnection(target.hostname, target.port or 80, timeout=120)
+        connection.putrequest("POST", "/internal/v1/media/ingest")
+        connection.putheader("Authorization", f"Bearer {hub_token}")
+        connection.putheader("Content-Type", mime_type)
+        connection.putheader("Content-Length", str(declared_length))
+        connection.putheader("X-Attachment-Filename", encoded_filename)
+        connection.putheader("X-Attachment-Sha256", digest_header)
+        connection.putheader("X-Renovation-Metadata", metadata_header)
+        connection.endheaders()
+        digest = hashlib.sha256()
+        sent = 0
+        while sent < declared_length:
+            chunk = gateway_response.read(min(1024 * 1024, declared_length - sent))
+            if not chunk:
+                break
+            sent += len(chunk)
+            digest.update(chunk)
+            connection.send(chunk)
+        if sent != declared_length:
+            raise ToolProxyError("attachment_invalid", "Gateway 媒体正文不完整")
+        if digest_header != f"sha256:{digest.hexdigest()}":
+            raise ToolProxyError("attachment_invalid", "Gateway 媒体摘要不一致")
+        response = connection.getresponse()
+        data = response.read(2 * 1024 * 1024 + 1)
+        if response.status < 200 or response.status >= 300:
+            raise ToolProxyError("upstream_rejected", f"Renovation Hub 拒绝媒体：HTTP {response.status}")
+        return _decode_json_response(data)
+    except (TimeoutError, OSError, http.client.HTTPException) as exc:
+        raise ToolProxyError("upstream_unavailable", "媒体流式转发失败") from exc
+    finally:
+        gateway_response.close()
+        if connection is not None:
+            connection.close()
+
+
+def _decode_json_response(data: bytes) -> dict[str, Any]:
+    if len(data) > 2 * 1024 * 1024:
+        raise ToolProxyError("upstream_response_too_large", "内部服务响应过大")
+    try:
+        result = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ToolProxyError("upstream_invalid_json", "内部服务响应无效") from exc
+    if not isinstance(result, dict):
+        raise ToolProxyError("upstream_invalid_json", "内部服务响应不是对象")
+    return result
 
 
 class ToolProxyServer:

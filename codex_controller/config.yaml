@@ -33,6 +33,7 @@ options:
   max_request_bytes: 1048576
   max_queue: 200
   max_result_chars: 12000
+  max_media_bytes: 1073741824
 schema:
   internal_api_token: password
   intake_enabled: bool
@@ -45,3 +46,4 @@ schema:
   max_request_bytes: "int(4096,52428800)"
   max_queue: "int(1,5000)"
   max_result_chars: "int(1000,32000)"
+  max_media_bytes: "int(1048576,4294967296)"

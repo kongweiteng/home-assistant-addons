@@ -24,6 +24,7 @@ export CONTROLLER_OPERATIONS_API_TOKEN=$(jq -r '.operations_api_token // ""' "$O
 export CONTROLLER_MAX_REQUEST_BYTES=$(jq -r '.max_request_bytes // 1048576' "$OPTIONS_FILE")
 export CONTROLLER_MAX_QUEUE=$(jq -r '.max_queue // 200' "$OPTIONS_FILE")
 export CONTROLLER_MAX_RESULT_CHARS=$(jq -r '.max_result_chars // 12000' "$OPTIONS_FILE")
+export CONTROLLER_MAX_MEDIA_BYTES=$(jq -r '.max_media_bytes // 1073741824' "$OPTIONS_FILE")
 export CONTROLLER_DATA_DIR=/data
 export CONTROLLER_DATABASE_PATH=/data/controller.sqlite3
 export CONTROLLER_CODEX_HOME=/data/codex-home

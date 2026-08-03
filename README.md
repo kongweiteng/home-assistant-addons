@@ -14,7 +14,7 @@ Canonical Home Assistant add-on repository for every application maintained and 
 | [Hermes Agent](hermes_agent/) | Persistent AI agent, dashboard, terminal and API | `amd64`, `aarch64` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
 | [Huaxin Water](huaxin_water/) | Read-only multi-account water history, statistics and MQTT Discovery through Ingress | `amd64`, `aarch64` | Undocumented Tianjin Huaxin Water H5 API |
 | [Journey Analyzer](journey_analyzer/) | Local HA location collection, journey statistics and authenticated AMap playback | `amd64`, `aarch64` | Self-maintained |
-| [Renovation Ledger](renovation_ledger/) | Deterministic single-writer renovation ledger, audit trail, charts and portable exports | `amd64`, `aarch64` | Self-maintained |
+| [Renovation Hub](renovation_hub/) | Independent renovation project, ledger, timeline and media archive with legacy Ledger v1 compatibility | `amd64`, `aarch64` | Self-maintained |
 | [Weixin Gateway](weixin_gateway/) | Minimal iLink text and media gateway that preserves the existing personal Weixin identity | `amd64`, `aarch64` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) protocol reference |
 | [WizNote Server](wiznote_server/) | Self-hosted notes with persistent storage, OSS guidance and cold backups | `amd64` | [wiznote/wizserver](https://hub.docker.com/r/wiznote/wizserver) |
 

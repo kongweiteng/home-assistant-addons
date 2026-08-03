@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import unittest
 
 from codex_controller.tool_proxy import ToolRouter
-from renovation_ledger.api import create_server as create_ledger_server
-from renovation_ledger.core import LedgerStore
+from renovation_hub.api import create_server as create_ledger_server
+from renovation_hub.ledger import LedgerStore
 from weixin_gateway.api import create_server as create_gateway_server
 from weixin_gateway.store import GatewayStore
 

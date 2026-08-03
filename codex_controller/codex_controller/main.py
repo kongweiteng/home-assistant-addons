@@ -42,6 +42,7 @@ def main() -> None:
         gateway_token=os.environ.get("CONTROLLER_GATEWAY_ATTACHMENT_TOKEN", ""),
         operations_base_url=os.environ.get("CONTROLLER_OPERATIONS_BASE_URL", ""),
         operations_token=os.environ.get("CONTROLLER_OPERATIONS_API_TOKEN", ""),
+        max_media_bytes=int(os.environ.get("CONTROLLER_MAX_MEDIA_BYTES", str(1024 * 1024 * 1024))),
     )
     proxy = ToolProxyServer(socket_path, router)
     proxy.start()

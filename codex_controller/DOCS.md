@@ -6,10 +6,11 @@
 | --- | --- |
 | `internal_api_token` | Weixin Gateway 调用作业 API 的独立 Token，至少 32 个字符 |
 | `intake_enabled` | 是否接收新作业；默认关闭，正式切换前不得开启 |
-| `ledger_base_url` | Renovation Ledger 的固定内部服务根地址；为空时禁用 Ledger 工具 |
+| `ledger_base_url` | Renovation Hub 的固定内部服务根地址；为空时禁用兼容 Ledger 工具 |
 | `ledger_api_token` | Ledger 独立 bearer；不会传给 app-server |
 | `gateway_base_url` | Weixin Gateway 的固定内部服务根地址；只用于一次性附件读取 |
 | `gateway_attachment_token` | Gateway 附件 bearer；不会传给 app-server、模型或 Ledger |
+| `max_media_bytes` | Gateway 到 Renovation Hub 流式媒体的单文件上限，默认 1 GiB |
 | `operations_base_url` | HA Operations Broker 的固定内部服务根地址 |
 | `operations_api_token` | Broker 独立 bearer；不会传给 app-server |
 | `max_request_bytes` | 单个内部 JSON 请求上限 |
@@ -41,7 +42,9 @@ Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Co
 
 app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把固定工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Ledger 或 Broker。
 
-`ledger_attach` 是特殊桥接调用：模型只能提交 Gateway 生成的 `attachment_ref`。Controller 主进程使用独立 bearer 一次性读取附件，校验文件名、MIME、大小和 SHA-256，再转换为 Ledger 需要的 Base64 内容；bearer、Gateway 路径和媒体明文都不会进入 app-server 环境或模型参数。第一版 Controller 对单附件固定限制为 20 MiB。
+`ledger_attach` 保留 Legacy Ledger v1 桥接：模型只能提交 Gateway 生成的 `attachment_ref`。Controller 主进程使用独立 bearer 一次性读取附件，校验文件名、MIME、大小和 SHA-256，再转换为旧账本需要的 Base64 内容；第一版 Legacy 单附件限制为 20 MiB。
+
+`renovation_media_ingest` 用于新图片/视频档案。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时再从 Gateway 以二进制流读取正文，并直接转发到 Renovation Hub。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
 
 第一版 Broker 只提供只读预检和 Passkey 授权请求/状态；现有 Broker 没有正式执行器，因此 Controller 也不会伪装提供 HA 写执行能力。
 

@@ -1,7 +1,7 @@
 #!/command/with-contenv bashio
 set -euo pipefail
 
-OPTIONS_FILE="${LEDGER_OPTIONS_FILE:-/data/options.json}"
+OPTIONS_FILE="${RENOVATION_HUB_OPTIONS_FILE:-/data/options.json}"
 if [ ! -f "$OPTIONS_FILE" ]; then
     bashio::log.fatal "缺少 Add-on options 文件"
     exit 1
@@ -17,10 +17,15 @@ export LEDGER_API_TOKEN
 export LEDGER_WRITER_MODE=$(jq -r '.writer_mode // "read_only"' "$OPTIONS_FILE")
 export LEDGER_MAX_REQUEST_BYTES=$(jq -r '.max_request_bytes // 33554432' "$OPTIONS_FILE")
 export LEDGER_MAX_ATTACHMENT_BYTES=$(jq -r '.max_attachment_bytes // 20971520' "$OPTIONS_FILE")
+export RENOVATION_MAX_MEDIA_BYTES=$(jq -r '.max_media_bytes // 1073741824' "$OPTIONS_FILE")
 export LEDGER_PORTABLE_HISTORY_LIMIT=$(jq -r '.portable_history_limit // 20' "$OPTIONS_FILE")
 export LEDGER_DATABASE_PATH="/data/ledger.sqlite3"
 export LEDGER_DATA_DIR="/data"
 export LEDGER_SHARE_DIR="/share/private/renovation-bookkeeping"
+export RENOVATION_MEDIA_ROOT="/media/renovation-hub/originals"
+export RENOVATION_PREVIEW_ROOT="/data/media-previews"
+export RENOVATION_STAGING_ROOT="/data/media-staging"
+export RENOVATION_STATIC_DIR="/opt/renovation-hub/web"
 
-bashio::log.info "启动 Renovation Ledger，writer_mode=${LEDGER_WRITER_MODE}"
-exec python3 -m renovation_ledger.main
+bashio::log.info "启动 Renovation Hub，writer_mode=${LEDGER_WRITER_MODE}"
+exec python3 -m renovation_hub.main

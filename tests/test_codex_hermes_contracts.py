@@ -35,6 +35,17 @@ class CodexHermesContractTests(unittest.TestCase):
             if tool["write"]:
                 self.assertIn("idempotency_key", tool["required"])
 
+    def test_hub_catalog_keeps_legacy_contract_and_idempotent_writes(self) -> None:
+        catalog = json.loads((CONTRACTS / "renovation_hub_tools_v1.json").read_text())
+        self.assertEqual(catalog["version"], 1)
+        self.assertEqual(catalog["legacy_contract"], "renovation_ledger_tools_v1.json")
+        names = {item["name"] for item in catalog["tools"]}
+        self.assertIn("renovation_dashboard", names)
+        self.assertIn("renovation_event_create", names)
+        for tool in catalog["tools"]:
+            if tool["write"]:
+                self.assertIn("idempotency_key", tool["required"])
+
     def test_app_server_fixture_uses_supported_chatgpt_device_auth_only(self) -> None:
         messages = [json.loads(line) for line in (FIXTURES / "app_server_transcript.jsonl").read_text().splitlines()]
         methods = [message.get("method") for message in messages]

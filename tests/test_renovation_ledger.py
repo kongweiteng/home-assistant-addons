@@ -7,8 +7,8 @@ import tempfile
 import unittest
 import zipfile
 
-from renovation_ledger.api import dispatch_tool
-from renovation_ledger.core import LedgerError, LedgerStore
+from renovation_hub.api import dispatch_tool
+from renovation_hub.ledger import LedgerError, LedgerStore
 
 
 FIXTURE_PAYMENT_KEY = "0" * 32

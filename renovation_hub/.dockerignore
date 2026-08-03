@@ -1,0 +1,5 @@
+frontend/node_modules
+frontend/.npm-cache
+frontend/dist
+renovation_hub/__pycache__
+**/*.pyc

@@ -25,14 +25,38 @@ def tool_catalog() -> list[dict[str, Any]]:
         "ledger_import_inspect",
         "ledger_import_shadow",
     ]
+    renovation_names = [
+        "renovation_project_create",
+        "renovation_project_update",
+        "renovation_project_list",
+        "renovation_stage_create",
+        "renovation_stage_update",
+        "renovation_stage_list",
+        "renovation_area_create",
+        "renovation_area_update",
+        "renovation_area_list",
+        "renovation_event_create",
+        "renovation_event_update",
+        "renovation_timeline",
+        "renovation_dashboard",
+        "renovation_media_ingest",
+    ]
     tools = [
         {
             "name": name,
-            "description": "调用独立 Renovation Ledger 的结构化工具；写操作必须携带稳定 idempotency_key。",
+            "description": "调用 Renovation Hub 的 Ledger v1 兼容工具；写操作必须携带稳定 idempotency_key。",
             "inputSchema": {"type": "object", "additionalProperties": True},
         }
         for name in ledger_names
     ]
+    tools.extend(
+        {
+            "name": name,
+            "description": "调用 Renovation Hub 的项目、阶段、空间、时间线或统计工具。",
+            "inputSchema": {"type": "object", "additionalProperties": True},
+        }
+        for name in renovation_names
+    )
     tools.extend(
         [
             {

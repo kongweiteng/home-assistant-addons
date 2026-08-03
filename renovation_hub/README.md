@@ -16,11 +16,11 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 
 ## 当前阶段
 
-- 版本：`0.1.1`，本地实验候选。
+- 版本：`0.1.1`，实验候选。
 - 默认 `writer_mode=read_only`。
 - P1～P6 本地源码、合成验证、完整前端门禁、恢复测试和 amd64/aarch64 镜像构建均已完成。
-- 当前仅形成公开仓库源码交付候选；尚未创建 Release、安装 HAOS 或完成任何正式环境验收。
-- 尚未安装到正式 HAOS，也没有读取或迁移正式账本、媒体、微信会话或凭据。
+- 维护者 HAOS 已完成本地 Store 只读影子安装、Ingress、权限、真实未登录 Controller 路由和重启持久化验证；未创建 GitHub Release。
+- 影子实例保持空库，没有读取或迁移正式账本、媒体、微信会话或凭据，也没有启用 Controller intake 或 Gateway poller。
 - Hermes 在正式切换验收前继续作为唯一正式 writer。
 
 ## 安全边界

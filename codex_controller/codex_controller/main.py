@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import ipaddress
+import json
 import os
 from pathlib import Path
+import re
+import socket
+import tempfile
+from typing import Callable
+from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 
 from .api import create_server
 from .app_server import AppServerClient
@@ -27,10 +34,123 @@ def read_api_key_from_fd() -> str:
         raise RuntimeError("Controller 无法读取 API Key") from exc
 
 
-def write_codex_config(codex_home: Path, socket_path: Path) -> None:
+Resolver = Callable[..., list[tuple]]
+
+PRIVATE_API_HOSTS = {
+    "localhost",
+    "supervisor",
+    "homeassistant",
+    "hassio",
+    "codex-controller",
+    "renovation-hub",
+    "weixin-gateway",
+    "ha-operations-broker",
+}
+PRIVATE_API_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+CODEX_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+
+
+def normalize_codex_model(value: str, *, auth_mode: str) -> str:
+    """Validate an optional API-key model override without exposing provider configuration."""
+    if not isinstance(value, str):
+        raise ValueError("codex_model 类型无效")
+    if value == "":
+        return ""
+    if auth_mode != "api_key":
+        raise ValueError("codex_model 只允许用于 API Key 模式")
+    if not CODEX_MODEL_RE.fullmatch(value):
+        raise ValueError("codex_model 格式无效")
+    return value
+
+
+def normalize_openai_base_url(
+    value: str,
+    *,
+    auth_mode: str,
+    resolver: Resolver = socket.getaddrinfo,
+) -> str:
+    """Return a canonical public HTTPS Responses API base URL or fail closed."""
+    if not isinstance(value, str):
+        raise ValueError("openai_base_url 类型无效")
+    if value == "":
+        return ""
+    if auth_mode != "api_key":
+        raise ValueError("openai_base_url 只允许用于 API Key 模式")
+    if value.strip() != value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("openai_base_url 包含空白或控制字符")
+    if "\\" in value:
+        raise ValueError("openai_base_url 包含反斜杠")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("openai_base_url 结构无效") from exc
+    if parsed.scheme != "https":
+        raise ValueError("openai_base_url 只允许 HTTPS")
+    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise ValueError("openai_base_url 主机或用户信息无效")
+    if parsed.query or parsed.fragment:
+        raise ValueError("openai_base_url 不允许 query 或 fragment")
+
+    decoded_path = unquote_to_bytes(parsed.path)
+    if b"\\" in decoded_path or any(byte < 32 or byte == 127 for byte in decoded_path):
+        raise ValueError("openai_base_url 路径无效")
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    if not hostname:
+        raise ValueError("openai_base_url 主机为空")
+    if hostname in PRIVATE_API_HOSTS or hostname.endswith(PRIVATE_API_SUFFIXES):
+        raise ValueError("openai_base_url 指向内部主机")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("openai_base_url 主机名无效") from exc
+        try:
+            records = resolver(ascii_hostname, port or 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise ValueError("openai_base_url DNS 解析失败") from exc
+        resolved_addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+        for record in records:
+            try:
+                resolved_addresses.add(ipaddress.ip_address(record[4][0]))
+            except (IndexError, ValueError, TypeError) as exc:
+                raise ValueError("openai_base_url DNS 响应无效") from exc
+        if not resolved_addresses:
+            raise ValueError("openai_base_url DNS 没有地址")
+        if any(not resolved.is_global for resolved in resolved_addresses):
+            raise ValueError("openai_base_url 解析到非公网地址")
+        normalized_hostname = ascii_hostname
+    else:
+        if not address.is_global:
+            raise ValueError("openai_base_url IP 不是公网地址")
+        normalized_hostname = address.compressed
+
+    host_for_url = f"[{normalized_hostname}]" if ":" in normalized_hostname else normalized_hostname
+    netloc = host_for_url if port is None else f"{host_for_url}:{port}"
+    path = parsed.path.rstrip("/")
+    return urlunsplit(("https", netloc, path, "", ""))
+
+
+def write_codex_config(
+    codex_home: Path,
+    socket_path: Path,
+    *,
+    openai_base_url: str = "",
+    codex_model: str = "",
+) -> None:
     codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
     config = codex_home / "config.toml"
-    expected = (
+    runtime_config = ""
+    if codex_model:
+        runtime_config += f"model = {json.dumps(codex_model, ensure_ascii=False)}\n"
+    if openai_base_url:
+        runtime_config += f"openai_base_url = {json.dumps(openai_base_url, ensure_ascii=False)}\n"
+    if runtime_config:
+        runtime_config += "\n"
+    expected = runtime_config + (
         "[mcp_servers.home_assistant_tools]\n"
         'command = "/usr/bin/python3"\n'
         'args = ["-m", "codex_controller.mcp_proxy"]\n'
@@ -38,8 +158,25 @@ def write_codex_config(codex_home: Path, socket_path: Path) -> None:
     )
     if config.exists() and config.is_symlink():
         raise RuntimeError("CODEX_HOME config.toml 不能是符号链接")
-    config.write_text(expected, encoding="utf-8")
-    os.chmod(config, 0o600)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=codex_home,
+            prefix=".config.toml.",
+            delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            os.chmod(stream.fileno(), 0o600)
+            stream.write(expected)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, config)
+        os.chmod(config, 0o600)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def main() -> None:
@@ -49,6 +186,22 @@ def main() -> None:
     socket_path = Path(os.environ.get("CONTROLLER_MCP_SOCKET", data_dir / "runtime" / "tool-proxy.sock")).resolve()
     if data_dir not in codex_home.parents or data_dir not in workspace.parents or data_dir not in socket_path.parents:
         raise RuntimeError("Controller 私有路径必须位于 /data 边界内")
+
+    auth_mode = os.environ.get("CONTROLLER_AUTH_MODE", "chatgpt_device_code")
+    openai_base_url = normalize_openai_base_url(
+        os.environ.get("CONTROLLER_OPENAI_BASE_URL", ""),
+        auth_mode=auth_mode,
+    )
+    codex_model = normalize_codex_model(
+        os.environ.get("CONTROLLER_CODEX_MODEL", ""),
+        auth_mode=auth_mode,
+    )
+    write_codex_config(
+        codex_home,
+        socket_path,
+        openai_base_url=openai_base_url,
+        codex_model=codex_model,
+    )
 
     router = ToolRouter(
         ledger_base_url=os.environ.get("CONTROLLER_LEDGER_BASE_URL", ""),
@@ -61,7 +214,6 @@ def main() -> None:
     )
     proxy = ToolProxyServer(socket_path, router)
     proxy.start()
-    write_codex_config(codex_home, socket_path)
 
     store = ControllerStore(
         os.environ.get("CONTROLLER_DATABASE_PATH", data_dir / "controller.sqlite3"),
@@ -74,8 +226,10 @@ def main() -> None:
         store,
         app_server,
         intake_enabled=os.environ.get("CONTROLLER_INTAKE_ENABLED", "false").lower() == "true",
-        auth_mode=os.environ.get("CONTROLLER_AUTH_MODE", "chatgpt_device_code"),
+        auth_mode=auth_mode,
         api_key=read_api_key_from_fd(),
+        api_base_mode="custom" if openai_base_url else "official",
+        codex_model_mode="custom" if codex_model else "default",
     )
     service.start()
     server = create_server(

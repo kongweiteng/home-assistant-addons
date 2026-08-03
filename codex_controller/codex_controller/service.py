@@ -21,14 +21,22 @@ class ControllerService:
         intake_enabled: bool,
         auth_mode: str = "chatgpt_device_code",
         api_key: str = "",
+        api_base_mode: str = "official",
+        codex_model_mode: str = "default",
     ):
         if auth_mode not in self.AUTH_MODES:
             raise ValueError("Controller auth_mode 不受支持")
+        if api_base_mode not in {"official", "custom"}:
+            raise ValueError("Controller api_base_mode 不受支持")
+        if codex_model_mode not in {"default", "custom"}:
+            raise ValueError("Controller codex_model_mode 不受支持")
         self.store = store
         self.app_server = app_server
         self.configured_intake_enabled = intake_enabled
         self.configured_auth_mode = auth_mode
         self._api_key = api_key if auth_mode == "api_key" else ""
+        self.api_base_mode = api_base_mode
+        self.codex_model_mode = codex_model_mode
         self.auth_error: str | None = None
         self.pending_login: dict[str, Any] | None = None
         self.start_error: str | None = None
@@ -99,10 +107,14 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.1.1",
+            "version": "0.1.2",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
+            "api_base_mode": self.api_base_mode,
+            "api_base_configured": self.api_base_mode == "custom",
+            "api_base_error": None,
+            "codex_model_mode": self.codex_model_mode,
             "auth_error": self.auth_error,
             "intake_configured": self.configured_intake_enabled,
             "intake_enabled": self.intake_enabled,

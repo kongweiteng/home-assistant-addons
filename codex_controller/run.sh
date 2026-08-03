@@ -16,6 +16,8 @@ fi
 export CONTROLLER_API_TOKEN
 export CONTROLLER_INTAKE_ENABLED=$(jq -r '.intake_enabled // false' "$OPTIONS_FILE")
 export CONTROLLER_AUTH_MODE=$(jq -r '.auth_mode // "chatgpt_device_code"' "$OPTIONS_FILE")
+export CONTROLLER_OPENAI_BASE_URL=$(jq -r '.openai_base_url // ""' "$OPTIONS_FILE")
+export CONTROLLER_CODEX_MODEL=$(jq -r '.codex_model // ""' "$OPTIONS_FILE")
 case "$CONTROLLER_AUTH_MODE" in
     chatgpt_device_code)
         unset CONTROLLER_OPENAI_API_KEY_FD

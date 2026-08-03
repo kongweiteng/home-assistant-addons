@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
 import threading
@@ -14,7 +15,7 @@ import unittest
 
 from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS
 from codex_controller.app_server import AppServerClient, AppServerError
-from codex_controller.main import read_api_key_from_fd
+from codex_controller.main import normalize_codex_model, normalize_openai_base_url, read_api_key_from_fd, write_codex_config
 from codex_controller.service import ControllerService
 from codex_controller.store import ControllerStore, StoreError
 from codex_controller.tool_proxy import ToolProxyError, ToolRouter, validate_base_url
@@ -181,6 +182,8 @@ class AppServerClientTests(unittest.TestCase):
                 "CONTROLLER_LEDGER_API_TOKEN": "secret-ledger",
                 "CONTROLLER_OPERATIONS_API_TOKEN": "secret-broker",
                 "CONTROLLER_OPENAI_API_KEY": "secret-openai",
+                "CONTROLLER_OPENAI_BASE_URL": "https://private.example.test/v1",
+                "CONTROLLER_CODEX_MODEL": "gpt-fixture",
                 "CONTROLLER_MCP_SOCKET": "/secret/path",
             }
         )
@@ -188,7 +191,109 @@ class AppServerClientTests(unittest.TestCase):
         self.assertNotIn("CONTROLLER_LEDGER_API_TOKEN", environment)
         self.assertNotIn("CONTROLLER_OPERATIONS_API_TOKEN", environment)
         self.assertNotIn("CONTROLLER_OPENAI_API_KEY", environment)
+        self.assertNotIn("CONTROLLER_OPENAI_BASE_URL", environment)
+        self.assertNotIn("CONTROLLER_CODEX_MODEL", environment)
         self.assertNotIn("CONTROLLER_MCP_SOCKET", environment)
+
+
+class ControllerApiBaseUrlTests(unittest.TestCase):
+    @staticmethod
+    def public_resolver(host: str, port: int, **_kwargs: object) -> list[tuple]:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
+
+    def test_empty_url_keeps_official_endpoint_for_both_auth_modes(self) -> None:
+        self.assertEqual(normalize_openai_base_url("", auth_mode="api_key"), "")
+        self.assertEqual(normalize_openai_base_url("", auth_mode="chatgpt_device_code"), "")
+
+    def test_custom_url_is_normalized_for_api_key_mode(self) -> None:
+        result = normalize_openai_base_url(
+            "https://API.Example.Test:8443/openai/v1/",
+            auth_mode="api_key",
+            resolver=self.public_resolver,
+        )
+        self.assertEqual(result, "https://api.example.test:8443/openai/v1")
+
+    def test_optional_model_is_restricted_to_api_key_and_safe_identifier(self) -> None:
+        self.assertEqual(normalize_codex_model("", auth_mode="chatgpt_device_code"), "")
+        self.assertEqual(normalize_codex_model("gpt-5.6-sol", auth_mode="api_key"), "gpt-5.6-sol")
+        for value in (" gpt-5.6-sol", "gpt model", "gpt\nmodel", "../model", "x" * 129):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_codex_model(value, auth_mode="api_key")
+        with self.assertRaisesRegex(ValueError, "API Key"):
+            normalize_codex_model("gpt-5.6-sol", auth_mode="chatgpt_device_code")
+
+    def test_custom_url_rejects_wrong_mode_and_unsafe_structure(self) -> None:
+        with self.assertRaisesRegex(ValueError, "API Key"):
+            normalize_openai_base_url(
+                "https://api.example.test/v1",
+                auth_mode="chatgpt_device_code",
+                resolver=self.public_resolver,
+            )
+        invalid_values = (
+            "http://api.example.test/v1",
+            "https://user@api.example.test/v1",
+            "https://api.example.test/v1?token=value",
+            "https://api.example.test/v1#fragment",
+            "https://api.example.test/v1\\private",
+            " https://api.example.test/v1",
+            "https://localhost/v1",
+            "https://supervisor/v1",
+            "https://service.internal/v1",
+            "https://127.0.0.1/v1",
+            "https://10.80.1.69/v1",
+            "https://[::1]/v1",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_openai_base_url(value, auth_mode="api_key", resolver=self.public_resolver)
+
+    def test_dns_with_any_non_public_result_is_rejected(self) -> None:
+        def mixed_resolver(_host: str, port: int, **_kwargs: object) -> list[tuple]:
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port)),
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.10", port)),
+            ]
+
+        with self.assertRaisesRegex(ValueError, "非公网"):
+            normalize_openai_base_url(
+                "https://api.example.test/v1",
+                auth_mode="api_key",
+                resolver=mixed_resolver,
+            )
+
+    def test_dns_failure_is_fail_closed_without_echoing_url(self) -> None:
+        private_url = "https://tenant-secret.example.test/v1"
+
+        def failing_resolver(_host: str, _port: int, **_kwargs: object) -> list[tuple]:
+            raise socket.gaierror("fixture dns failure")
+
+        with self.assertRaises(ValueError) as context:
+            normalize_openai_base_url(private_url, auth_mode="api_key", resolver=failing_resolver)
+        self.assertEqual(str(context.exception), "openai_base_url DNS 解析失败")
+        self.assertNotIn(private_url, str(context.exception))
+
+    def test_codex_config_is_atomic_private_and_contains_no_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            socket_path = root / "runtime" / "tool-proxy.sock"
+            write_codex_config(
+                codex_home,
+                socket_path,
+                openai_base_url="https://api.example.test/v1",
+                codex_model="gpt-5.6-sol",
+            )
+            config = codex_home / "config.toml"
+            content = config.read_text(encoding="utf-8")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertIn('openai_base_url = "https://api.example.test/v1"', content)
+            self.assertIn('model = "gpt-5.6-sol"', content)
+            self.assertIn("[mcp_servers.home_assistant_tools]", content)
+            self.assertNotIn("fixture-api-key-value", content)
+            self.assertEqual(list(codex_home.glob(".config.toml.*")), [])
+            write_codex_config(codex_home, socket_path)
+            self.assertNotIn("openai_base_url", config.read_text(encoding="utf-8"))
+            self.assertNotIn("model =", config.read_text(encoding="utf-8"))
 
 
 class ControllerAuthenticationTests(unittest.TestCase):
@@ -254,6 +359,29 @@ class ControllerAuthenticationTests(unittest.TestCase):
             service.stop()
             temporary.cleanup()
 
+    def test_custom_api_base_status_is_redacted(self) -> None:
+        app = self.StubApp()
+        temporary, service = self.make_service(
+            app,
+            auth_mode="api_key",
+            api_key="fixture-api-key-value",
+            api_base_mode="custom",
+            codex_model_mode="custom",
+        )
+        try:
+            service.start()
+            status = service.status()
+            self.assertEqual(status["api_base_mode"], "custom")
+            self.assertTrue(status["api_base_configured"])
+            self.assertIsNone(status["api_base_error"])
+            self.assertEqual(status["codex_model_mode"], "custom")
+            serialized = json.dumps(status, ensure_ascii=False)
+            self.assertNotIn("example.test", serialized)
+            self.assertNotIn("fixture-api-key-value", serialized)
+        finally:
+            service.stop()
+            temporary.cleanup()
+
     def test_existing_wrong_account_fails_closed_until_explicit_retry(self) -> None:
         secret = "fixture-api-key-value"
         app = self.StubApp(auth_mode="chatgpt")
@@ -299,9 +427,11 @@ class ControllerAuthenticationTests(unittest.TestCase):
     def test_ingress_supports_both_modes_without_key_input(self) -> None:
         self.assertIn("api/auth/device/start", DASHBOARD_JS)
         self.assertIn("api/auth/api-key/retry", DASHBOARD_JS)
-        self.assertIn("页面不会显示 Key 内容", DASHBOARD_JS)
+        self.assertIn("页面不会显示 URL 或 Key 内容", DASHBOARD_JS)
+        self.assertIn("API 端点", DASHBOARD_JS)
         self.assertNotIn("<input", DASHBOARD_HTML.lower())
         self.assertNotIn("openai_api_key", DASHBOARD_HTML + DASHBOARD_JS)
+        self.assertNotIn("openai_base_url", DASHBOARD_HTML + DASHBOARD_JS)
 
     def test_addon_config_and_run_script_keep_key_out_of_environment(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
@@ -309,7 +439,11 @@ class ControllerAuthenticationTests(unittest.TestCase):
         run_script = (root / "run.sh").read_text(encoding="utf-8")
         self.assertIn('auth_mode: "list(chatgpt_device_code|api_key)"', config)
         self.assertIn("openai_api_key: password", config)
+        self.assertIn("openai_base_url: str", config)
+        self.assertIn("codex_model: str", config)
         self.assertIn("CONTROLLER_OPENAI_API_KEY_FD", run_script)
+        self.assertIn("CONTROLLER_OPENAI_BASE_URL", run_script)
+        self.assertIn("CONTROLLER_CODEX_MODEL", run_script)
         self.assertNotIn("export CONTROLLER_OPENAI_API_KEY=", run_script)
 
 

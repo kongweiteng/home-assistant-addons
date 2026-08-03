@@ -274,7 +274,7 @@ class LedgerStore:
             }
         return {
             "service": "renovation_hub",
-            "version": "0.1.0",
+            "version": "0.1.1",
             "schema_version": int(meta["schema_version"]),
             "format_id": meta["format_id"],
             "writer_mode": meta["writer_mode"],

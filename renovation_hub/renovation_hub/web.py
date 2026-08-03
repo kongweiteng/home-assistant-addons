@@ -20,11 +20,16 @@ from .ledger import LedgerError
 from .media import MediaService
 
 
-STORE_KEY = web.AppKey("store", RenovationHubStore)
-MEDIA_KEY = web.AppKey("media", MediaService)
-API_TOKEN_KEY = web.AppKey("api_token", str)
-STATIC_DIR_KEY = web.AppKey("static_dir", object)
-CSRF_TOKEN_KEY = web.AppKey("csrf_token", str)
+def _make_app_key(name: str, value_type: type[Any]) -> Any:
+    app_key = getattr(web, "AppKey", None)
+    return app_key(name, value_type) if callable(app_key) else name
+
+
+STORE_KEY = _make_app_key("store", RenovationHubStore)
+MEDIA_KEY = _make_app_key("media", MediaService)
+API_TOKEN_KEY = _make_app_key("api_token", str)
+STATIC_DIR_KEY = _make_app_key("static_dir", object)
+CSRF_TOKEN_KEY = _make_app_key("csrf_token", str)
 PAGE_ACTOR = "sha256:renovation-hub-ingress-admin"
 
 

@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.1.1
+
+- 兼容 HAOS Bookworm 自带的 `aiohttp 3.8.x`：在不支持 `web.AppKey` 时安全回退到应用字符串键，修复 Add-on 启动即退出。
+- 新增对应兼容性回归测试；不改变数据契约、权限、Ingress、writer 模式或正式账本边界。
+
 ## 0.1.0
 
 - 将未部署的 Renovation Ledger 候选收敛为 Renovation Hub，并保留全部 `ledger_*` v1 工具和 `kanhuwan-renovation-ledger@1` 兼容边界。

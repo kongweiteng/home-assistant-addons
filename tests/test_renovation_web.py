@@ -5,6 +5,7 @@ from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import aiohttp
 from aiohttp import web
@@ -12,13 +13,19 @@ from PIL import Image
 
 from renovation_hub.hub import RenovationHubStore
 from renovation_hub.media import MediaService
-from renovation_hub.web import create_app
+from renovation_hub.web import _make_app_key, create_app
 
 
 def jpeg_bytes() -> bytes:
     buffer = BytesIO()
     Image.new("RGB", (480, 320), "#a8784e").save(buffer, "JPEG", quality=88)
     return buffer.getvalue()
+
+
+class RenovationAiohttpCompatibilityTests(unittest.TestCase):
+    def test_app_key_falls_back_for_bookworm_aiohttp(self) -> None:
+        with mock.patch.object(web, "AppKey", None):
+            self.assertEqual(_make_app_key("store", object), "store")
 
 
 class RenovationPageApiTests(unittest.IsolatedAsyncioTestCase):

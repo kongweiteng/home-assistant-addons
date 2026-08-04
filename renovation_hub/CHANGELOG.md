@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.2
+
+- 同步 Ingress 状态与内部 HTTP Server 的运行时版本为 `0.2.2`，确保 Supervisor、Controller 和迁移门禁核对的是实际运行候选而非旧版本字符串。
+- 保留 `0.2.1` 的真实规模流水数值排序修复，不改变账本、manifest、writer generation 或 active lease 数据语义。
+
 ## 0.2.1
 
 - 修复正式播种前 Hub 派生 `transaction_context` 使用文本流水 ID 排序的问题；真实账本超过 9 条流水时不再因 `1,10,100...` 与数值顺序不一致而误报 `invariant_mismatch`。

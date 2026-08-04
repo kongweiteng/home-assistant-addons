@@ -8,10 +8,12 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 
 from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
@@ -542,23 +544,85 @@ class ControllerApiBaseUrlTests(unittest.TestCase):
             root = Path(temporary)
             codex_home = root / "codex-home"
             socket_path = root / "runtime" / "tool-proxy.sock"
+            mcp_pythonpath = Path(__file__).resolve().parents[1] / "codex_controller"
             write_codex_config(
                 codex_home,
                 socket_path,
                 openai_base_url="https://api.example.test/v1",
                 codex_model="gpt-5.6-sol",
+                mcp_python=sys.executable,
+                mcp_pythonpath=str(mcp_pythonpath),
             )
             config = codex_home / "config.toml"
             content = config.read_text(encoding="utf-8")
+            parsed = tomllib.loads(content)
+            mcp_config = parsed["mcp_servers"]["home_assistant_tools"]
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
             self.assertIn('openai_base_url = "https://api.example.test/v1"', content)
             self.assertIn('model = "gpt-5.6-sol"', content)
             self.assertIn("[mcp_servers.home_assistant_tools]", content)
+            self.assertEqual(mcp_config["command"], sys.executable)
+            self.assertEqual(mcp_config["env"]["CONTROLLER_MCP_SOCKET"], str(socket_path))
+            self.assertEqual(mcp_config["env"]["PYTHONPATH"], str(mcp_pythonpath))
             self.assertNotIn("fixture-api-key-value", content)
             self.assertEqual(list(codex_home.glob(".config.toml.*")), [])
-            write_codex_config(codex_home, socket_path)
+            write_codex_config(
+                codex_home,
+                socket_path,
+                mcp_python=sys.executable,
+                mcp_pythonpath=str(mcp_pythonpath),
+            )
             self.assertNotIn("openai_base_url", config.read_text(encoding="utf-8"))
             self.assertNotIn("model =", config.read_text(encoding="utf-8"))
+
+    def test_generated_mcp_command_loads_catalog_in_sanitized_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex-home"
+            socket_path = root / "runtime" / "tool-proxy.sock"
+            mcp_pythonpath = Path(__file__).resolve().parents[1] / "codex_controller"
+            write_codex_config(
+                codex_home,
+                socket_path,
+                mcp_python=sys.executable,
+                mcp_pythonpath=str(mcp_pythonpath),
+            )
+            config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+            mcp_config = config["mcp_servers"]["home_assistant_tools"]
+            router = ToolRouter(
+                ledger_base_url="http://renovation-hub:8101",
+                ledger_token="l" * 32,
+            )
+            proxy = ToolProxyServer(socket_path, router)
+            proxy.start()
+            process = subprocess.Popen(
+                [mcp_config["command"], *mcp_config["args"]],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env={"PATH": os.environ.get("PATH", ""), **mcp_config["env"]},
+            )
+            try:
+                requests = "\n".join(
+                    json.dumps(message)
+                    for message in (
+                        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                    )
+                ) + "\n"
+                output, error = process.communicate(input=requests, timeout=5)
+                self.assertEqual(process.returncode, 0, error)
+                initialized, catalog = [json.loads(line) for line in output.splitlines()]
+                self.assertEqual(initialized["result"]["serverInfo"]["name"], "ha-controller-tools")
+                self.assertEqual(len(catalog["result"]["tools"]), 26)
+                self.assertIn("renovation_dashboard", {tool["name"] for tool in catalog["result"]["tools"]})
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                proxy.stop()
 
 
 class ControllerAuthenticationTests(unittest.TestCase):

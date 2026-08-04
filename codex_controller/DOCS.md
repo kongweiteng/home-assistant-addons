@@ -75,6 +75,8 @@ Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Co
 
 app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把固定工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Ledger 或 Broker。
 
+app-server 本身继续运行在不继承宿主 `PYTHONPATH` 的净化环境中；MCP 配置仅为固定的本地代理进程注入 `/opt/codex-controller`，避免外部 Python 路径进入模型进程，同时保证官方 app-server 的真实 `tools/list` 能装载工具目录。
+
 MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 URL/Token 未配置完整时，对应工具不会暴露。所有写工具必须处于当前 Controller 作业与 Turn 上下文中；Controller 忽略模型提供的写入幂等键，改用微信 `message_id`、工具名与排序后的规范化参数计算稳定 SHA-256。Turn 完成或启动失败后上下文立即清除。
 
 微信图片在创建 Turn 前由 Controller 主进程从 Gateway 的受认证预览接口读取，严格核对作业元数据、MIME、大小和 SHA-256，再以随机受控文件名写入 `/data/turn-media/<job-id>/`。官方 app-server 收到 `{"type":"localImage","path":"...","detail":"auto"}`；Turn 完成、明确失败或 Controller 重启时清理私有暂存。预览不会消费原 `attachment_ref`，因此模型识别图片后仍可调用装修归档工具保存同一原件。

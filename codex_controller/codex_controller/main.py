@@ -141,7 +141,11 @@ def write_codex_config(
     *,
     openai_base_url: str = "",
     codex_model: str = "",
+    mcp_python: str = "/usr/bin/python3",
+    mcp_pythonpath: str = "/opt/codex-controller",
 ) -> None:
+    if not Path(mcp_python).is_absolute() or not Path(mcp_pythonpath).is_absolute():
+        raise ValueError("MCP Python 路径必须是绝对路径")
     codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
     config = codex_home / "config.toml"
     runtime_config = ""
@@ -153,9 +157,12 @@ def write_codex_config(
         runtime_config += "\n"
     expected = runtime_config + (
         "[mcp_servers.home_assistant_tools]\n"
-        'command = "/usr/bin/python3"\n'
+        f"command = {json.dumps(mcp_python, ensure_ascii=False)}\n"
         'args = ["-m", "codex_controller.mcp_proxy"]\n'
-        f'env = {{ CONTROLLER_MCP_SOCKET = "{socket_path}" }}\n'
+        "env = { "
+        f"CONTROLLER_MCP_SOCKET = {json.dumps(str(socket_path), ensure_ascii=False)}, "
+        f"PYTHONPATH = {json.dumps(mcp_pythonpath, ensure_ascii=False)}"
+        " }\n"
     )
     if config.exists() and config.is_symlink():
         raise RuntimeError("CODEX_HOME config.toml 不能是符号链接")

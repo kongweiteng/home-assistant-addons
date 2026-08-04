@@ -5,6 +5,8 @@
 - 修复 `/new` 创建的新 Thread 在同一 app-server 进程内被下一条消息重复 `thread/resume`、导致请求在 `turn/start` 前失败的问题。
 - Controller 仅在进程内记录已经由 `thread/start` 或成功 `thread/resume` 加载的 Thread；已加载 Thread 直接进入后续 Turn，未知或重启后恢复的持久 Thread 仍执行完整安全恢复。
 - 加载状态以锁串行保护并在 Controller/app-server 启停时清空，不改变 SQLite Thread 映射、单活动 Turn、队列、MCP 工具、认证或写入边界。
+- 修复 app-server 的净化环境未向 MCP 子进程提供受控 Python 模块路径、导致页面显示已配置工具但真实 Thread 工具目录为空的问题；MCP 配置只注入固定 `/opt/codex-controller`，不会恢复对外部 `PYTHONPATH` 的继承。
+- 新增净化环境下真实启动 MCP、执行 `initialize` 与 `tools/list` 的回归测试，确保装修工具不是只存在于 Controller 本地清单。
 
 ## 0.1.8
 

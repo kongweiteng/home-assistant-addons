@@ -6,6 +6,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -21,6 +22,8 @@ from .protocol import canonical_json, validate_cdn_base_url, validate_ilink_base
 
 
 IDENTITY_FORMAT = "weixin-ilink-identity@1"
+OWNER_PAIRING_FORMAT = "weixin-owner-pairing@1"
+OWNER_PAIRING_TTL_SECONDS = 15 * 60
 
 
 def utc_now() -> str:
@@ -64,9 +67,11 @@ class IdentityStore:
         self.accounts_dir = self.data_dir / "accounts"
         self.migration_dir = self.data_dir / "migration"
         self.locks_dir = self.data_dir / "locks"
-        for directory in (self.accounts_dir, self.migration_dir, self.locks_dir):
+        self.pairing_dir = self.data_dir / "pairing"
+        for directory in (self.accounts_dir, self.migration_dir, self.locks_dir, self.pairing_dir):
             directory.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.active_path = self.accounts_dir / "active.json"
+        self.owner_pairing_path = self.pairing_dir / "owner.json"
 
     def save_identity(self, identity: dict[str, Any]) -> dict[str, Any]:
         normalized = self.validate_identity(identity)
@@ -176,6 +181,97 @@ class IdentityStore:
         updated["context_tokens"] = contexts
         self.save_identity(updated)
         identity["context_tokens"] = contexts
+
+    def clear_owner_pairing(self) -> None:
+        if self.owner_pairing_path.is_file() and not self.owner_pairing_path.is_symlink():
+            self.owner_pairing_path.unlink()
+
+    def start_owner_pairing(self, identity: dict[str, Any]) -> dict[str, Any]:
+        normalized = self.validate_identity(identity)
+        if normalized["allowed_user_ids"]:
+            self.clear_owner_pairing()
+            raise StoreError("owner_already_bound", "微信 owner 已完成绑定", status=409)
+        code = "绑定-CODEX-" + secrets.token_hex(6).upper()
+        salt = secrets.token_bytes(16)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=OWNER_PAIRING_TTL_SECONDS)
+        atomic_json_write(
+            self.owner_pairing_path,
+            {
+                "format_id": OWNER_PAIRING_FORMAT,
+                "account_hash": account_hash(normalized["account_id"]),
+                "salt": base64.urlsafe_b64encode(salt).decode("ascii"),
+                "code_sha256": hashlib.sha256(salt + code.encode("utf-8")).hexdigest(),
+                "expires_at": expires_at.isoformat(),
+            },
+        )
+        return {"state": "waiting", "code": code, "expires_at": expires_at.isoformat()}
+
+    def owner_pairing_summary(self, identity: dict[str, Any] | None) -> dict[str, Any]:
+        if identity is None:
+            return {"state": "credential_required"}
+        normalized = self.validate_identity(identity)
+        if normalized["allowed_user_ids"]:
+            self.clear_owner_pairing()
+            return {"state": "bound", "owner_count": len(normalized["allowed_user_ids"])}
+        document = self._owner_pairing_document(normalized)
+        if document is None:
+            return {"state": "required"}
+        return {"state": "waiting", "expires_at": document["expires_at"]}
+
+    def claim_owner(
+        self,
+        identity: dict[str, Any],
+        *,
+        user_id: str,
+        text: str,
+        context_token: str | None,
+    ) -> bool:
+        normalized = self.validate_identity(identity)
+        if normalized["allowed_user_ids"] or not user_id or not text:
+            return False
+        document = self._owner_pairing_document(normalized)
+        if document is None:
+            return False
+        try:
+            salt = base64.urlsafe_b64decode(str(document["salt"]).encode("ascii"))
+        except Exception:
+            self.clear_owner_pairing()
+            return False
+        actual = hashlib.sha256(salt + text.strip().encode("utf-8")).hexdigest()
+        if not hmac.compare_digest(actual, str(document.get("code_sha256") or "")):
+            return False
+        updated = dict(normalized)
+        updated["allowed_user_ids"] = [user_id]
+        contexts = dict(updated.get("context_tokens", {}))
+        if context_token:
+            contexts[user_id] = context_token
+        updated["context_tokens"] = contexts
+        self.save_identity(updated)
+        identity.clear()
+        identity.update(updated)
+        self.clear_owner_pairing()
+        return True
+
+    def _owner_pairing_document(self, identity: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.owner_pairing_path.is_file() or self.owner_pairing_path.is_symlink():
+            return None
+        try:
+            read_document = json.loads(self.owner_pairing_path.read_text(encoding="utf-8"))
+            document = read_document if isinstance(read_document, dict) else None
+            if (
+                document is None
+                or document.get("format_id") != OWNER_PAIRING_FORMAT
+                or document.get("account_hash") != account_hash(identity["account_id"])
+                or parse_time(str(document.get("expires_at") or "")) <= datetime.now(timezone.utc)
+                or not isinstance(document.get("salt"), str)
+                or not isinstance(document.get("code_sha256"), str)
+            ):
+                self.clear_owner_pairing()
+                return None
+        except (OSError, ValueError, json.JSONDecodeError):
+            self.clear_owner_pairing()
+            return None
+        return document
 
     def acquire_token_lock(self, token: str) -> "TokenLock":
         return TokenLock(self.locks_dir / f"{hashlib.sha256(token.encode('utf-8')).hexdigest()}.lock")

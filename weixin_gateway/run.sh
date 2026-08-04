@@ -15,6 +15,7 @@ fi
 
 export WEIXIN_ATTACHMENT_API_TOKEN
 export WEIXIN_POLLER_ENABLED=$(jq -r '.poller_enabled // false' "$OPTIONS_FILE")
+export WEIXIN_OWNER_PAIRING_ENABLED=$(jq -r '.owner_pairing_enabled // false' "$OPTIONS_FILE")
 export WEIXIN_ACTIVATION_CONFIRMATION=$(jq -r '.activation_confirmation // ""' "$OPTIONS_FILE")
 export WEIXIN_CONTROLLER_BASE_URL=$(jq -r '.controller_base_url // ""' "$OPTIONS_FILE")
 export WEIXIN_CONTROLLER_API_TOKEN=$(jq -r '.controller_api_token // ""' "$OPTIONS_FILE")

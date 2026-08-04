@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.2
+
+- 新增新扫码身份的一次性 owner 绑定流程；绑定码仅在管理员 Ingress 返回一次，磁盘只保存带盐 SHA-256 和过期时间。
+- 未绑定身份只能运行在 `pairing` 状态，普通消息、图片和错误绑定码均不会进入 Controller；正确绑定消息也不会作为 Codex 请求提交。
+- 绑定成功后原子写入唯一 owner allowlist 和当次 `context_token`，随后自动进入正常 `polling`；已有 owner 的身份不能重复绑定。
+- 真实 Poller 运行时禁止重新扫码或导入其他身份，避免在线替换凭据。
+
 ## 0.1.1
 
 - 新增受认证的 `/internal/v1/attachments/<ref>/preview` 非消费预览接口，供 Controller 构造官方 Codex `localImage` 输入。

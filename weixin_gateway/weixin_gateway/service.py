@@ -113,6 +113,7 @@ class GatewayService:
         controller: ControllerClient,
         bootstrap_identity: dict[str, Any],
         poller_enabled: bool,
+        owner_pairing_enabled: bool,
         activation_confirmation: str,
         max_media_bytes: int,
     ):
@@ -121,6 +122,7 @@ class GatewayService:
         self.controller = controller
         self.identity = identity_store.bootstrap(bootstrap_identity)
         self.poller_enabled = poller_enabled
+        self.owner_pairing_enabled = owner_pairing_enabled
         self.activation_confirmation = activation_confirmation
         self.max_media_bytes = max_media_bytes
         self.client: IlinkClient | None = None
@@ -143,9 +145,11 @@ class GatewayService:
                 raise StoreError("activation_confirmation_required", "未确认 Hermes poller 已停止", status=409)
             if self.identity is None or self.client is None:
                 raise StoreError("credential_missing", "缺少完整 iLink 身份", status=409)
+            if not self.identity.get("allowed_user_ids") and not self.owner_pairing_enabled:
+                raise StoreError("owner_binding_required", "新身份必须先启用一次性 owner 绑定", status=409)
             self.token_lock = self.identity_store.acquire_token_lock(self.identity["token"])
             self.token_lock.acquire()
-            self.poller_state = "polling"
+            self.poller_state = "polling" if self.identity.get("allowed_user_ids") else "pairing"
             self._tasks.append(asyncio.create_task(self._poll_loop(), name="weixin-poller"))
         self._tasks.append(asyncio.create_task(self._delivery_loop(), name="weixin-controller-delivery"))
         self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="weixin-spool-cleanup"))
@@ -226,7 +230,20 @@ class GatewayService:
         if message is None or message["is_group"]:
             return
         sender_id = message["sender_id"]
-        if sender_id not in set(self.identity.get("allowed_user_ids", [])):
+        allowed_user_ids = set(self.identity.get("allowed_user_ids", []))
+        if not allowed_user_ids:
+            if self.owner_pairing_enabled and self.identity_store.claim_owner(
+                self.identity,
+                user_id=sender_id,
+                text=str(message.get("text") or ""),
+                context_token=str(message.get("context_token") or "") or None,
+            ):
+                self.identity = self.identity_store.load_identity()
+                self.poller_state = "polling"
+                self.last_message_at = utc_now()
+                await self._send_owner_pairing_confirmation(sender_id, str(message.get("context_token") or "") or None, message["message_id"])
+            return
+        if sender_id not in allowed_user_ids:
             return
         if self.store.message_exists(message["message_id"]):
             return
@@ -249,6 +266,22 @@ class GatewayService:
             media=media,
         )
         self.last_message_at = utc_now()
+
+    async def _send_owner_pairing_confirmation(self, sender_id: str, context_token: str | None, message_id: str) -> None:
+        if self.client is None:
+            return
+        client_id = "codex-weixin-pairing-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
+        try:
+            response = await self.client.send_text(
+                sender_id,
+                "微信 owner 绑定成功。现在可以直接和通用 Codex 助手交流。",
+                context_token,
+                client_id,
+            )
+            if response.get("ret", 0) not in {0, None} or response.get("errcode", 0) not in {0, None}:
+                self.last_error = "owner_pairing_confirmation_failed"
+        except Exception:
+            self.last_error = "owner_pairing_confirmation_failed"
 
     async def _delivery_loop(self) -> None:
         while not self._stop.is_set():
@@ -326,6 +359,8 @@ class GatewayService:
                 await asyncio.sleep(60)
 
     async def start_qr_login(self) -> dict[str, Any]:
+        if self.poller_state not in {"disabled", "stopped"}:
+            raise StoreError("poller_active", "真实 Poller 运行时不能替换 iLink 身份", status=409)
         if self.qr_state and self.qr_state.get("state") in {"waiting", "scanned"}:
             return self.public_qr_state()
         client = IlinkClient(base_url="https://ilinkai.weixin.qq.com", cdn_base_url="https://novac2c.cdn.weixin.qq.com/c2c", token="", max_media_bytes=self.max_media_bytes)
@@ -367,6 +402,7 @@ class GatewayService:
                     self.qr_state["state"] = "expired"
                     return
                 elif state == "confirmed":
+                    self.identity_store.clear_owner_pairing()
                     identity = {
                         "account_id": str(response.get("ilink_bot_id") or ""),
                         "token": str(response.get("bot_token") or ""),
@@ -398,18 +434,31 @@ class GatewayService:
         return self.identity_store.inspect_migration(reference)
 
     def import_migration(self, reference: str, key: str) -> dict[str, Any]:
+        if self.poller_state not in {"disabled", "stopped"}:
+            raise StoreError("poller_active", "真实 Poller 运行时不能导入 iLink 身份", status=409)
+        self.identity_store.clear_owner_pairing()
         result = self.identity_store.import_migration(reference, key)
         self.identity = self.identity_store.load_identity()
         self._refresh_client()
         return result
 
+    def start_owner_pairing(self) -> dict[str, Any]:
+        if not self.owner_pairing_enabled:
+            raise StoreError("owner_pairing_disabled", "一次性 owner 绑定未启用", status=409)
+        if self.identity is None:
+            raise StoreError("credential_missing", "缺少完整 iLink 身份", status=409)
+        if self.poller_state != "pairing":
+            raise StoreError("owner_pairing_unavailable", "请先启动新身份配对 Poller", status=409)
+        return self.identity_store.start_owner_pairing(self.identity)
+
     def status(self) -> dict[str, Any]:
         identity = None if self.identity is None else self.identity_store.public_summary(self.identity)
         return {
-            "version": "0.1.1",
+            "version": "0.1.2",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,
+            "owner_pairing": self.identity_store.owner_pairing_summary(self.identity),
             "controller_configured": self.controller.configured,
             "last_poll_at": self.last_poll_at,
             "last_message_at": self.last_message_at,

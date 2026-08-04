@@ -83,11 +83,14 @@ def create_server(
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
-            payload = self._read_json(allow_empty=path == "/api/qr/start")
+            payload = self._read_json(allow_empty=path in {"/api/qr/start", "/api/owner-pairing/start"})
             if payload is None:
                 return
             if path == "/api/qr/start":
                 self._async_call(service.start_qr_login())
+                return
+            if path == "/api/owner-pairing/start":
+                self._call(service.start_owner_pairing)
                 return
             if path == "/api/migration/inspect":
                 self._call(lambda: service.inspect_migration(str(payload.get("package_ref") or "")))
@@ -193,9 +196,10 @@ DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>微信网关</title>
 <style>body{margin:0;background:#0b1220;color:#edf4ff;font:15px system-ui}main{max-width:960px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#121c2e;border:1px solid #263751;border-radius:12px;padding:16px}b{font-size:22px;display:block;margin-top:8px}.muted{color:#91a4bd}code{color:#42d392}button{border:0;border-radius:9px;padding:10px 14px;background:#2374e1;color:white;cursor:pointer}img{max-width:320px;background:white;padding:12px;border-radius:12px}</style></head>
 <body><main><h1>微信网关</h1><p class="muted">最小 iLink 传输层；模型、账本和 HA 权限均不在本 Add-on。</p>
-<div class="grid"><div class="card">Poller<b id="poller">加载中</b></div><div class="card">身份<b id="identity">加载中</b></div><div class="card">待提交<b id="pending">-</b></div><div class="card">待回复<b id="submitted">-</b></div></div>
-<h2>二维码备用登录</h2><p>正式迁移优先使用加密身份包。二维码可能产生不同身份，必须重新做微信 E2E 验收。</p><button id="qrStart">生成二维码</button><p id="qrState" class="muted">尚未生成</p><img id="qrImage" hidden alt="iLink 登录二维码">
+<div class="grid"><div class="card">Poller<b id="poller">加载中</b></div><div class="card">身份<b id="identity">加载中</b></div><div class="card">Owner 绑定<b id="pairing">加载中</b></div><div class="card">待提交<b id="pending">-</b></div><div class="card">待回复<b id="submitted">-</b></div></div>
+<h2>二维码登录</h2><p>重新扫码会生成当前有效的 iLink 机器人身份；旧身份可能随即失效。</p><button id="qrStart">生成二维码</button><p id="qrState" class="muted">尚未生成</p><img id="qrImage" hidden alt="iLink 登录二维码">
+<h2>新身份 Owner 绑定</h2><p>Poller 显示 <code>pairing</code> 时生成一次性绑定码，并由 owner 在新机器人私聊中原样发送。绑定消息不会进入 Codex。</p><button id="pairStart">生成一次性绑定码</button><p class="muted">绑定码：<code id="pairCode">尚未生成</code></p>
 <h2>安全状态</h2><p id="details" class="muted">加载中</p><script src="app.js"></script></main></body></html>"""
 
 
-DASHBOARD_JS = r"""const q=id=>document.getElementById(id);async function refresh(){try{const r=await fetch('api/status',{cache:'no-store'}),s=await r.json();q('poller').textContent=s.poller_state;q('identity').textContent=s.identity?'已就绪':'缺少';q('pending').textContent=s.queue.messages.pending_controller;q('submitted').textContent=s.queue.messages.controller_submitted;q('qrState').textContent=s.qr.state;q('qrImage').hidden=!s.qr.has_image;if(s.qr.has_image)q('qrImage').src='api/qr/image?'+Date.now();q('details').textContent=`Controller ${s.controller_configured?'已配置':'未配置'} · allowlist ${s.identity?.allowed_user_count??0} · context ${s.identity?.context_count??0} · spool ${s.queue.spool_bytes} bytes · error ${s.last_error||'无'}`}catch(e){q('details').textContent=e.message}}q('qrStart').onclick=async()=>{try{const r=await fetch('api/qr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),j=await r.json();if(!r.ok)throw new Error(j.error?.message||'生成失败');await refresh()}catch(e){alert(e.message)}};refresh();setInterval(refresh,3000);"""
+DASHBOARD_JS = r"""const q=id=>document.getElementById(id);async function refresh(){try{const r=await fetch('api/status',{cache:'no-store'}),s=await r.json();q('poller').textContent=s.poller_state;q('identity').textContent=s.identity?'已就绪':'缺少';q('pairing').textContent=s.owner_pairing?.state||'不可用';q('pending').textContent=s.queue.messages.pending_controller;q('submitted').textContent=s.queue.messages.controller_submitted;q('qrState').textContent=s.qr.state;q('qrImage').hidden=!s.qr.has_image;if(s.qr.has_image)q('qrImage').src='api/qr/image?'+Date.now();q('details').textContent=`Controller ${s.controller_configured?'已配置':'未配置'} · allowlist ${s.identity?.allowed_user_count??0} · context ${s.identity?.context_count??0} · spool ${s.queue.spool_bytes} bytes · error ${s.last_error||'无'}`}catch(e){q('details').textContent=e.message}}q('qrStart').onclick=async()=>{try{const r=await fetch('api/qr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),j=await r.json();if(!r.ok)throw new Error(j.error?.message||'生成失败');await refresh()}catch(e){alert(e.message)}};q('pairStart').onclick=async()=>{try{const r=await fetch('api/owner-pairing/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),j=await r.json();if(!r.ok)throw new Error(j.error?.message||'生成失败');q('pairCode').textContent=j.result.code;await refresh()}catch(e){alert(e.message)}};refresh();setInterval(refresh,3000);"""

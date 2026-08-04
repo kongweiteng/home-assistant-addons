@@ -50,6 +50,7 @@ async def async_main() -> None:
         controller=controller,
         bootstrap_identity=bootstrap,
         poller_enabled=os.environ.get("WEIXIN_POLLER_ENABLED", "false").lower() == "true",
+        owner_pairing_enabled=os.environ.get("WEIXIN_OWNER_PAIRING_ENABLED", "false").lower() == "true",
         activation_confirmation=os.environ.get("WEIXIN_ACTIVATION_CONFIRMATION", ""),
         max_media_bytes=int(os.environ.get("WEIXIN_MAX_MEDIA_BYTES", str(20 * 1024 * 1024))),
     )

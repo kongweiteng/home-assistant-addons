@@ -19,6 +19,7 @@ from weixin_gateway.protocol import (
     extract_message,
     parse_aes_key,
 )
+from weixin_gateway.api import DASHBOARD_HTML, DASHBOARD_JS
 from weixin_gateway.service import ControllerClient, GatewayService, split_text
 from weixin_gateway.store import GatewayStore, IdentityStore, StoreError
 
@@ -58,9 +59,21 @@ class StubIlinkClient:
     def __init__(self, media: bytes = b"fixture-image"):
         self.media = media
         self.closed = False
+        self.sent: list[dict] = []
 
     async def download_media(self, _spec: dict) -> bytes:
         return self.media
+
+    async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+        self.sent.append(
+            {
+                "to_user_id": to_user_id,
+                "text": text,
+                "context_token": context_token,
+                "client_id": client_id,
+            }
+        )
+        return {"ret": 0}
 
     async def close(self) -> None:
         self.closed = True
@@ -126,6 +139,12 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(assert_cdn_url(message["media"][0]["full_url"]), message["media"][0]["full_url"])
         with self.assertRaises(ProtocolError):
             assert_cdn_url("https://example.invalid/file")
+
+    def test_dashboard_exposes_admin_pairing_without_unsafe_html_rendering(self) -> None:
+        self.assertIn("api/owner-pairing/start", DASHBOARD_JS)
+        self.assertIn("绑定消息不会进入 Codex", DASHBOARD_HTML)
+        self.assertIn("textContent=j.result.code", DASHBOARD_JS)
+        self.assertNotIn("innerHTML", DASHBOARD_JS)
 
 
 class StoreTests(unittest.TestCase):
@@ -223,6 +242,33 @@ class StoreTests(unittest.TestCase):
             self.identity_store.inspect_migration(tampered.name)
         self.assertEqual(context.exception.code, "migration_invalid")
 
+    def test_owner_pairing_code_is_one_time_hashed_and_binds_exact_sender(self) -> None:
+        identity = fixture_identity(allowed=[])
+        self.identity_store.save_identity(identity)
+        pairing = self.identity_store.start_owner_pairing(identity)
+        self.assertEqual(pairing["state"], "waiting")
+        self.assertNotIn(pairing["code"].encode("utf-8"), self.identity_store.owner_pairing_path.read_bytes())
+        self.assertFalse(
+            self.identity_store.claim_owner(
+                identity,
+                user_id="fixture-stranger",
+                text="绑定-CODEX-WRONG",
+                context_token="wrong-context",
+            )
+        )
+        self.assertTrue(
+            self.identity_store.claim_owner(
+                identity,
+                user_id="fixture-owner",
+                text=pairing["code"],
+                context_token="fixture-context",
+            )
+        )
+        self.assertEqual(identity["allowed_user_ids"], ["fixture-owner"])
+        self.assertEqual(identity["context_tokens"], {"fixture-owner": "fixture-context"})
+        self.assertEqual(self.identity_store.owner_pairing_summary(identity)["state"], "bound")
+        self.assertFalse(self.identity_store.owner_pairing_path.exists())
+
     def test_text_chunking_and_client_ids_are_deterministic(self) -> None:
         text = ("第一段。\n" * 1200) + "结尾"
         chunks = split_text(text, 4000)
@@ -258,13 +304,20 @@ class ServiceTests(unittest.TestCase):
             loop.close()
             asyncio.set_event_loop(None)
 
-    def service(self, *, poller_enabled: bool = False, confirmation: str = "") -> GatewayService:
+    def service(
+        self,
+        *,
+        poller_enabled: bool = False,
+        owner_pairing_enabled: bool = False,
+        confirmation: str = "",
+    ) -> GatewayService:
         service = GatewayService(
             identity_store=self.identity_store,
             store=self.store,
             controller=StubController(),  # type: ignore[arg-type]
             bootstrap_identity={},
             poller_enabled=poller_enabled,
+            owner_pairing_enabled=owner_pairing_enabled,
             activation_confirmation=confirmation,
             max_media_bytes=1024 * 1024,
         )
@@ -284,6 +337,33 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(self.store.message_exists("fixture-group"))
         self.assertFalse(self.store.message_exists("fixture-unknown"))
         self.assertTrue(self.store.message_exists("fixture-message-1"))
+
+    def test_new_identity_only_accepts_exact_one_time_owner_pairing_code(self) -> None:
+        self.identity_store.save_identity(fixture_identity(allowed=[]))
+        service = self.service(owner_pairing_enabled=True)
+        service.poller_state = "pairing"
+        pairing = service.start_owner_pairing()
+        raw = fixture_update()["msgs"][0]
+        wrong = json.loads(json.dumps(raw))
+        wrong["message_id"] = "fixture-pairing-wrong"
+        wrong["item_list"] = [{"type": 1, "text_item": {"text": "普通问题"}}]
+        correct = json.loads(json.dumps(raw))
+        correct["message_id"] = "fixture-pairing-correct"
+        correct["item_list"] = [{"type": 1, "text_item": {"text": pairing["code"]}}]
+
+        async def exercise() -> None:
+            await service._ingest(wrong)
+            await service._ingest(correct)
+
+        self.run_async(exercise())
+        identity = self.identity_store.load_identity()
+        self.assertIsNotNone(identity)
+        assert identity is not None
+        self.assertEqual(identity["allowed_user_ids"], ["fixture-owner"])
+        self.assertFalse(self.store.message_exists("fixture-pairing-wrong"))
+        self.assertFalse(self.store.message_exists("fixture-pairing-correct"))
+        self.assertEqual(service.poller_state, "polling")
+        self.assertEqual(len(service.client.sent), 1)  # type: ignore[union-attr]
 
     def test_poll_loop_persists_cursor_after_message_and_deduplicates_replay(self) -> None:
         async def exercise() -> None:
@@ -366,6 +446,7 @@ class ServiceTests(unittest.TestCase):
                 controller=StubController(),  # type: ignore[arg-type]
                 bootstrap_identity={},
                 poller_enabled=True,
+                owner_pairing_enabled=False,
                 activation_confirmation="HERMES_POLLER_STOPPED",
                 max_media_bytes=1024 * 1024,
             )
@@ -374,6 +455,17 @@ class ServiceTests(unittest.TestCase):
             await service.stop()
 
         self.run_async(accept_exact_confirmation())
+
+    def test_unbound_identity_requires_explicit_pairing_mode(self) -> None:
+        self.identity_store.save_identity(fixture_identity(allowed=[]))
+
+        async def reject_unbound() -> None:
+            service = self.service(poller_enabled=True, confirmation="HERMES_POLLER_STOPPED")
+            with self.assertRaises(StoreError) as context:
+                await service.start()
+            self.assertEqual(context.exception.code, "owner_binding_required")
+
+        self.run_async(reject_unbound())
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 | --- | --- |
 | `attachment_api_token` | Ledger/Controller 读取一次性附件的独立 Token，至少 32 个字符 |
 | `poller_enabled` | 是否启动真实 iLink 长轮询；默认关闭 |
+| `owner_pairing_enabled` | 是否允许新身份进入一次性 owner 绑定状态；默认关闭 |
 | `activation_confirmation` | 真实切换时必须精确填写 `HERMES_POLLER_STOPPED` |
 | `controller_base_url` | Codex Controller 固定内部服务根地址 |
 | `controller_api_token` | Gateway 提交和查询作业使用的独立 bearer |
@@ -18,7 +19,7 @@
 
 真实启动必须同时满足：
 
-1. 身份、allowlist、Controller 和本地持久化检查通过。
+1. 身份、Controller 和本地持久化检查通过；已有 allowlist，或显式进入一次性 owner 绑定状态。
 2. `poller_enabled=true`。
 3. `activation_confirmation=HERMES_POLLER_STOPPED`。
 4. 取得 token 哈希对应的本地独占锁。
@@ -35,7 +36,18 @@
 - 导入先检查和解密，再以 `0600` 原子写入私有身份文件；不会自动启动 poller。
 - 正式 Hermes 凭据与备份保留到整个迁移验收结束。
 
-如果原身份包无法可靠迁移，可以使用二维码备用登录；这可能生成不同身份，不能自动视为“保留原身份”。
+重新扫码会生成当前有效的 iLink 机器人身份，并可能使旧凭据失效。扫码只完成机器人认证，不会自动信任任何私聊用户。
+
+## 新身份 Owner 绑定
+
+1. 保持 `poller_enabled=false` 完成扫码，确认页面显示身份已就绪。
+2. 停止旧 Poller 后设置 `owner_pairing_enabled=true`、`poller_enabled=true` 和精确激活确认值。
+3. 新 Gateway 进入 `pairing`，普通消息、图片和错误绑定码全部丢弃，不提交 Controller。
+4. 在管理员 Ingress 点击“生成一次性绑定码”；明文只在该次响应中显示，磁盘仅保存带盐 SHA-256，15 分钟后失效。
+5. owner 在新机器人私聊中原样发送绑定码。Gateway 原子保存唯一 owner ID 和当次 `context_token`，绑定消息本身不会进入 Codex。
+6. 页面变为 `owner_pairing=bound`、`poller_state=polling` 后，再执行普通文字和图片验收。
+
+已有 owner 的身份不能再次执行首次绑定；需要增加、替换或移除 owner 时必须走单独的权限变更与重新验收流程。
 
 ## 消息与媒体
 

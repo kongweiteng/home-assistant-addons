@@ -17,6 +17,7 @@ ADDON = ROOT / "ha_operations_broker"
 sys.path.insert(0, str(ADDON))
 
 from operations_broker.api import create_server
+from operations_broker.authorization import AuthorizationError
 from operations_broker.contract import (
     PROPOSAL_HASH_FIELDS,
     canonical_json,
@@ -131,10 +132,14 @@ class PackagingTests(unittest.TestCase):
         config = (ADDON / "config.yaml").read_text(encoding="utf-8")
         api = (ADDON / "operations_broker" / "api.py").read_text(encoding="utf-8")
         supervisor = (ADDON / "operations_broker" / "supervisor.py").read_text(encoding="utf-8")
-        self.assertIn('version: "0.3.0"', config)
-        self.assertIn('server_version = "HAOperationsBroker/0.3.0"', api)
+        package = (ADDON / "operations_broker" / "__init__.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('version: "0.4.0"', config)
+        self.assertIn('server_version = "HAOperationsBroker/0.4.0"', api)
         self.assertNotIn('ha-operations-broker/0.1"', supervisor)
-        self.assertIn('ha-operations-broker/0.3.0"', supervisor)
+        self.assertIn('ha-operations-broker/0.4.0"', supervisor)
+        self.assertIn('__version__ = "0.4.0"', package)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: manager", config)
@@ -200,6 +205,15 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn('method="POST"', supervisor)
         self.assertIn('/addons/{slug}/restart', supervisor)
+
+    def test_broker_recovery_resolution_is_not_exposed_as_controller_mcp(self) -> None:
+        controller = ROOT / "codex_controller" / "codex_controller"
+        for relative in ("mcp_proxy.py", "tool_proxy.py"):
+            source = (controller / relative).read_text(encoding="utf-8")
+            self.assertNotIn("recovery-resolution", source)
+            self.assertNotIn("confirmed_healthy", source)
+            self.assertNotIn("compensated", source)
+            self.assertNotIn("ha_operations_recovery", source)
 
 
 class PreflightTests(unittest.TestCase):
@@ -368,6 +382,25 @@ class SupervisorClientTests(unittest.TestCase):
 
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.recovery_calls: list[tuple[str, dict]] = []
+
+        def resolve_recovery(action_id: str, payload: dict) -> dict:
+            if payload.get("resolution") == "compensated":
+                raise AuthorizationError(
+                    "recovery_already_resolved", "Execution recovery is already resolved"
+                )
+            self.recovery_calls.append((action_id, payload))
+            return {
+                "action_id": action_id,
+                "state": "recovery_required",
+                "recovery": {
+                    "resolved": True,
+                    "resolution": payload.get("resolution"),
+                    "evidence_hash": payload.get("evidence_hash"),
+                    "resolved_at": "2026-08-04T00:00:00+00:00",
+                },
+            }
+
         self.server = create_server(
             "127.0.0.1",
             0,
@@ -383,8 +416,15 @@ class ApiTests(unittest.TestCase):
             },
             execution_status_handler=lambda action_id: {
                 "action_id": action_id,
-                "state": "succeeded",
+                "state": "recovery_required",
+                "recovery": {
+                    "resolved": False,
+                    "resolution": None,
+                    "evidence_hash": None,
+                    "resolved_at": None,
+                },
             },
+            recovery_resolution_handler=resolve_recovery,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -399,7 +439,7 @@ class ApiTests(unittest.TestCase):
             payload,
             {
                 "status": "ok",
-                "version": 3,
+                "version": 4,
                 "execution_enabled": False,
                 "enabled_actions": [],
             },
@@ -468,6 +508,64 @@ class ApiTests(unittest.TestCase):
         with urlopen(status) as response:
             result = json.loads(response.read())
         self.assertEqual(result["action_id"], payload["action_id"])
+        self.assertFalse(result["recovery"]["resolved"])
+
+    def test_recovery_resolution_requires_bearer_and_forwards_exact_action(self) -> None:
+        action_id = "OPS-20260731-A1B2C3D4E5F6"
+        payload = {
+            "version": 1,
+            "resolution": "confirmed_healthy",
+            "evidence_hash": "sha256:" + "c" * 64,
+        }
+        path = f"/v1/executions/{action_id}/recovery-resolution"
+        unauthorized = Request(
+            self.base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as context:
+            urlopen(unauthorized)
+        self.assertEqual(context.exception.code, 401)
+        self.assertEqual(self.recovery_calls, [])
+
+        authorized = Request(
+            self.base + path,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Authorization": "Bearer " + "a" * 32,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(authorized) as response:
+            result = json.loads(response.read())
+        self.assertEqual(self.recovery_calls, [(action_id, payload)])
+        self.assertEqual(result["state"], "recovery_required")
+        self.assertTrue(result["recovery"]["resolved"])
+
+    def test_recovery_resolution_conflict_maps_to_409(self) -> None:
+        action_id = "OPS-20260731-A1B2C3D4E5F6"
+        request = Request(
+            self.base + f"/v1/executions/{action_id}/recovery-resolution",
+            data=json.dumps(
+                {
+                    "version": 1,
+                    "resolution": "compensated",
+                    "evidence_hash": "sha256:" + "d" * 64,
+                }
+            ).encode(),
+            headers={
+                "Authorization": "Bearer " + "a" * 32,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as context:
+            urlopen(request)
+        self.assertEqual(context.exception.code, 409)
+        error = json.loads(context.exception.read())
+        self.assertEqual(error["error"]["code"], "recovery_already_resolved")
 
 
 if __name__ == "__main__":

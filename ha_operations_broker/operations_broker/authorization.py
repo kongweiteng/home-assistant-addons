@@ -179,6 +179,11 @@ class AuthorizationStore:
                     preflight_json TEXT,
                     postflight_json TEXT,
                     error_code TEXT,
+                    recovery_resolution TEXT CHECK(
+                        recovery_resolution IN ('confirmed_healthy', 'compensated')
+                    ),
+                    recovery_evidence_hash TEXT,
+                    recovery_resolved_at TEXT,
                     started_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     finished_at TEXT,
@@ -193,6 +198,25 @@ class AuthorizationStore:
                 "proposal_origin",
                 "TEXT NOT NULL DEFAULT 'legacy_envelope'",
             )
+            self._ensure_column(
+                connection,
+                "operation_executions",
+                "recovery_resolution",
+                "TEXT CHECK(recovery_resolution IN ('confirmed_healthy', 'compensated'))",
+            )
+            self._ensure_column(
+                connection,
+                "operation_executions",
+                "recovery_evidence_hash",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "operation_executions",
+                "recovery_resolved_at",
+                "TEXT",
+            )
+            connection.execute("PRAGMA user_version=4")
         os.chmod(self.path, 0o600)
 
     @staticmethod
@@ -611,6 +635,18 @@ class AuthorizationStore:
                         "execution_conflict", "Action already has another execution claim"
                     )
                 return self._execution_document(existing), True
+            unresolved = connection.execute(
+                """
+                SELECT action_id FROM operation_executions
+                WHERE state = 'recovery_required' AND recovery_resolution IS NULL
+                LIMIT 1
+                """
+            ).fetchone()
+            if unresolved is not None:
+                raise AuthorizationError(
+                    "unresolved_recovery",
+                    "A previous execution still requires recovery resolution",
+                )
             row = connection.execute(
                 """
                 SELECT r.*, q.state AS request_state, q.proposal_origin,
@@ -736,6 +772,49 @@ class AuthorizationStore:
             raise AuthorizationError("execution_not_found", "Execution was not found")
         return self._execution_document(row)
 
+    def resolve_recovery(
+        self,
+        *,
+        action_id: str,
+        resolution: str,
+        evidence_hash: str,
+        resolved_at: datetime,
+    ) -> dict[str, Any]:
+        now = iso_timestamp(resolved_at)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM operation_executions WHERE action_id = ?", (action_id,)
+            ).fetchone()
+            if row is None:
+                raise AuthorizationError("execution_not_found", "Execution was not found")
+            if row["state"] != "recovery_required":
+                raise AuthorizationError(
+                    "recovery_not_required", "Execution does not require recovery"
+                )
+            if row["recovery_resolution"] is not None:
+                raise AuthorizationError(
+                    "recovery_already_resolved", "Execution recovery is already resolved"
+                )
+            cursor = connection.execute(
+                """
+                UPDATE operation_executions
+                SET recovery_resolution = ?, recovery_evidence_hash = ?,
+                    recovery_resolved_at = ?, updated_at = ?
+                WHERE action_id = ? AND state = 'recovery_required'
+                    AND recovery_resolution IS NULL
+                """,
+                (resolution, evidence_hash, now, now, action_id),
+            )
+            if cursor.rowcount != 1:
+                raise AuthorizationError(
+                    "recovery_already_resolved", "Execution recovery is already resolved"
+                )
+            updated = connection.execute(
+                "SELECT * FROM operation_executions WHERE action_id = ?", (action_id,)
+            ).fetchone()
+        return self._execution_document(updated)
+
     def recover_incomplete_executions(self, *, recovered_at: datetime) -> int:
         now = iso_timestamp(recovered_at)
         with self._connect() as connection:
@@ -818,6 +897,14 @@ class AuthorizationStore:
 
     @staticmethod
     def _execution_document(row: sqlite3.Row) -> dict[str, Any]:
+        recovery = None
+        if row["state"] == "recovery_required":
+            recovery = {
+                "resolved": row["recovery_resolution"] is not None,
+                "resolution": row["recovery_resolution"],
+                "evidence_hash": row["recovery_evidence_hash"],
+                "resolved_at": row["recovery_resolved_at"],
+            }
         return {
             "version": 1,
             "receipt_id": row["receipt_id"],
@@ -837,6 +924,7 @@ class AuthorizationStore:
                 None if row["postflight_json"] is None else json.loads(row["postflight_json"])
             ),
             "error_code": row["error_code"],
+            "recovery": recovery,
         }
 
 

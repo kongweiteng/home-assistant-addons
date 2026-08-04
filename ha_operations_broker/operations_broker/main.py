@@ -96,6 +96,7 @@ def main() -> None:
         authorization_manager=authorization,
         execution_handler=execution.execute,
         execution_status_handler=execution.status,
+        recovery_resolution_handler=execution.resolve_recovery,
         execution_enabled=execution_enabled,
         enabled_actions=enabled_actions,
         allowed_ingress_origins=allowed_origins,

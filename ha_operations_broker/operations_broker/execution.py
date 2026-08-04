@@ -7,7 +7,12 @@ from datetime import datetime
 from typing import Any, Callable
 
 from .authorization import AuthorizationError, AuthorizationStore, utc_now
-from .contract import ContractError, validate_execution_request
+from .contract import (
+    ACTION_ID_RE,
+    ContractError,
+    validate_execution_request,
+    validate_recovery_resolution,
+)
 from .supervisor import SupervisorClient, SupervisorError
 
 
@@ -148,6 +153,20 @@ class ExecutionManager:
 
     def status(self, action_id: str) -> dict[str, Any]:
         return self.store.get_execution(action_id)
+
+    def resolve_recovery(self, action_id: str, request: Any) -> dict[str, Any]:
+        if not isinstance(action_id, str) or not ACTION_ID_RE.fullmatch(action_id):
+            raise AuthorizationError("invalid_action_id", "Action ID is invalid")
+        try:
+            validated = validate_recovery_resolution(request)
+        except ContractError as exc:
+            raise AuthorizationError(exc.code, str(exc)) from exc
+        return self.store.resolve_recovery(
+            action_id=action_id,
+            resolution=validated["resolution"],
+            evidence_hash=validated["evidence_hash"],
+            resolved_at=self.clock(),
+        )
 
     def _fail_before_write(
         self,

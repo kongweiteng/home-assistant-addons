@@ -49,6 +49,10 @@ NATIVE_AUTHORIZATION_REQUEST_FIELDS = frozenset({"version", "action_id"})
 EXECUTION_REQUEST_FIELDS = frozenset(
     {"version", "receipt_id", "action_id", "proposal_hash", "idempotency_key"}
 )
+RECOVERY_RESOLUTION_FIELDS = frozenset(
+    {"version", "resolution", "evidence_hash"}
+)
+RECOVERY_RESOLUTIONS = frozenset({"confirmed_healthy", "compensated"})
 RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 
 SENSITIVE_KEY_PARTS = (
@@ -276,6 +280,32 @@ def validate_execution_request(value: Any) -> dict[str, str]:
         "receipt_id": receipt_id,
         "proposal_hash": proposal_hash,
         "idempotency_key": idempotency_key,
+    }
+
+
+def validate_recovery_resolution(value: Any) -> dict[str, str]:
+    """Validate the internal, metadata-only recovery conclusion contract."""
+    if not isinstance(value, dict) or set(value) != RECOVERY_RESOLUTION_FIELDS:
+        raise ContractError(
+            "invalid_recovery_resolution", "Recovery resolution fields are invalid"
+        )
+    if value["version"] != 1:
+        raise ContractError(
+            "unsupported_version", "Recovery resolution version is unsupported"
+        )
+    resolution = value["resolution"]
+    if not isinstance(resolution, str) or resolution not in RECOVERY_RESOLUTIONS:
+        raise ContractError(
+            "invalid_recovery_resolution", "Recovery resolution is unsupported"
+        )
+    evidence_hash = value["evidence_hash"]
+    if not isinstance(evidence_hash, str) or not SHA256_RE.fullmatch(evidence_hash):
+        raise ContractError(
+            "invalid_evidence_hash", "evidence_hash must be a SHA-256 identifier"
+        )
+    return {
+        "resolution": resolution,
+        "evidence_hash": evidence_hash,
     }
 
 

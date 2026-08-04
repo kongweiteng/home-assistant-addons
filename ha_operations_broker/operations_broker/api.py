@@ -17,6 +17,9 @@ from .ui import APP_CSS, APP_JS, INDEX_HTML
 APPROVAL_PATH_RE = re.compile(r"^/api/approvals/([^/]+)/(begin|complete)$")
 INTERNAL_STATUS_RE = re.compile(r"^/v1/authorization/requests/([^/]+)$")
 EXECUTION_STATUS_RE = re.compile(r"^/v1/executions/([^/]+)$")
+RECOVERY_RESOLUTION_RE = re.compile(
+    r"^/v1/executions/([^/]+)/recovery-resolution$"
+)
 
 
 def create_server(
@@ -29,12 +32,13 @@ def create_server(
     authorization_manager: AuthorizationManager | None = None,
     execution_handler: Callable[[Any], dict[str, Any]] | None = None,
     execution_status_handler: Callable[[str], dict[str, Any]] | None = None,
+    recovery_resolution_handler: Callable[[str, Any], dict[str, Any]] | None = None,
     execution_enabled: bool = False,
     enabled_actions: frozenset[str] = frozenset(),
     allowed_ingress_origins: frozenset[str] = frozenset(),
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "HAOperationsBroker/0.3.0"
+        server_version = "HAOperationsBroker/0.4.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -47,7 +51,7 @@ def create_server(
                     HTTPStatus.OK,
                     {
                         "status": "ok",
-                        "version": 3,
+                        "version": 4,
                         "execution_enabled": execution_enabled,
                         "enabled_actions": sorted(enabled_actions),
                     },
@@ -142,6 +146,21 @@ def create_server(
                 if payload is None:
                     return
                 self._authorization_call(lambda: execution_handler(payload))
+                return
+            recovery_match = RECOVERY_RESOLUTION_RE.fullmatch(path)
+            if recovery_match:
+                if not self._bearer_authorized():
+                    return
+                if recovery_resolution_handler is None:
+                    self._not_found()
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                action_id = unquote(recovery_match.group(1))
+                self._authorization_call(
+                    lambda: recovery_resolution_handler(action_id, payload)
+                )
                 return
             manager = self._manager()
             if manager is None:
@@ -277,6 +296,9 @@ def create_server(
                     "idempotency_conflict": HTTPStatus.CONFLICT,
                     "execution_conflict": HTTPStatus.CONFLICT,
                     "execution_state_conflict": HTTPStatus.CONFLICT,
+                    "unresolved_recovery": HTTPStatus.CONFLICT,
+                    "recovery_not_required": HTTPStatus.CONFLICT,
+                    "recovery_already_resolved": HTTPStatus.CONFLICT,
                     "receipt_consumed": HTTPStatus.CONFLICT,
                     "approval_not_pending": HTTPStatus.CONFLICT,
                     "passkey_already_enrolled": HTTPStatus.CONFLICT,

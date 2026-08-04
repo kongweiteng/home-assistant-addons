@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -36,6 +37,7 @@ OWNER_HASH = sha256_text("weixin:owner-example")
 ENROLLMENT_TOKEN = "enrollment-example-" + "x" * 32
 INGRESS_ORIGIN = "https://ha.example.invalid"
 ALLOWED_ADDON = "example_addon"
+RECOVERY_EVIDENCE_HASH = "sha256:" + sha256_text("recovery:evidence")
 
 
 def idempotency(label: str) -> str:
@@ -390,9 +392,11 @@ class ExecutionTests(unittest.TestCase):
         self.store = AuthorizationStore(
             pathlib.Path(self.temporary.name) / "private" / "passkeys.sqlite3"
         )
+        self.passkeys = FakePasskeys()
+        self.authorization_count = 0
         self.manager = AuthorizationManager(
             store=self.store,
-            passkeys=FakePasskeys(),
+            passkeys=self.passkeys,
             trusted_owner_hashes=frozenset({OWNER_HASH}),
             enrollment_token=ENROLLMENT_TOKEN,
             restart_addon_allowlist=frozenset({ALLOWED_ADDON}),
@@ -416,6 +420,8 @@ class ExecutionTests(unittest.TestCase):
         begin = self.manager.begin_authorization(
             approval_id=request["approval_id"], remote_user_id="ha-user-example"
         )
+        self.authorization_count += 1
+        self.passkeys.authentication_count = self.authorization_count
         authorized = self.manager.complete_authorization(
             approval_id=request["approval_id"],
             remote_user_id="ha-user-example",
@@ -529,6 +535,301 @@ class ExecutionTests(unittest.TestCase):
         execution = self.executor(FakeExecutionSupervisor())
         self.assertEqual(execution.recovered_executions, 1)
         self.assertEqual(execution.status(payload["action_id"])["state"], "recovery_required")
+
+    def test_unresolved_recovery_blocks_new_execution_before_receipt_consumption(self) -> None:
+        _proposal, _request, first_payload = self.authorized_execution("first-recovery")
+        supervisor = FakeExecutionSupervisor(postflight_version="9.9.9")
+        execution = self.executor(supervisor)
+        first = execution.execute(first_payload)
+        self.assertEqual(first["state"], "recovery_required")
+        self.assertFalse(first["recovery"]["resolved"])
+
+        _proposal, second_request, second_payload = self.authorized_execution(
+            "blocked-by-recovery"
+        )
+        second_supervisor = FakeExecutionSupervisor()
+        second_execution = self.executor(second_supervisor)
+        with self.assertRaisesRegex(AuthorizationError, "requires recovery") as context:
+            second_execution.execute(second_payload)
+        self.assertEqual(context.exception.code, "unresolved_recovery")
+        self.assertEqual(second_supervisor.calls, [])
+        self.assertFalse(
+            self.store.receipt_for_request(second_request["approval_id"])["consumed"]
+        )
+
+        resolved = execution.resolve_recovery(
+            first_payload["action_id"],
+            {
+                "version": 1,
+                "resolution": "confirmed_healthy",
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+            },
+        )
+        self.assertEqual(resolved["state"], "recovery_required")
+        self.assertEqual(
+            resolved["recovery"],
+            {
+                "resolved": True,
+                "resolution": "confirmed_healthy",
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+                "resolved_at": NOW.isoformat(),
+            },
+        )
+
+        second = second_execution.execute(second_payload)
+        self.assertEqual(second["state"], "succeeded")
+
+    def test_existing_execution_replay_is_returned_while_recovery_is_unresolved(self) -> None:
+        _proposal, _request, payload = self.authorized_execution("replay-recovery")
+        supervisor = FakeExecutionSupervisor(postflight_version="9.9.9")
+        execution = self.executor(supervisor)
+        first = execution.execute(payload)
+        calls_after_first = list(supervisor.calls)
+        replay = execution.execute(payload)
+        self.assertEqual(first["state"], "recovery_required")
+        self.assertTrue(replay["replayed"])
+        self.assertFalse(replay["recovery"]["resolved"])
+        self.assertEqual(supervisor.calls, calls_after_first)
+
+    def test_recovery_resolution_contract_and_state_fail_closed_without_supervisor(self) -> None:
+        _proposal, _request, payload = self.authorized_execution("resolution-contract")
+        supervisor = FakeExecutionSupervisor(postflight_version="9.9.9")
+        execution = self.executor(supervisor)
+        execution.execute(payload)
+        calls_before_resolution = list(supervisor.calls)
+
+        invalid_payloads = (
+            {
+                "version": 1,
+                "resolution": "ignored",
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+            },
+            {
+                "version": 1,
+                "resolution": "compensated",
+                "evidence_hash": "sha256:bad",
+            },
+            {
+                "version": 1,
+                "resolution": "compensated",
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+                "note": "free text is forbidden",
+            },
+            {
+                "version": 1,
+                "resolution": [],
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+            },
+        )
+        for invalid in invalid_payloads:
+            with self.assertRaises(AuthorizationError):
+                execution.resolve_recovery(payload["action_id"], invalid)
+
+        resolved = execution.resolve_recovery(
+            payload["action_id"],
+            {
+                "version": 1,
+                "resolution": "compensated",
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+            },
+        )
+        self.assertEqual(resolved["recovery"]["resolution"], "compensated")
+        with self.assertRaisesRegex(AuthorizationError, "already resolved"):
+            execution.resolve_recovery(
+                payload["action_id"],
+                {
+                    "version": 1,
+                    "resolution": "confirmed_healthy",
+                    "evidence_hash": RECOVERY_EVIDENCE_HASH,
+                },
+            )
+        self.assertEqual(supervisor.calls, calls_before_resolution)
+
+        _proposal, _request, succeeded_payload = self.authorized_execution(
+            "resolution-not-required"
+        )
+        supervisor.postflight_version = "1.2.3"
+        succeeded = execution.execute(succeeded_payload)
+        self.assertEqual(succeeded["state"], "succeeded")
+        with self.assertRaisesRegex(AuthorizationError, "does not require"):
+            execution.resolve_recovery(
+                succeeded_payload["action_id"],
+                {
+                    "version": 1,
+                    "resolution": "confirmed_healthy",
+                    "evidence_hash": RECOVERY_EVIDENCE_HASH,
+                },
+            )
+
+    def test_concurrent_recovery_resolution_only_succeeds_once(self) -> None:
+        _proposal, _request, payload = self.authorized_execution("resolution-race")
+        execution = self.executor(FakeExecutionSupervisor(postflight_version="9.9.9"))
+        execution.execute(payload)
+        barrier = threading.Barrier(3)
+        results: list[dict] = []
+        errors: list[str] = []
+
+        def resolve(resolution: str) -> None:
+            barrier.wait()
+            try:
+                results.append(
+                    execution.resolve_recovery(
+                        payload["action_id"],
+                        {
+                            "version": 1,
+                            "resolution": resolution,
+                            "evidence_hash": RECOVERY_EVIDENCE_HASH,
+                        },
+                    )
+                )
+            except AuthorizationError as exc:
+                errors.append(exc.code)
+
+        workers = [
+            threading.Thread(target=resolve, args=("confirmed_healthy",)),
+            threading.Thread(target=resolve, args=("compensated",)),
+        ]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=3)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(errors, ["recovery_already_resolved"])
+
+    def test_resolved_recovery_survives_restart_and_keeps_original_state(self) -> None:
+        _proposal, _request, payload = self.authorized_execution("resolved-restart")
+        claimed, replayed = self.store.claim_execution(
+            receipt_id=payload["receipt_id"],
+            action_id=payload["action_id"],
+            proposal_hash=payload["proposal_hash"],
+            idempotency_key=payload["idempotency_key"],
+            claimed_at=self.clock(),
+        )
+        self.assertFalse(replayed)
+        self.assertEqual(claimed["state"], "authorized")
+        restarted = self.executor(FakeExecutionSupervisor())
+        self.assertEqual(restarted.recovered_executions, 1)
+        restarted.resolve_recovery(
+            payload["action_id"],
+            {
+                "version": 1,
+                "resolution": "confirmed_healthy",
+                "evidence_hash": RECOVERY_EVIDENCE_HASH,
+            },
+        )
+
+        restarted_again = self.executor(FakeExecutionSupervisor())
+        self.assertEqual(restarted_again.recovered_executions, 0)
+        status = restarted_again.status(payload["action_id"])
+        self.assertEqual(status["state"], "recovery_required")
+        self.assertTrue(status["recovery"]["resolved"])
+
+        _proposal, _request, next_payload = self.authorized_execution(
+            "after-resolved-restart"
+        )
+        next_execution = restarted_again.execute(next_payload)
+        self.assertEqual(next_execution["state"], "succeeded")
+
+
+class AuthorizationStoreMigrationTests(unittest.TestCase):
+    def test_empty_database_and_0_3_history_migrate_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            empty_database = pathlib.Path(temporary) / "empty" / "passkeys.sqlite3"
+            AuthorizationStore(empty_database)
+            with sqlite3.connect(empty_database) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(operation_executions)"
+                    )
+                }
+                user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            self.assertTrue(
+                {
+                    "recovery_resolution",
+                    "recovery_evidence_hash",
+                    "recovery_resolved_at",
+                }.issubset(columns)
+            )
+            self.assertEqual(user_version, 4)
+
+            old_database = pathlib.Path(temporary) / "old" / "passkeys.sqlite3"
+            old_database.parent.mkdir()
+            with sqlite3.connect(old_database) as connection:
+                connection.executescript(
+                    """
+                    CREATE TABLE operation_executions (
+                        action_id TEXT PRIMARY KEY,
+                        receipt_id TEXT NOT NULL UNIQUE,
+                        proposal_hash TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL UNIQUE,
+                        action_type TEXT NOT NULL,
+                        target TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        preflight_json TEXT,
+                        postflight_json TEXT,
+                        error_code TEXT,
+                        started_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        finished_at TEXT
+                    );
+                    INSERT INTO operation_executions(
+                        action_id, receipt_id, proposal_hash, idempotency_key,
+                        action_type, target, state, error_code,
+                        started_at, updated_at, finished_at
+                    ) VALUES (
+                        'OPS-20260731-A1B2C3D4E5F6',
+                        'RCPT-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+                        'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                        'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                        'restart_addon', 'example_addon', 'recovery_required',
+                        'broker_restarted',
+                        '2026-07-31T13:00:00+00:00',
+                        '2026-07-31T13:01:00+00:00',
+                        '2026-07-31T13:01:00+00:00'
+                    );
+                    """
+                )
+            first = AuthorizationStore(old_database)
+            historical = first.get_execution("OPS-20260731-A1B2C3D4E5F6")
+            self.assertEqual(historical["state"], "recovery_required")
+            self.assertEqual(
+                historical["recovery"],
+                {
+                    "resolved": False,
+                    "resolution": None,
+                    "evidence_hash": None,
+                    "resolved_at": None,
+                },
+            )
+            second = AuthorizationStore(old_database)
+            self.assertEqual(second.get_execution(historical["action_id"]), historical)
+            with sqlite3.connect(old_database) as connection:
+                raw = connection.execute(
+                    """
+                    SELECT state, error_code, started_at, updated_at, finished_at,
+                           recovery_resolution, recovery_evidence_hash,
+                           recovery_resolved_at
+                    FROM operation_executions WHERE action_id = ?
+                    """,
+                    (historical["action_id"],),
+                ).fetchone()
+                user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(
+                raw,
+                (
+                    "recovery_required",
+                    "broker_restarted",
+                    "2026-07-31T13:00:00+00:00",
+                    "2026-07-31T13:01:00+00:00",
+                    "2026-07-31T13:01:00+00:00",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            self.assertEqual(user_version, 4)
 
 
 class AuthorizationApiTests(unittest.TestCase):

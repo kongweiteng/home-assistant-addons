@@ -1,5 +1,25 @@
 # 变更日志
 
+## [0.4.0] - 2026-08-04
+
+### 新增
+
+- 新增未解决 `recovery_required` 的全局 execution 联锁；新执行会在收据消费前返回 `unresolved_recovery`。
+- 新增内部 bearer 恢复结论 API，只接受 `confirmed_healthy|compensated` 和 SHA-256 证据标识。
+- execution 状态新增脱敏 `recovery` 元数据，保留原始 `state=recovery_required` 和既有审计字段。
+
+### 兼容
+
+- 空数据库和既有 `0.3.0` SQLite 数据库都会幂等增加三列恢复元数据，并升级为 `user_version=4`。
+- 迁移不改写既有 execution 状态、错误码和时间；重复初始化保持一致。
+
+### 安全
+
+- 同一 action 的精确幂等重放仍优先返回原记录；只有新 execution 受全局 recovery 联锁阻断。
+- 联锁检查、收据消费和 execution 插入保持在同一 `BEGIN IMMEDIATE` 事务，阻断时不会消费新收据。
+- 恢复结论不会调用 Supervisor、不会重放 restart、不会接受自由文本，也不暴露为 Codex Controller MCP 工具。
+- 并发恢复结论最多一个成功；未解决 recovery 只有记录有效结论后才解除对应联锁。
+
 ## [0.3.0] - 2026-08-04
 
 ### 新增

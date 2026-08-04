@@ -58,8 +58,12 @@ class AppServerSchemaCompatibilityTests(unittest.TestCase):
             self.assertIn(field, thread_start)
         self.assertIn("read-only", thread_start_document["definitions"]["SandboxMode"]["enum"])
 
-        thread_resume = self.load("v2/ThreadResumeParams.json")
-        self.assertIn("threadId", thread_resume["required"])
+        thread_resume_document = self.load("v2/ThreadResumeParams.json")
+        self.assertIn("threadId", thread_resume_document["required"])
+        thread_resume = thread_resume_document["properties"]
+        for field in ("cwd", "sandbox", "approvalPolicy", "developerInstructions"):
+            self.assertIn(field, thread_resume)
+        self.assertIn("read-only", thread_resume_document["definitions"]["SandboxMode"]["enum"])
 
         turn_start = self.load("v2/TurnStartParams.json")
         self.assertEqual(set(turn_start["required"]), {"input", "threadId"})

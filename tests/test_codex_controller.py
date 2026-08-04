@@ -17,11 +17,11 @@ import unittest
 from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
 from codex_controller.app_server import AppServerClient, AppServerError
 from codex_controller.main import normalize_codex_model, normalize_openai_base_url, read_api_key_from_fd, write_codex_config
-from codex_controller.mcp_proxy import tool_catalog
+from codex_controller.mcp_proxy import socket_call, tool_catalog
 from codex_controller.media_input import TurnMediaManager
 from codex_controller.service import ControllerService
 from codex_controller.store import ControllerStore, StoreError
-from codex_controller.tool_proxy import ToolProxyError, ToolRouter, validate_base_url
+from codex_controller.tool_proxy import ToolProxyError, ToolProxyServer, ToolRouter, validate_base_url
 
 
 def fixture_job(message_id: str = "fixture-message-1", text: str = "查询装修支出") -> dict:
@@ -230,6 +230,11 @@ class AppServerClientTests(unittest.TestCase):
             [sys.executable, str(self.fake)],
             codex_home=self.root / "codex-home",
             workspace=self.root / "workspace",
+            available_tools=[
+                "ledger_summary",
+                "ledger_query",
+                "renovation_dashboard",
+            ],
             notification_handler=notification,
             request_timeout=3,
         )
@@ -269,7 +274,40 @@ class AppServerClientTests(unittest.TestCase):
         self.assertIn("不得把所有消息默认解释为装修事项", instructions)
         self.assertIn("只有用户意图确实需要装修账本或 Home Assistant 操作时", instructions)
         self.assertIn("普通问答", instructions)
+        self.assertIn("当前会话已配置 Renovation Hub", instructions)
+        self.assertIn("必须先调用 renovation_dashboard", instructions)
+        self.assertIn("不得回复‘未连接账本’", instructions)
+        self.assertIn("不得沿用历史对话中的旧 Mac 代理", instructions)
         self.assertIn("不得使用 Shell", instructions)
+
+    def test_thread_resume_refreshes_current_instructions_and_safety_policy(self) -> None:
+        observed: list[tuple[str, dict]] = []
+
+        def fake_request(method: str, params: dict) -> dict:
+            observed.append((method, params))
+            return {"thread": {"id": "thread-existing", "turns": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        self.client.resume_thread("thread-existing")
+        self.assertEqual(observed[0][0], "thread/resume")
+        params = observed[0][1]
+        self.assertEqual(params["threadId"], "thread-existing")
+        self.assertEqual(params["cwd"], str(self.root / "workspace"))
+        self.assertEqual(params["sandbox"], "read-only")
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["developerInstructions"], self.client.developer_instructions)
+        self.assertIn("Renovation Hub", params["developerInstructions"])
+
+    def test_current_instructions_describe_only_the_configured_tool_families(self) -> None:
+        operations_only = AppServerClient.build_developer_instructions(
+            ["ha_operations_propose_restart"]
+        )
+        self.assertIn("当前会话未配置 Renovation Hub", operations_only)
+        self.assertIn("当前会话已配置受控 Home Assistant Operations", operations_only)
+
+        no_tools = AppServerClient.build_developer_instructions([])
+        self.assertIn("当前会话未配置 Renovation Hub", no_tools)
+        self.assertNotIn("当前会话已配置受控 Home Assistant Operations", no_tools)
 
     def test_turn_accepts_official_local_image_input(self) -> None:
         observed: list[tuple[str, dict]] = []
@@ -619,7 +657,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.1.6"
+        expected = "0.1.7"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/service.py",
@@ -631,6 +669,45 @@ class ControllerAuthenticationTests(unittest.TestCase):
             with self.subTest(relative=relative):
                 self.assertIn(expected, (root / relative).read_text(encoding="utf-8"))
 
+    def test_dispatch_resumes_an_existing_conversation_thread(self) -> None:
+        class App:
+            notification_handler = None
+
+            def __init__(self) -> None:
+                self.started: list[str] = []
+                self.resumed: list[str] = []
+
+            def start_thread(self) -> str:
+                self.started.append("new")
+                return "thread-new"
+
+            def resume_thread(self, thread_id: str) -> None:
+                self.resumed.append(thread_id)
+
+            def start_turn(self, thread_id: str, _text: str, _message_id: str, *, input_items: object = None) -> str:
+                self.assert_no_input_items = input_items
+                return f"turn-for-{thread_id}"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            first = store.create_job(fixture_job("fixture-existing-1"))
+            first_running = store.claim_next()
+            assert first_running is not None
+            store.assign_thread(first["job_id"], "thread-existing")
+            store.assign_turn(first["job_id"], "turn-existing")
+            store.complete_turn("turn-existing", "completed")
+
+            store.create_job(fixture_job("fixture-existing-2"))
+            second_running = store.claim_next()
+            assert second_running is not None
+            app = App()
+            service = ControllerService(store, app, intake_enabled=False)  # type: ignore[arg-type]
+            service._dispatch(second_running)
+
+            self.assertEqual(app.started, [])
+            self.assertEqual(app.resumed, ["thread-existing"])
+            self.assertEqual(store.get_job(second_running["job_id"])["thread_id"], "thread-existing")
+
 
 class ToolRouterTests(unittest.TestCase):
     def test_mcp_catalog_filters_unconfigured_tools_and_operations_schemas_are_closed(self) -> None:
@@ -639,6 +716,61 @@ class ToolRouterTests(unittest.TestCase):
         operations = catalog[1]["inputSchema"]
         self.assertFalse(operations["additionalProperties"])
         self.assertEqual(operations["required"], ["target"])
+
+    def test_tool_catalog_requires_complete_private_routes(self) -> None:
+        cases = (
+            (ToolRouter(), 0),
+            (ToolRouter(ledger_base_url="http://renovation-hub:8101"), 0),
+            (ToolRouter(ledger_token="l" * 32), 0),
+            (ToolRouter(ledger_base_url="http://renovation-hub:8101", ledger_token="short"), 0),
+            (ToolRouter(operations_base_url="http://ha-operations-broker:8098"), 0),
+            (ToolRouter(operations_token="o" * 32), 0),
+            (ToolRouter(operations_base_url="http://ha-operations-broker:8098", operations_token="short"), 0),
+            (
+                ToolRouter(
+                    operations_base_url="http://ha-operations-broker:8098",
+                    operations_token="o" * 32,
+                ),
+                5,
+            ),
+        )
+        for router, expected_count in cases:
+            with self.subTest(expected_count=expected_count, router=router):
+                self.assertEqual(len(router.available_tools()), expected_count)
+
+    def test_unix_socket_catalog_matches_default_ledger_operations_and_combined_routes(self) -> None:
+        routers = (
+            (ToolRouter(), 0),
+            (ToolRouter(ledger_base_url="http://renovation-hub:8101", ledger_token="l" * 32), 26),
+            (
+                ToolRouter(
+                    operations_base_url="http://ha-operations-broker:8098",
+                    operations_token="o" * 32,
+                ),
+                5,
+            ),
+            (
+                ToolRouter(
+                    ledger_base_url="http://renovation-hub:8101",
+                    ledger_token="l" * 32,
+                    operations_base_url="http://ha-operations-broker:8098",
+                    operations_token="o" * 32,
+                ),
+                31,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            for index, (router, expected_count) in enumerate(routers):
+                with self.subTest(expected_count=expected_count):
+                    socket_path = Path(temporary) / f"tool-proxy-{index}.sock"
+                    proxy = ToolProxyServer(socket_path, router)
+                    proxy.start()
+                    try:
+                        response = socket_call(str(socket_path), "__catalog__", {})
+                    finally:
+                        proxy.stop()
+                    self.assertTrue(response["ok"])
+                    self.assertEqual(len(response["result"]["tools"]), expected_count)
 
     def test_internal_url_rejects_ip_paths_and_credentials(self) -> None:
         self.assertEqual(validate_base_url("http://renovation-hub:8101"), "http://renovation-hub:8101")

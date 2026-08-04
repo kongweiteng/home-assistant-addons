@@ -5,6 +5,8 @@
 - 微信入口默认是通用 Codex 助手，可处理普通问答、讨论、分析、写作、规划和其他不需要外部执行的任务。
 - 不会把所有消息默认解释为装修事项，也不会因为消息来自现有 Hermes/iLink 身份就自动调用账本。
 - 只有用户意图确实需要装修账本或 Home Assistant 操作时，才允许调用对应的结构化 MCP 工具；工具权限、审批和写入边界仍按各组件配置执行。
+- 每次新建或恢复持久 Thread 都会重新注入当前 developer instructions、只读 sandbox 和 `approvalPolicy=never`。即使历史会话曾讨论 Mac 代理、Hermes 或旧迁移状态，当前能力也必须以本轮 MCP 工具目录和实际调用结果为准。
+- Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
 
 ## 配置
 

@@ -224,7 +224,12 @@ def main() -> None:
         max_result_chars=int(os.environ.get("CONTROLLER_MAX_RESULT_CHARS", "12000")),
     )
     binary = os.environ.get("CODEX_BINARY", "/opt/codex/node_modules/.bin/codex")
-    app_server = AppServerClient([binary, "app-server", "--listen", "stdio://"], codex_home=codex_home, workspace=workspace)
+    app_server = AppServerClient(
+        [binary, "app-server", "--listen", "stdio://"],
+        codex_home=codex_home,
+        workspace=workspace,
+        available_tools=router.available_tools(),
+    )
     service = ControllerService(
         store,
         app_server,

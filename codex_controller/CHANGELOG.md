@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.1.7
+
+- 修复持久 Thread 只在首次创建时注入 developer instructions、恢复时继续沿用旧架构上下文的问题；`thread/resume` 现在按官方 app-server Schema 重新传入当前 developer instructions、只读 sandbox、工作目录和 `approvalPolicy=never`。
+- developer instructions 按启动时实际 MCP 工具目录声明 Renovation Hub 与 Operations 能力。账本连接状态、支出、汇总和明细必须先调用结构化只读工具核验，禁止沿用旧 Mac 代理或 Hermes 对话误报“未连接”。
+- 保持微信通用助手、单活动 Turn、写工具幂等、秘密隔离和 Broker 审批边界不变。
+
 ## 0.1.6
 
 - 未配置 Renovation Hub 或 Operations Broker 时不再向 Codex 暴露对应工具，避免模型看到不可执行能力。

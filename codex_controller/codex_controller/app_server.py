@@ -24,9 +24,10 @@ class AppServerError(RuntimeError):
 class AppServerClient:
     """Owns one app-server process and its request/notification correlation."""
 
-    DEVELOPER_INSTRUCTIONS = (
+    BASE_DEVELOPER_INSTRUCTIONS = (
         "你通过微信作为所有者的通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
         "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，才使用已配置的结构化 MCP 工具；"
+        "当前运行能力必须以本轮 MCP 工具目录和实际只读调用结果为准，不得沿用历史对话中的旧 Mac 代理、Hermes 或未接入判断。"
         "不得使用 Shell、任意文件路径或自然语言绕过审批。不要输出内部推理、Token、路径或工具秘密。"
     )
 
@@ -52,12 +53,14 @@ class AppServerClient:
         *,
         codex_home: str | Path,
         workspace: str | Path,
+        available_tools: list[str] | None = None,
         notification_handler: Callable[[dict[str, Any]], None] | None = None,
         request_timeout: float = 30.0,
     ):
         self.command = command
         self.codex_home = Path(codex_home)
         self.workspace = Path(workspace)
+        self.developer_instructions = self.build_developer_instructions(available_tools or [])
         self.notification_handler = notification_handler or (lambda _message: None)
         self.request_timeout = request_timeout
         self.process: subprocess.Popen[str] | None = None
@@ -72,6 +75,24 @@ class AppServerClient:
         self.plan_type: str | None = None
         self.account_ready = False
         self.initialized = False
+
+    @classmethod
+    def build_developer_instructions(cls, available_tools: list[str]) -> str:
+        enabled = set(available_tools)
+        instructions = cls.BASE_DEVELOPER_INSTRUCTIONS
+        if {"ledger_summary", "ledger_query", "renovation_dashboard"}.issubset(enabled):
+            instructions += (
+                " 当前会话已配置 Renovation Hub 装修账本和装修档案工具。用户询问账本是否连接、是否可用、当前支出、汇总或明细时，"
+                "必须先调用 renovation_dashboard、ledger_summary、ledger_query 或其他合适的只读工具核验；"
+                "只要工具调用可用，就不得回复‘未连接账本’，也不得要求用户重新发送现有账目。写账、退款、修改和撤销必须调用对应结构化工具。"
+            )
+        else:
+            instructions += " 当前会话未配置 Renovation Hub 工具时，才可以明确说明装修账本工具目录不可用。"
+        if "ha_operations_propose_restart" in enabled:
+            instructions += (
+                " 当前会话已配置受控 Home Assistant Operations 工具，但每次写操作仍必须遵守不可变提案、Passkey、精确白名单和执行门禁。"
+            )
+        return instructions
 
     def build_child_env(self, source: dict[str, str] | None = None) -> dict[str, str]:
         original = os.environ if source is None else source
@@ -112,7 +133,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.6"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.7"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -228,7 +249,7 @@ class AppServerClient:
                 "cwd": str(self.workspace),
                 "sandbox": "read-only",
                 "approvalPolicy": "never",
-                "developerInstructions": self.DEVELOPER_INSTRUCTIONS,
+                "developerInstructions": self.developer_instructions,
             },
         )
         thread = result.get("thread") if isinstance(result, dict) else None
@@ -238,7 +259,16 @@ class AppServerClient:
         return thread_id
 
     def resume_thread(self, thread_id: str) -> None:
-        result = self.request("thread/resume", {"threadId": thread_id})
+        result = self.request(
+            "thread/resume",
+            {
+                "threadId": thread_id,
+                "cwd": str(self.workspace),
+                "sandbox": "read-only",
+                "approvalPolicy": "never",
+                "developerInstructions": self.developer_instructions,
+            },
+        )
         thread = result.get("thread") if isinstance(result, dict) else None
         if not isinstance(thread, dict) or thread.get("id") != thread_id:
             raise AppServerError("thread_unavailable", "thread/resume 返回不匹配")

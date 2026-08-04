@@ -253,6 +253,7 @@ class MediaStreamingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             gateway_token=self.gateway_token,
             max_media_bytes=50 * 1024 * 1024,
         )
+        router.begin_job("fixture-media-job", "fixture-media-message")
         arguments = {
             "idempotency_key": key("stream"),
             "attachment_ref": self.attachment_ref,

@@ -80,18 +80,22 @@ def make_envelope(
 
 
 class FakeSupervisor:
-    def __init__(self) -> None:
+    def __init__(self, *, postflight_state: str = "started") -> None:
         self.calls: list[tuple[str, str | None]] = []
+        self.postflight_state = postflight_state
 
     def addon_info(self, slug: str) -> dict:
         self.calls.append(("addon", slug))
         return {
             "slug": slug,
             "name": "Example",
-            "state": "started",
+            "state": self.postflight_state,
             "version": "1.2.3",
             "update_available": False,
         }
+
+    def restart_addon(self, slug: str) -> None:
+        self.calls.append(("restart", slug))
 
     def core_info(self) -> dict:
         self.calls.append(("core", None))
@@ -118,25 +122,33 @@ class PackagingTests(unittest.TestCase):
             "operations_broker/service.py",
             "operations_broker/api.py",
             "operations_broker/authorization.py",
+            "operations_broker/execution.py",
             "operations_broker/passkeys.py",
             "operations_broker/ui.py",
             "../tests/fixtures/ha_operations_broker_options.json",
         ):
             self.assertTrue((ADDON / relative).is_file(), relative)
         config = (ADDON / "config.yaml").read_text(encoding="utf-8")
-        self.assertIn('version: "0.2.0"', config)
+        api = (ADDON / "operations_broker" / "api.py").read_text(encoding="utf-8")
+        supervisor = (ADDON / "operations_broker" / "supervisor.py").read_text(encoding="utf-8")
+        self.assertIn('version: "0.3.0"', config)
+        self.assertIn('server_version = "HAOperationsBroker/0.3.0"', api)
+        self.assertNotIn('ha-operations-broker/0.1"', supervisor)
+        self.assertIn('ha-operations-broker/0.3.0"', supervisor)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
-        self.assertIn("hassio_role: default", config)
+        self.assertIn("hassio_role: manager", config)
         self.assertIn("boot: manual", config)
         self.assertIn("stage: experimental", config)
         self.assertIn("ingress: true", config)
         self.assertIn("ingress_port: 8098", config)
         self.assertIn("panel_admin: true", config)
         self.assertRegex(config, r"(?ms)ports:\n\s+8098/tcp: null")
+        self.assertRegex(config, r"(?m)^\s+execution_enabled: false$")
+        self.assertRegex(config, r"(?m)^\s+enabled_actions: \[\]$")
+        self.assertRegex(config, r"(?m)^\s+restart_addon_allowlist: \[\]$")
         for forbidden in (
             "homeassistant_api: true",
-            "hassio_role: manager",
             "hassio_role: backup",
             "hassio_role: admin",
             "host_network: true",
@@ -164,7 +176,7 @@ class PackagingTests(unittest.TestCase):
         )
         self.assertIn("pip install --no-cache-dir --no-deps", dockerfile)
 
-    def test_source_has_no_execution_or_arbitrary_process_capability(self) -> None:
+    def test_source_has_only_fixed_execution_and_no_arbitrary_process_capability(self) -> None:
         combined = "\n".join(
             path.read_text(encoding="utf-8")
             for path in (ADDON / "operations_broker").glob("*.py")
@@ -174,12 +186,20 @@ class PackagingTests(unittest.TestCase):
             "os.system",
             "shell=true",
             "docker.sock",
-            "method=\"post\"",
             "method=\"put\"",
             "method=\"delete\"",
+            "execute_shell",
+            "run_command",
+            "delete_path",
+            "write_file",
         ):
             self.assertNotIn(forbidden, combined)
         self.assertIn('method="get"', combined)
+        supervisor = (ADDON / "operations_broker/supervisor.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('method="POST"', supervisor)
+        self.assertIn('/addons/{slug}/restart', supervisor)
 
 
 class PreflightTests(unittest.TestCase):
@@ -322,6 +342,29 @@ class SupervisorClientTests(unittest.TestCase):
         with self.assertRaisesRegex(SupervisorError, "exact slug"):
             client.addon_info("../bad")
 
+    def test_restart_uses_only_exact_post_endpoint(self) -> None:
+        requests = []
+
+        def opener(request, timeout):
+            requests.append((request, timeout))
+            return FakeResponse({"result": "ok", "data": {}})
+
+        client = SupervisorClient(
+            "supervisor-test-token",
+            base_url="http://supervisor",
+            timeout_seconds=7,
+            opener=opener,
+        )
+        client.restart_addon("example_addon")
+        request, timeout = requests[0]
+        self.assertEqual(request.full_url, "http://supervisor/addons/example_addon/restart")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.data, b"{}")
+        self.assertEqual(timeout, 7)
+
+        with self.assertRaisesRegex(SupervisorError, "exact slug"):
+            client.restart_addon("../bad")
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -334,6 +377,14 @@ class ApiTests(unittest.TestCase):
                 "received_version": payload.get("version"),
                 "execution_allowed": False,
             },
+            execution_handler=lambda payload: {
+                "action_id": payload.get("action_id"),
+                "state": "succeeded",
+            },
+            execution_status_handler=lambda action_id: {
+                "action_id": action_id,
+                "state": "succeeded",
+            },
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -344,7 +395,15 @@ class ApiTests(unittest.TestCase):
     def test_health_is_minimal_and_execution_disabled(self) -> None:
         with urlopen(self.base + "/healthz") as response:
             payload = json.loads(response.read())
-        self.assertEqual(payload, {"status": "ok", "version": 2, "execution_enabled": False})
+        self.assertEqual(
+            payload,
+            {
+                "status": "ok",
+                "version": 3,
+                "execution_enabled": False,
+                "enabled_actions": [],
+            },
+        )
 
     def test_preflight_requires_bearer_and_json(self) -> None:
         unauthorized = Request(
@@ -370,6 +429,45 @@ class ApiTests(unittest.TestCase):
             payload = json.loads(response.read())
         self.assertEqual(payload["received_version"], 1)
         self.assertFalse(payload["execution_allowed"])
+
+    def test_execution_routes_require_bearer(self) -> None:
+        payload = {
+            "version": 1,
+            "receipt_id": "RCPT-" + "A" * 32,
+            "action_id": "OPS-20260731-A1B2C3D4E5F6",
+            "proposal_hash": "sha256:" + "a" * 64,
+            "idempotency_key": "sha256:" + "b" * 64,
+        }
+        unauthorized = Request(
+            self.base + "/v1/executions",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as context:
+            urlopen(unauthorized)
+        self.assertEqual(context.exception.code, 401)
+
+        authorized = Request(
+            self.base + "/v1/executions",
+            data=json.dumps(payload).encode(),
+            headers={
+                "Authorization": "Bearer " + "a" * 32,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(authorized) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result["state"], "succeeded")
+
+        status = Request(
+            self.base + "/v1/executions/OPS-20260731-A1B2C3D4E5F6",
+            headers={"Authorization": "Bearer " + "a" * 32},
+        )
+        with urlopen(status) as response:
+            result = json.loads(response.read())
+        self.assertEqual(result["action_id"], payload["action_id"])
 
 
 if __name__ == "__main__":

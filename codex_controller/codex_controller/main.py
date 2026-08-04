@@ -234,6 +234,7 @@ def main() -> None:
         api_base_mode="custom" if openai_base_url else "official",
         codex_model_mode="custom" if codex_model else "default",
         turn_media=turn_media,
+        tool_context=router,
     )
     service.start()
     server = create_server(

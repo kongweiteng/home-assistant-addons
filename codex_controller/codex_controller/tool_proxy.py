@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import socketserver
+import threading
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
@@ -16,6 +17,10 @@ from urllib.request import Request, urlopen
 
 
 HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,251}[a-z0-9])?$")
+ADDON_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
+ACTION_ID_RE = re.compile(r"^OPS-[0-9]{8}-[A-F0-9]{12}$")
+RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
+SHA256_ID_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 LEDGER_TOOLS = {
     "ledger_add_payment",
     "ledger_add_refund",
@@ -48,9 +53,29 @@ RENOVATION_TOOLS = {
     "renovation_media_ingest",
 }
 OPERATIONS_TOOLS = {
-    "ha_operations_preflight",
+    "ha_operations_propose_restart",
     "ha_operations_authorization_request",
     "ha_operations_authorization_status",
+    "ha_operations_execute_restart",
+    "ha_operations_execution_status",
+}
+LEDGER_WRITE_TOOLS = {
+    "ledger_add_payment",
+    "ledger_add_refund",
+    "ledger_correct_payment",
+    "ledger_undo",
+    "ledger_attach",
+}
+RENOVATION_WRITE_TOOLS = {
+    "renovation_project_create",
+    "renovation_project_update",
+    "renovation_stage_create",
+    "renovation_stage_update",
+    "renovation_area_create",
+    "renovation_area_update",
+    "renovation_event_create",
+    "renovation_event_update",
+    "renovation_media_ingest",
 }
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
@@ -111,6 +136,32 @@ class ToolRouter:
         self.request_bytes = request_bytes or _request_bytes
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
+        self._context_lock = threading.Lock()
+        self._active_context: dict[str, str] | None = None
+
+    def begin_job(self, job_id: str, message_id: str) -> None:
+        if not job_id or not message_id:
+            raise ToolProxyError("tool_context_invalid", "工具调用上下文无效")
+        with self._context_lock:
+            if self._active_context is not None:
+                raise ToolProxyError("tool_context_busy", "已有活动工具调用上下文")
+            self._active_context = {"job_id": job_id, "message_id": message_id, "turn_id": ""}
+
+    def bind_turn(self, job_id: str, turn_id: str) -> None:
+        with self._context_lock:
+            if self._active_context is None or self._active_context["job_id"] != job_id:
+                raise ToolProxyError("tool_context_invalid", "无法绑定工具调用 Turn")
+            self._active_context["turn_id"] = turn_id
+
+    def end_turn(self, turn_id: str) -> None:
+        with self._context_lock:
+            if self._active_context is not None and self._active_context.get("turn_id") == turn_id:
+                self._active_context = None
+
+    def clear_job(self, job_id: str) -> None:
+        with self._context_lock:
+            if self._active_context is not None and self._active_context["job_id"] == job_id:
+                self._active_context = None
 
     def available_tools(self) -> list[str]:
         tools: list[str] = []
@@ -148,6 +199,7 @@ class ToolRouter:
             reference = arguments.get("attachment_ref")
             if not isinstance(reference, str) or not ATTACHMENT_REF_RE.fullmatch(reference):
                 raise ToolProxyError("attachment_ref_invalid", "attachment_ref 无效")
+            arguments = self._with_deterministic_idempotency(name, arguments)
             return self.stream_media(
                 self.gateway_base_url,
                 self.gateway_token,
@@ -160,6 +212,10 @@ class ToolRouter:
         if name in LEDGER_TOOLS or name in RENOVATION_TOOLS:
             if not self.ledger_base_url or len(self.ledger_token) < 32:
                 raise ToolProxyError("ledger_unavailable", "Renovation Hub 账本接口未配置")
+            if name == "ledger_attach" and (not self.gateway_base_url or len(self.gateway_token) < 32):
+                raise ToolProxyError("gateway_unavailable", "Weixin Gateway 附件接口未配置")
+            if name in LEDGER_WRITE_TOOLS or name in RENOVATION_WRITE_TOOLS:
+                arguments = self._with_deterministic_idempotency(name, arguments)
             ledger_arguments = dict(arguments)
             if name == "ledger_attach":
                 ledger_arguments = self._resolve_gateway_attachment(arguments)
@@ -169,16 +225,85 @@ class ToolRouter:
                 self.ledger_token,
                 {"name": name, "arguments": ledger_arguments, "actor_hash": "sha256:codex-controller"},
             )
-        if name == "ha_operations_preflight":
-            return self._operations("POST", "/v1/preflight", arguments)
+        if name == "ha_operations_propose_restart":
+            self._require_exact_keys(arguments, {"target"})
+            target = arguments.get("target")
+            if not isinstance(target, str) or not ADDON_SLUG_RE.fullmatch(target):
+                raise ToolProxyError("invalid_target", "Add-on slug 无效")
+            idempotency_key = self._deterministic_idempotency(name, arguments)
+            return self._operations(
+                "POST",
+                "/v1/proposals",
+                {
+                    "version": 1,
+                    "action_type": "restart_addon",
+                    "target": target,
+                    "idempotency_key": idempotency_key,
+                },
+            )
         if name == "ha_operations_authorization_request":
-            return self._operations("POST", "/v1/authorization/requests", arguments)
+            self._require_exact_keys(arguments, {"action_id"})
+            return self._operations(
+                "POST",
+                "/v1/authorization/requests",
+                {"version": 1, "action_id": self._action_id(arguments)},
+            )
         if name == "ha_operations_authorization_status":
+            self._require_exact_keys(arguments, {"approval_id"})
             approval_id = arguments.get("approval_id")
             if not isinstance(approval_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{8,160}", approval_id):
                 raise ToolProxyError("invalid_approval_id", "approval_id 无效")
             return self._operations("GET", f"/v1/authorization/requests/{quote(approval_id, safe='')}", None)
+        if name == "ha_operations_execute_restart":
+            required = {"receipt_id", "action_id", "proposal_hash", "idempotency_key"}
+            self._require_exact_keys(arguments, required)
+            payload = {"version": 1, **{key: arguments[key] for key in sorted(required)}}
+            if (
+                not isinstance(payload["receipt_id"], str)
+                or not RECEIPT_ID_RE.fullmatch(payload["receipt_id"])
+                or not isinstance(payload["action_id"], str)
+                or not ACTION_ID_RE.fullmatch(payload["action_id"])
+                or not isinstance(payload["proposal_hash"], str)
+                or not SHA256_ID_RE.fullmatch(payload["proposal_hash"])
+                or not isinstance(payload["idempotency_key"], str)
+                or not SHA256_ID_RE.fullmatch(payload["idempotency_key"])
+            ):
+                raise ToolProxyError("invalid_arguments", "Operations 执行参数无效")
+            return self._operations("POST", "/v1/executions", payload)
+        if name == "ha_operations_execution_status":
+            self._require_exact_keys(arguments, {"action_id"})
+            action_id = self._action_id(arguments)
+            return self._operations("GET", f"/v1/executions/{quote(action_id, safe='')}", None)
         raise ToolProxyError("unknown_tool", "工具不在允许清单")
+
+    @staticmethod
+    def _require_exact_keys(arguments: dict[str, Any], expected: set[str]) -> None:
+        if set(arguments) != expected:
+            raise ToolProxyError("invalid_arguments", "工具参数字段不匹配")
+
+    @staticmethod
+    def _action_id(arguments: dict[str, Any]) -> str:
+        action_id = arguments.get("action_id")
+        if not isinstance(action_id, str) or not ACTION_ID_RE.fullmatch(action_id):
+            raise ToolProxyError("invalid_action_id", "action_id 无效")
+        return action_id
+
+    def _with_deterministic_idempotency(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(arguments)
+        normalized.pop("idempotency_key", None)
+        normalized["idempotency_key"] = self._deterministic_idempotency(name, normalized)
+        return normalized
+
+    def _deterministic_idempotency(self, name: str, arguments: dict[str, Any]) -> str:
+        with self._context_lock:
+            context = None if self._active_context is None else dict(self._active_context)
+        if context is None:
+            raise ToolProxyError("tool_context_unavailable", "写工具只能在活动 Controller 作业中调用")
+        canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(
+            f"codex-controller-tool-v1\n{context['message_id']}\n{name}\n{canonical}".encode("utf-8")
+        ).hexdigest()
+        return f"sha256:{digest}"
 
     def _resolve_gateway_attachment(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if not self.gateway_base_url or len(self.gateway_token) < 32:
@@ -418,7 +543,11 @@ class ToolProxyServer:
                     arguments = request.get("arguments", {})
                     if not isinstance(name, str):
                         raise ToolProxyError("invalid_request", "缺少工具名")
-                    result = router.call(name, arguments)
+                    result = (
+                        {"tools": router.available_tools()}
+                        if name == "__catalog__"
+                        else router.call(name, arguments)
+                    )
                     response = {"ok": True, "result": result}
                 except ToolProxyError as exc:
                     response = {"ok": False, "error": {"code": exc.code, "message": str(exc)}}

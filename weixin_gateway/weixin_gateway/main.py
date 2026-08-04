@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 
 from .api import create_server
+from .notification import GatewayNotificationRuntime, NotificationConfig
 from .service import ControllerClient, GatewayService
 from .store import GatewayStore, IdentityStore
 
@@ -56,20 +57,36 @@ async def async_main() -> None:
     )
     await service.start()
     loop = asyncio.get_running_loop()
-    server = create_server(
-        "0.0.0.0",
-        8103,
-        service=service,
-        loop=loop,
-        attachment_api_token=os.environ["WEIXIN_ATTACHMENT_API_TOKEN"],
-    )
-    thread = threading.Thread(target=server.serve_forever, name="weixin-ingress", daemon=True)
-    thread.start()
+    notification_runtime: GatewayNotificationRuntime | None = None
+    server = None
     try:
+        if os.environ.get("WEIXIN_NOTIFICATION_BRIDGE_ENABLED", "false").lower() == "true":
+            from paho.mqtt import client as mqtt
+
+            service.notification_owner_context()
+            notification_runtime = GatewayNotificationRuntime(
+                NotificationConfig.from_env(),
+                mqtt,
+                service=service,
+                loop=loop,
+            )
+            notification_runtime.start()
+        server = create_server(
+            "0.0.0.0",
+            8103,
+            service=service,
+            loop=loop,
+            attachment_api_token=os.environ["WEIXIN_ATTACHMENT_API_TOKEN"],
+        )
+        thread = threading.Thread(target=server.serve_forever, name="weixin-ingress", daemon=True)
+        thread.start()
         await asyncio.Event().wait()
     finally:
-        server.shutdown()
-        server.server_close()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if notification_runtime is not None:
+            await asyncio.to_thread(notification_runtime.stop)
         await service.stop()
 
 

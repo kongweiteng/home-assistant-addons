@@ -121,7 +121,7 @@ class RenovationHubDomainTests(unittest.TestCase):
         self.assertEqual(dashboard["counts"]["areas"], 1)
         self.assertEqual(dashboard["budget_remaining_cents"], 1_000_000)
         status = self.store.status()
-        self.assertEqual(status["version"], "0.1.3")
+        self.assertEqual(status["version"], "0.2.0")
         self.assertEqual(status["hub_schema_version"], 1)
         self.assertGreaterEqual(status["counts"]["audit_events"], 2)
 
@@ -139,6 +139,13 @@ class RenovationHubDomainTests(unittest.TestCase):
         self.assertEqual(reopened.metadata()["format_id"], "kanhuwan-renovation-ledger@1")
 
     def test_read_api_exposes_projects_and_dashboard(self) -> None:
+        self.assertEqual(create_server.__module__, "renovation_hub.api")
+        self.assertIn(
+            'server_version = "RenovationHub/0.2.0"',
+            (Path(__file__).resolve().parents[1] / "renovation_hub" / "renovation_hub" / "api.py").read_text(
+                encoding="utf-8"
+            ),
+        )
         server = create_server("127.0.0.1", 0, store=self.store, api_token="t" * 32, max_request_bytes=1024 * 1024)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()

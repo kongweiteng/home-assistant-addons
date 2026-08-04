@@ -136,6 +136,7 @@ class GatewayService:
         self._tasks: list[asyncio.Task[Any]] = []
         self._status_lock = threading.Lock()
         self._stop = asyncio.Event()
+        self._outbound_lock = asyncio.Lock()
 
     async def start(self) -> None:
         await self.controller.start()
@@ -272,12 +273,17 @@ class GatewayService:
             return
         client_id = "codex-weixin-pairing-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
         try:
-            response = await self.client.send_text(
-                sender_id,
-                "微信 owner 绑定成功。现在可以直接和通用 Codex 助手交流。",
-                context_token,
-                client_id,
-            )
+            async with self._outbound_lock:
+                response = await self.client.send_text(
+                    sender_id,
+                    "微信 owner 绑定成功。现在可以直接和通用 Codex 助手交流。",
+                    context_token,
+                    client_id,
+                )
+            if response.get("ret", 0) == SESSION_EXPIRED_ERRCODE or response.get("errcode", 0) == SESSION_EXPIRED_ERRCODE:
+                self.poller_state = "session_expired"
+                self.last_error = "session_expired"
+                return
             if response.get("ret", 0) not in {0, None} or response.get("errcode", 0) not in {0, None}:
                 self.last_error = "owner_pairing_confirmation_failed"
         except Exception:
@@ -310,43 +316,87 @@ class GatewayService:
                             self.last_error = exc.code
                             break
                         if job["state"] == "completed":
+                            if self.poller_state == "session_expired":
+                                break
                             await self._send_result(message, str(job.get("result") or "任务已完成。"))
                             self.store.mark_finished(message["message_id"], success=True)
                         elif job["state"] in {"failed", "cancelled", "recovery_required"}:
+                            if self.poller_state == "session_expired":
+                                break
                             text = "任务状态需要人工核对，请在 Codex Controller 页面查看。" if job["state"] == "recovery_required" else "任务未完成，请在 Codex Controller 页面查看错误状态。"
                             await self._send_result(message, text)
                             self.store.mark_finished(message["message_id"], success=False, error_code=job.get("error_code") or job["state"])
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
                 return
+            except (StoreError, ProtocolError) as exc:
+                self.last_error = exc.code
+                await asyncio.sleep(30 if exc.code == "session_expired" else 5)
             except Exception:
                 self.last_error = "delivery_failed"
                 await asyncio.sleep(5)
 
     async def _send_result(self, message: dict[str, Any], text: str) -> None:
+        if self.poller_state == "session_expired":
+            raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         if self.identity is None or self.client is None:
             raise StoreError("credential_missing", "无法回传微信消息", status=503)
         chunks = split_text(text, 4000)
-        for index, chunk in enumerate(chunks):
-            client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
-            if already_sent:
-                continue
-            context = self.identity_store.context(self.identity, message["sender_id"])
-            response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
-            ret = response.get("ret", 0)
-            errcode = response.get("errcode", 0)
-            if (ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE) and context:
-                self.identity_store.clear_context(self.identity, message["sender_id"])
-                response = await self.client.send_text(message["sender_id"], chunk, None, client_id)
+        async with self._outbound_lock:
+            for index, chunk in enumerate(chunks):
+                client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
+                if already_sent:
+                    continue
+                context = self.identity_store.context(self.identity, message["sender_id"])
+                response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
                 ret = response.get("ret", 0)
                 errcode = response.get("errcode", 0)
-            if ret not in {0, None} or errcode not in {0, None}:
-                code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
-                self.store.mark_chunk(message["controller_job_id"], index, success=False, error_code=code)
-                raise ProtocolError(code, "微信发送失败", retryable=code == "send_rate_limited")
-            self.store.mark_chunk(message["controller_job_id"], index, success=True)
-            if index + 1 < len(chunks):
-                await asyncio.sleep(0.5)
+                if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
+                    self.poller_state = "session_expired"
+                    self.last_error = "session_expired"
+                    raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+                if ret not in {0, None} or errcode not in {0, None}:
+                    code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
+                    self.store.mark_chunk(message["controller_job_id"], index, success=False, error_code=code)
+                    raise ProtocolError(code, "微信发送失败", retryable=code == "send_rate_limited")
+                self.store.mark_chunk(message["controller_job_id"], index, success=True)
+                if index + 1 < len(chunks):
+                    await asyncio.sleep(0.5)
+
+    async def send_notification(self, message_id: str, text: str) -> None:
+        """Send one deterministic notification to the single bound owner."""
+        if self.poller_state == "session_expired":
+            raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+        if self.identity is None or self.client is None:
+            raise StoreError("credential_missing", "无法发送微信通知", status=503)
+        owner_id, context = self.notification_owner_context()
+        client_id = "codex-weixin-notification-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
+        async with self._outbound_lock:
+            if self.poller_state == "session_expired":
+                raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+            response = await self.client.send_text(owner_id, text, context, client_id)
+        ret = response.get("ret", 0)
+        errcode = response.get("errcode", 0)
+        if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
+            self.poller_state = "session_expired"
+            self.last_error = "session_expired"
+            raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+        if ret not in {0, None} or errcode not in {0, None}:
+            code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
+            raise ProtocolError(code, "微信通知发送失败", retryable=code == "send_rate_limited")
+
+    def notification_owner_context(self) -> tuple[str, str]:
+        """Return the only authorized notification target or fail closed."""
+        if self.identity is None:
+            raise StoreError("credential_missing", "无法发送微信通知", status=503)
+        owners = self.identity.get("allowed_user_ids", [])
+        if not isinstance(owners, list) or len(owners) != 1:
+            raise StoreError("notification_owner_unavailable", "微信通知要求精确绑定一个 owner", status=409)
+        owner_id = owners[0]
+        context = self.identity_store.context(self.identity, owner_id)
+        if not context:
+            raise StoreError("notification_context_missing", "微信 owner 缺少当前会话上下文", status=409)
+        return owner_id, context
 
     async def _cleanup_loop(self) -> None:
         while not self._stop.is_set():
@@ -454,7 +504,7 @@ class GatewayService:
     def status(self) -> dict[str, Any]:
         identity = None if self.identity is None else self.identity_store.public_summary(self.identity)
         return {
-            "version": "0.1.2",
+            "version": "0.1.4",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,

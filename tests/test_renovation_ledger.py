@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from renovation_hub.api import dispatch_tool
@@ -94,6 +95,60 @@ class RenovationLedgerTests(unittest.TestCase):
                 }
             )
         self.assertEqual(context.exception.code, "refund_exceeds_payment")
+
+    def test_v2_grouped_tags_payment_refund_and_summary(self) -> None:
+        grouped = {
+            "专业": ["隐蔽工程"],
+            "生态": ["网络"],
+            "主题": ["x" * 37],
+        }
+        payment = self.store.add_payment(
+            {
+                "idempotency_key": fixture_idempotency("v2-payment"),
+                "ledger_format_version": 2,
+                "amount_cents": 88_800,
+                "occurred_on": "2026-08-04",
+                "merchant": "示例供应方",
+                "grouped_tags": grouped,
+            }
+        )["transaction"]
+        self.assertEqual(payment["main_category"], "")
+        self.assertEqual(payment["ledger_format_version"], 2)
+        self.assertEqual(payment["grouped_tags"]["专业"], ["隐蔽工程"])
+        refund = self.store.add_refund(
+            {
+                "idempotency_key": fixture_idempotency("v2-refund"),
+                "original_payment_id": payment["id"],
+                "amount_cents": 8_800,
+                "occurred_on": "2026-08-05",
+            }
+        )["transaction"]
+        self.assertEqual(refund["ledger_format_version"], 2)
+        self.assertEqual(refund["grouped_tags"], payment["grouped_tags"])
+        summary = self.store.summary()
+        self.assertNotIn("未分类", summary["category_totals"])
+        self.assertEqual(summary["dimensions"]["生态"]["网络"], 80_000)
+
+        with self.assertRaises(LedgerError) as too_many:
+            self.store.add_payment(
+                {
+                    "idempotency_key": fixture_idempotency("v2-too-many"),
+                    "amount_cents": 100,
+                    "occurred_on": "2026-08-04",
+                    "grouped_tags": {"主题": [str(index) for index in range(25)]},
+                }
+            )
+        self.assertEqual(too_many.exception.code, "invalid_tags")
+        with self.assertRaises(LedgerError) as too_long:
+            self.store.add_payment(
+                {
+                    "idempotency_key": fixture_idempotency("v2-too-long"),
+                    "amount_cents": 100,
+                    "occurred_on": "2026-08-04",
+                    "grouped_tags": {"主题": ["x" * 38]},
+                }
+            )
+        self.assertEqual(too_long.exception.code, "invalid_tags")
 
     def test_correction_and_undo_preserve_refund_invariants(self) -> None:
         payment = self.add_payment()["transaction"]
@@ -189,6 +244,119 @@ class RenovationLedgerTests(unittest.TestCase):
                 }
             )
         self.assertEqual(context.exception.code, "writer_disabled")
+
+    def test_attachment_failures_have_no_persistent_file_side_effects(self) -> None:
+        payment = self.add_payment("fixture-attachment-target-" + "0" * 24)["transaction"]
+
+        def files(store: LedgerStore) -> set[str]:
+            return {path.name for path in store.attachments_dir.iterdir()}
+
+        missing_before = files(self.store)
+        with self.assertRaises(LedgerError) as missing:
+            self.store.attach_content(
+                {
+                    "idempotency_key": fixture_idempotency("attach-missing"),
+                    "transaction_id": "missing",
+                    "original_filename": "missing.txt",
+                    "mime_type": "text/plain",
+                    "content_base64": base64.b64encode(b"missing").decode(),
+                }
+            )
+        self.assertEqual(missing.exception.code, "transaction_not_found")
+        self.assertEqual(files(self.store), missing_before)
+
+        first = self.store.attach_content(
+            {
+                "idempotency_key": fixture_idempotency("attach-conflict"),
+                "transaction_id": payment["id"],
+                "original_filename": "first.txt",
+                "mime_type": "text/plain",
+                "content_base64": base64.b64encode(b"first").decode(),
+            }
+        )
+        self.assertFalse(first["idempotent_replay"])
+        conflict_before = files(self.store)
+        with self.assertRaises(LedgerError) as conflict:
+            self.store.attach_content(
+                {
+                    "idempotency_key": fixture_idempotency("attach-conflict"),
+                    "transaction_id": payment["id"],
+                    "original_filename": "second.txt",
+                    "mime_type": "text/plain",
+                    "content_base64": base64.b64encode(b"second").decode(),
+                }
+            )
+        self.assertEqual(conflict.exception.code, "idempotency_conflict")
+        self.assertEqual(files(self.store), conflict_before)
+
+        failed_before = files(self.store)
+        with patch("renovation_hub.ledger.os.replace", side_effect=OSError("simulated rename failure")):
+            with self.assertRaises(OSError):
+                self.store.attach_content(
+                    {
+                        "idempotency_key": fixture_idempotency("attach-rename-failure"),
+                        "transaction_id": payment["id"],
+                        "original_filename": "failure.txt",
+                        "mime_type": "text/plain",
+                        "content_base64": base64.b64encode(b"rename failure").decode(),
+                    }
+                )
+        self.assertEqual(files(self.store), failed_before)
+
+        read_only_root = Path(self.temporary.name) / "attachment-readonly"
+        read_only = LedgerStore(
+            read_only_root / "ledger.sqlite3",
+            data_dir=read_only_root,
+            share_dir=read_only_root / "share",
+        )
+        read_only.set_writer_mode("read_only", force_initial=True)
+        read_only_before = files(read_only)
+        with self.assertRaises(LedgerError) as disabled:
+            read_only.attach_content(
+                {
+                    "idempotency_key": fixture_idempotency("attach-readonly"),
+                    "transaction_id": "missing",
+                    "original_filename": "readonly.txt",
+                    "mime_type": "text/plain",
+                    "content_base64": base64.b64encode(b"readonly").decode(),
+                }
+            )
+        self.assertEqual(disabled.exception.code, "writer_disabled")
+        self.assertEqual(files(read_only), read_only_before)
+
+    def test_attachment_crash_marker_recovery_only_cleans_marked_orphans(self) -> None:
+        root = Path(self.temporary.name) / "attachment-recovery"
+        store = LedgerStore(
+            root / "ledger.sqlite3",
+            data_dir=root,
+            share_dir=root / "share",
+        )
+        storage_name = "a" * 64 + ".txt"
+        temporary_name = ".attach-crash.tmp"
+        marker = store.attachments_dir / ".attach-pending-crash.json"
+        marker.write_text(
+            json.dumps(
+                {
+                    "storage_name": storage_name,
+                    "temporary_name": temporary_name,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (store.attachments_dir / temporary_name).write_bytes(b"temporary")
+        (store.attachments_dir / storage_name).write_bytes(b"orphan")
+        unrelated = store.attachments_dir / "manual-review.bin"
+        unrelated.write_bytes(b"preserve")
+
+        LedgerStore(
+            root / "ledger.sqlite3",
+            data_dir=root,
+            share_dir=root / "share",
+        )
+        self.assertFalse(marker.exists())
+        self.assertFalse((store.attachments_dir / temporary_name).exists())
+        self.assertFalse((store.attachments_dir / storage_name).exists())
+        self.assertTrue(unrelated.exists())
 
 
 if __name__ == "__main__":

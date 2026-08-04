@@ -15,6 +15,11 @@ import uuid
 CONVERSATION_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 ACTIVE_STATES = ("queued", "running", "recovery_required")
 FINAL_STATES = ("completed", "failed", "cancelled")
+RECOVERY_RESOLUTIONS = {
+    "confirmed_completed": ("completed", None),
+    "confirmed_failed": ("failed", "recovery_review_failed"),
+    "cancelled": ("cancelled", "recovery_review_cancelled"),
+}
 
 
 def utc_now() -> str:
@@ -195,7 +200,9 @@ class ControllerStore:
     def claim_next(self) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if connection.execute("SELECT 1 FROM jobs WHERE state = 'running' LIMIT 1").fetchone():
+            if connection.execute(
+                "SELECT 1 FROM jobs WHERE state IN ('running','recovery_required') LIMIT 1"
+            ).fetchone():
                 return None
             row = connection.execute("SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at, job_id LIMIT 1").fetchone()
             if row is None:
@@ -301,6 +308,32 @@ class ControllerStore:
                 )
                 self._event(connection, row["job_id"], "recovery_required", error_code="turn_state_unknown")
             return len(rows)
+
+    def resolve_recovery(self, job_id: str, resolution: str) -> dict[str, Any]:
+        target = RECOVERY_RESOLUTIONS.get(resolution)
+        if target is None:
+            raise StoreError("invalid_recovery_resolution", "恢复核对结论无效")
+        state, error_code = target
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            if row is None:
+                raise StoreError("job_not_found", "作业不存在", status=404)
+            if row["state"] != "recovery_required":
+                raise StoreError("job_state_conflict", "作业不在恢复核对状态", status=409)
+            connection.execute(
+                "UPDATE jobs SET state=?,error_code=?,finished_at=? WHERE job_id=? AND state='recovery_required'",
+                (state, error_code, utc_now(), job_id),
+            )
+            self._event(
+                connection,
+                job_id,
+                "recovery_resolved",
+                item_type=resolution,
+                error_code=error_code,
+            )
+            resolved = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            return self._job_document(connection, resolved)
 
     def cancel_queued(self, job_id: str) -> bool:
         with self._connect() as connection:

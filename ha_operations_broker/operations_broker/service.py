@@ -1,4 +1,4 @@
-"""Read-only action preflight routing with no execution path."""
+"""Read-only preflight routing shared by legacy and Broker-native proposals."""
 
 from __future__ import annotations
 
@@ -58,6 +58,66 @@ def preflight(
         validated = validate_envelope(
             envelope, trusted_owner_hashes=trusted_owner_hashes, clock=clock
         )
+        return _preflight_validated(
+            validated,
+            supervisor=supervisor,
+            request_id=request_id,
+            sampled_at=sampled_at,
+            authorization_assurance="structural_only",
+        )
+    except ContractError as exc:
+        return _blocked(request_id, sampled_at, exc.code, str(exc))
+    except SupervisorError as exc:
+        return _blocked(request_id, sampled_at, exc.code, str(exc))
+    except Exception:
+        return _blocked(
+            request_id,
+            sampled_at,
+            "internal_error",
+            "Preflight failed without executing any operation.",
+        )
+
+
+def preflight_native_proposal(
+    proposal: dict[str, Any],
+    *,
+    supervisor: SupervisorClient,
+    clock: Callable[[], datetime],
+) -> dict[str, Any]:
+    request_id = f"PREFLIGHT-{secrets.token_hex(8).upper()}"
+    sampled_at = iso_now(clock)
+    try:
+        if proposal.get("state") == "expired":
+            raise ContractError("proposal_expired", "Operation proposal expired")
+        return _preflight_validated(
+            proposal,
+            supervisor=supervisor,
+            request_id=request_id,
+            sampled_at=sampled_at,
+            authorization_assurance="broker_native",
+        )
+    except ContractError as exc:
+        return _blocked(request_id, sampled_at, exc.code, str(exc))
+    except SupervisorError as exc:
+        return _blocked(request_id, sampled_at, exc.code, str(exc))
+    except Exception:
+        return _blocked(
+            request_id,
+            sampled_at,
+            "internal_error",
+            "Preflight failed without executing any operation.",
+        )
+
+
+def _preflight_validated(
+    validated: dict[str, Any],
+    *,
+    supervisor: SupervisorClient,
+    request_id: str,
+    sampled_at: str,
+    authorization_assurance: str,
+) -> dict[str, Any]:
+    try:
         action_type = validated["action_type"]
         target = validated["target"]
         if action_type in ADDON_ACTIONS:
@@ -106,23 +166,14 @@ def preflight(
             "action_id": validated["action_id"],
             "proposal_hash": validated["proposal_hash"],
             "decision": decision,
-            "authorization_assurance": "structural_only",
+            "authorization_assurance": authorization_assurance,
             "execution_allowed": False,
             "observation": observation,
             "issues": issues,
             "future_required_role": future_role,
         }
-    except ContractError as exc:
-        return _blocked(request_id, sampled_at, exc.code, str(exc))
-    except SupervisorError as exc:
-        return _blocked(request_id, sampled_at, exc.code, str(exc))
-    except Exception:
-        return _blocked(
-            request_id,
-            sampled_at,
-            "internal_error",
-            "Preflight failed without executing any operation.",
-        )
+    except (ContractError, SupervisorError):
+        raise
 
 
 def _blocked(request_id: str, sampled_at: str, code: str, message: str) -> dict[str, Any]:

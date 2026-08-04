@@ -16,6 +16,7 @@ from .store import StoreError
 
 
 JOB_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})$")
+RECOVERY_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/recovery-resolution$")
 
 
 def create_server(
@@ -27,7 +28,7 @@ def create_server(
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.1"
+        server_version = "CodexController/0.1.6"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -35,7 +36,12 @@ def create_server(
         def do_GET(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
             if path == "/healthz":
-                self._json(HTTPStatus.OK, {"status": "ok", "ready": service.status()["ready"]})
+                status = service.status()
+                healthy = service.watchdog_healthy(status.get("app_server"))
+                self._json(
+                    HTTPStatus.OK if healthy else HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"status": "ok" if healthy else "runtime_failed", "ready": status["ready"]},
+                )
                 return
             if path in {"", "/", "/index.html"}:
                 self._asset(HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8"))
@@ -83,6 +89,14 @@ def create_server(
                 return
             if path == "/internal/v1/jobs":
                 self._call(lambda: service.submit(payload), status=HTTPStatus.ACCEPTED)
+                return
+            recovery_match = RECOVERY_PATH_RE.fullmatch(path)
+            if recovery_match:
+                self._call(
+                    lambda: service.store.resolve_recovery(
+                        recovery_match.group(1), str(payload.get("resolution") or "")
+                    )
+                )
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
 

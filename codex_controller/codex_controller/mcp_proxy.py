@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 
-def tool_catalog() -> list[dict[str, Any]]:
+def tool_catalog(enabled_names: list[str] | None = None) -> list[dict[str, Any]]:
     ledger_names = [
         "ledger_add_payment",
         "ledger_add_refund",
@@ -41,7 +41,7 @@ def tool_catalog() -> list[dict[str, Any]]:
         "renovation_dashboard",
         "renovation_media_ingest",
     ]
-    tools = [
+    tools: list[dict[str, Any]] = [
         {
             "name": name,
             "description": "调用 Renovation Hub 的 Ledger v1 兼容工具；写操作必须携带稳定 idempotency_key。",
@@ -60,18 +60,30 @@ def tool_catalog() -> list[dict[str, Any]]:
     tools.extend(
         [
             {
-                "name": "ha_operations_preflight",
-                "description": "对冻结的 Home Assistant 操作提案执行只读预检，不执行变更。",
-                "inputSchema": {"type": "object", "additionalProperties": True},
+                "name": "ha_operations_propose_restart",
+                "description": "为一个精确 Add-on slug 创建不可变重启提案；不会执行重启。",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["target"],
+                    "properties": {
+                        "target": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,63}$"}
+                    },
+                },
             },
             {
                 "name": "ha_operations_authorization_request",
-                "description": "创建独立 Passkey 授权请求；不会执行 Home Assistant 操作。",
-                "inputSchema": {"type": "object", "additionalProperties": True},
+                "description": "为 Broker 已创建的精确提案生成 Passkey 授权请求；不会执行操作。",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["action_id"],
+                    "properties": {"action_id": {"type": "string", "pattern": "^OPS-[0-9]{8}-[A-F0-9]{12}$"}},
+                },
             },
             {
                 "name": "ha_operations_authorization_status",
-                "description": "读取已有授权请求和收据状态。",
+                "description": "读取已有授权请求和一次性收据状态。",
                 "inputSchema": {
                     "type": "object",
                     "additionalProperties": False,
@@ -79,9 +91,37 @@ def tool_catalog() -> list[dict[str, Any]]:
                     "properties": {"approval_id": {"type": "string", "minLength": 8, "maxLength": 160}},
                 },
             },
+            {
+                "name": "ha_operations_execute_restart",
+                "description": "消费已完成 Passkey 授权的一次性收据，并仅执行提案中的精确 Add-on 重启。",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["receipt_id", "action_id", "proposal_hash", "idempotency_key"],
+                    "properties": {
+                        "receipt_id": {"type": "string", "pattern": "^RCPT-[A-F0-9]{32}$"},
+                        "action_id": {"type": "string", "pattern": "^OPS-[0-9]{8}-[A-F0-9]{12}$"},
+                        "proposal_hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+                        "idempotency_key": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+                    },
+                },
+            },
+            {
+                "name": "ha_operations_execution_status",
+                "description": "读取精确 Add-on 重启执行的状态与脱敏验证结果。",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["action_id"],
+                    "properties": {"action_id": {"type": "string", "pattern": "^OPS-[0-9]{8}-[A-F0-9]{12}$"}},
+                },
+            },
         ]
     )
-    return tools
+    if enabled_names is None:
+        return tools
+    by_name = {tool["name"]: tool for tool in tools}
+    return [by_name[name] for name in enabled_names if name in by_name]
 
 
 def socket_call(socket_path: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -128,10 +168,13 @@ def main() -> None:
                 result = {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "ha-controller-tools", "version": "0.1.2"},
+                    "serverInfo": {"name": "ha-controller-tools", "version": "0.1.6"},
                 }
             elif method == "tools/list":
-                result = {"tools": tool_catalog()}
+                catalog_response = socket_call(socket_path, "__catalog__", {})
+                catalog = catalog_response.get("result") if catalog_response.get("ok") else None
+                enabled = catalog.get("tools") if isinstance(catalog, dict) and isinstance(catalog.get("tools"), list) else []
+                result = {"tools": tool_catalog([name for name in enabled if isinstance(name, str)])}
             elif method == "tools/call":
                 name = params.get("name")
                 arguments = params.get("arguments", {})

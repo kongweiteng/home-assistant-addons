@@ -14,6 +14,11 @@
 | `allowed_user_ids` | 允许进入 Controller 的个人私聊 ID；只存于 HA 私有 options 和 Gateway 数据 |
 | `max_media_bytes` | 单个解密媒体上限 |
 | `spool_ttl_seconds` | 未消费媒体的最大保留时间 |
+| `notification_bridge_enabled` | 是否启用 MQTT v1 主动通知；默认关闭 |
+| `notification_mqtt_host`、`notification_mqtt_port` | 既有 MQTT Broker 地址和端口；host 默认留空，必须显式填写实际 Broker（例如 EMQX），不会假设 `core-mosquitto` |
+| `notification_mqtt_username`、`notification_mqtt_password` | 主动通知专用 MQTT 凭据；启用时必填 |
+| `notification_mqtt_tls` | 是否使用 MQTT TLS |
+| `notification_allowed_audiences` | v1 固定只能为 `owner` |
 
 ## 单 poller 门禁
 
@@ -58,12 +63,32 @@
 - Controller 可通过同一 bearer 调用 `/internal/v1/attachments/<ref>/preview` 非消费读取正文，用于官方 Codex `localImage`；预览后原引用仍可由账本或媒体归档工具消费。
 - `/internal/v1/attachments/<ref>` 保持一次性消费语义。预览与消费都核验文件路径、大小和 SHA-256；引用已消费或过期后，两种接口都返回不可用。
 - 出站文本按最多 4000 字符分块，并使用确定性 client ID，重试不会生成新发送键。
+- 任一微信发送或长轮询返回 iLink 会话过期时，Gateway 立即进入 `session_expired`，停止所有微信出站；不会先清除 `context_token` 再尝试第二次发送。Controller 已完成结果保持 `controller_submitted`，等待身份修复后恢复。
+
+## MQTT 主动通知
+
+主动通知不经过 Codex Controller，也不调用任何模型。请求字段保持现有 v1 契约：`version=1`、稳定 `message_id`、带时区 `created_at`、`info|warning|critical`、标题、正文、稳定 `source`/`dedupe_key`、`ttl=30..86400` 和 `audience=owner`。
+
+- request：`home/notification/v1/request`，QoS 1，retain false。
+- result：`home/notification/v1/result`，QoS 1，retain false。
+- status：`home/notification/v1/status`，QoS 1，retain true。
+- HA birth：`homeassistant/status`；收到 `online` 后重新发布 retained Discovery。
+- 固定 MQTT client ID 为 `weixin-gateway-notification-v1`，`clean_start=false`，Session Expiry 为 24 小时。
+- SQLite 台账只保存 `message_id`、`dedupe_key`、`source`、时间、状态、attempt 和 `error_code`；不保存标题、正文、MQTT 密码、微信 ID、token 或 `context_token`。
+- owner 必须精确绑定一个，并且已有当前 `context_token`；无 owner、多 owner 或上下文缺失均失败关闭。
+- `sending`/`retrying` 状态下进程中断后不会盲目重发，重投结果为 `failed/delivery_state_unknown`。
+- 等待 iLink 发送结果超时也会直接进入 `failed/delivery_state_unknown`，不会自动重试，避免状态不确定时产生重复微信消息。
+- 只有微信明确返回限流且确认未发送时才允许有限重试；HTTP 5xx、传输超时和未知运行时异常统一视为投递状态未知。
+- iLink session expired 只尝试一次，立即停止后续微信出站并发布失败结果。
+
+切换顺序必须是：保持新适配器关闭安装并重启验证；停止旧 Hermes notification bridge consumer；确认 request 主题只有一个 consumer；再启用新适配器并执行文字、重复、过期、重启、MQTT 断线和 session-expired 真机验收。失败时关闭新适配器，保留当前有效的新 Gateway 身份。
 
 ## 回滚
 
 1. 关闭新 Gateway poller，等待当前长轮询退出并释放锁。
 2. 核对最后同步游标、待提交消息和待回复作业。
-3. 恢复 Hermes poller，确认微信文字、图片、通知和 `context_token` 连续性。
-4. 不删除新 Gateway 私有数据，直到确认没有未回传消息或附件。
+3. 关闭 Controller intake，保留当前新身份、owner、游标、context 和待回复队列；不要启动已失效身份的 Hermes poller。
+4. 修复当前 Gateway 身份，或重新扫码并重新绑定；恢复后核对只存在一个 poller，并确认待回复消息没有重复发送。
+5. 不删除新 Gateway 私有数据，直到确认没有未回传消息或附件。
 
 真实凭据导入、停止 Hermes、启动新 poller 和微信端到端测试均属于独立 L3 人工闸门。

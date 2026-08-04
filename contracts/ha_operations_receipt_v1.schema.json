@@ -7,40 +7,59 @@
   "required": [
     "version",
     "receipt_id",
+    "action_id",
     "proposal_hash",
     "idempotency_key",
+    "action_type",
+    "target",
     "state",
-    "executed_at",
-    "verification"
+    "started_at",
+    "updated_at",
+    "finished_at",
+    "preflight",
+    "postflight",
+    "error_code"
   ],
   "properties": {
     "version": {"const": 1},
-    "receipt_id": {"type": "string", "minLength": 12, "maxLength": 128},
+    "receipt_id": {"type": "string", "pattern": "^RCPT-[A-F0-9]{32}$"},
+    "action_id": {"type": "string", "pattern": "^OPS-[0-9]{8}-[A-F0-9]{12}$"},
     "proposal_hash": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "idempotency_key": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
-    "state": {"enum": ["executed", "verified", "rolled_back", "failed"]},
-    "executed_at": {"type": "string", "format": "date-time"},
-    "verification": {
+    "action_type": {"const": "restart_addon"},
+    "target": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,63}$"},
+    "state": {
+      "enum": [
+        "authorized",
+        "executing",
+        "verifying",
+        "succeeded",
+        "failed",
+        "recovery_required"
+      ]
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": ["string", "null"], "format": "date-time"},
+    "preflight": {"$ref": "#/$defs/addonObservation"},
+    "postflight": {"$ref": "#/$defs/addonObservation"},
+    "error_code": {"type": ["string", "null"], "maxLength": 128}
+  },
+  "$defs": {
+    "addonObservation": {
+      "oneOf": [
+        {"type": "null"},
+        {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "checks"],
-      "properties": {
-        "status": {"enum": ["passed", "failed", "not_run"]},
-        "checks": {
-          "type": "array",
-          "maxItems": 32,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "status"],
-            "properties": {
-              "name": {"type": "string", "maxLength": 128},
-              "status": {"enum": ["passed", "failed", "skipped"]},
-              "summary": {"type": "string", "maxLength": 1024}
-            }
+          "additionalProperties": true,
+          "required": ["slug", "state", "version"],
+          "properties": {
+            "slug": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_]{0,63}$"},
+            "state": {"type": ["string", "null"], "maxLength": 64},
+            "version": {"type": ["string", "null"], "maxLength": 128}
           }
         }
-      }
+      ]
     }
   }
 }

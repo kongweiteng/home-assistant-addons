@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.1.4
+
+- 新增默认关闭的 MQTT v1 主动通知适配器，兼容现有 request/result/status/HA birth 主题，直接经当前唯一 owner 的 iLink 上下文发送，不调用 Codex、Controller 或模型。
+- 使用 MQTT v5、QoS 1、manual ack、固定 client ID、24 小时持久会话和 retained status/Discovery；只有最终非 retained result 成功发布后才 PUBACK。
+- 新增只保存路由元数据的私有 SQLite 台账，覆盖幂等、业务去重、TTL、限流、重试、断线恢复和 `delivery_state_unknown`，不保存通知正文、MQTT 凭据或微信身份。
+- 普通回复、owner 绑定确认和主动通知共用唯一异步微信出站锁；无 owner、多 owner、上下文缺失和 session expired 均失败关闭。
+
+## 0.1.3
+
+- iLink 返回会话过期后，Gateway 同时停止轮询和所有 Controller 结果微信出站，不再清除 context 后进行第二次发送。
+- 已完成但尚未回传的 Controller 作业继续保持持久待回复状态；修复身份并恢复 Gateway 后仍使用原作业和确定性 client ID，不在会话失效期间重复发送。
+
 ## 0.1.2
 
 - 新增新扫码身份的一次性 owner 绑定流程；绑定码仅在管理员 Ingress 返回一次，磁盘只保存带盐 SHA-256 和过期时间。

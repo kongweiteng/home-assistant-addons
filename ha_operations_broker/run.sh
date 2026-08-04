@@ -17,13 +17,13 @@ BROKER_PASSKEY_ENROLLMENT_TOKEN=$(jq -r '.passkey_enrollment_token // ""' "$OPTI
 BROKER_PASSKEY_CHALLENGE_TTL_SECONDS=$(jq -r '.passkey_challenge_ttl_seconds // 180' "$OPTIONS_FILE")
 BROKER_MAX_PASSKEYS=$(jq -r '.max_passkeys // 8' "$OPTIONS_FILE")
 BROKER_MAX_PENDING_FLOWS=$(jq -r '.max_pending_passkey_flows // 100' "$OPTIONS_FILE")
+BROKER_PROPOSAL_TTL_SECONDS=$(jq -r '.proposal_ttl_seconds // 600' "$OPTIONS_FILE")
+BROKER_EXECUTION_ENABLED=$(jq -r 'if .execution_enabled == true then "true" else "false" end' "$OPTIONS_FILE")
+BROKER_ENABLED_ACTIONS=$(jq -r '(.enabled_actions // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
+BROKER_RESTART_ADDON_ALLOWLIST=$(jq -r '(.restart_addon_allowlist // []) | map(select(length > 0)) | join(",")' "$OPTIONS_FILE")
 
 if [ "${#BROKER_API_TOKEN}" -lt 32 ]; then
     bashio::log.fatal "Configure a broker API token with at least 32 characters"
-    exit 1
-fi
-if [ -z "$BROKER_OWNER_HASHES" ]; then
-    bashio::log.fatal "Configure at least one trusted owner identity hash"
     exit 1
 fi
 if [ -z "$BROKER_WEBAUTHN_RP_ID" ] || [ -z "$BROKER_WEBAUTHN_ALLOWED_ORIGINS" ]; then
@@ -38,6 +38,20 @@ if [ -z "${SUPERVISOR_TOKEN:-}" ]; then
     bashio::log.fatal "Home Assistant Supervisor credential is unavailable"
     exit 1
 fi
+if [ -n "$BROKER_ENABLED_ACTIONS" ] && [ "$BROKER_ENABLED_ACTIONS" != "restart_addon" ]; then
+    bashio::log.fatal "Only restart_addon can appear in enabled_actions"
+    exit 1
+fi
+if [ "$BROKER_EXECUTION_ENABLED" = "true" ]; then
+    if [ "$BROKER_ENABLED_ACTIONS" != "restart_addon" ]; then
+        bashio::log.fatal "Execution requires enabled_actions to contain only restart_addon"
+        exit 1
+    fi
+    if [ -z "$BROKER_RESTART_ADDON_ALLOWLIST" ]; then
+        bashio::log.fatal "Execution requires at least one exact restart_addon slug"
+        exit 1
+    fi
+fi
 
 export BROKER_API_TOKEN
 export BROKER_OWNER_HASHES
@@ -49,10 +63,14 @@ export BROKER_PASSKEY_ENROLLMENT_TOKEN
 export BROKER_PASSKEY_CHALLENGE_TTL_SECONDS
 export BROKER_MAX_PASSKEYS
 export BROKER_MAX_PENDING_FLOWS
+export BROKER_PROPOSAL_TTL_SECONDS
+export BROKER_EXECUTION_ENABLED
+export BROKER_ENABLED_ACTIONS
+export BROKER_RESTART_ADDON_ALLOWLIST
 export BROKER_AUTHORIZATION_DATABASE="/data/authorization/passkeys.sqlite3"
 export BROKER_SUPERVISOR_BASE_URL="http://supervisor"
 export BROKER_SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN"
 unset SUPERVISOR_TOKEN
 
-bashio::log.info "Starting read-only HA Operations Broker with Passkey authorization canary"
+bashio::log.info "Starting HA Operations Broker; write execution remains controlled by explicit options"
 exec /opt/ha-operations-broker/venv/bin/python -m operations_broker.main

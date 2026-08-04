@@ -17,8 +17,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         python3 \
         python3-aiohttp \
         python3-cryptography \
+        python3-pip \
         python3-pil \
-        python3-qrcode
+        python3-qrcode \
+    && python3 -m pip install --no-cache-dir --break-system-packages paho-mqtt==2.1.0
 
 COPY run.sh /
 COPY weixin_gateway /opt/weixin-gateway/weixin_gateway

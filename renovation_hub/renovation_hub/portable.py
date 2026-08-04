@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 import csv
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import stat
+import tempfile
 import unicodedata
 import zipfile
 from typing import Any, Iterable
@@ -1027,3 +1029,310 @@ def verify_and_extract(source: Path, destination: Path) -> dict[str, Any]:
     result["archive_sha256"] = archive_sha256
     result["archive_size_bytes"] = archive_size
     return result
+
+
+def _write_csv_rows(path: Path, rows: list[dict[str, str]], fields: tuple[str, ...]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_v2_archive(
+    source_database: Path,
+    source_attachments: Path,
+    destination_zip: Path,
+) -> dict[str, Any]:
+    """Write a canonical, verifier-accepted v2 snapshot from Renovation Hub."""
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    with tempfile.TemporaryDirectory(dir=destination_zip.parent) as temporary_name:
+        root = Path(temporary_name) / "ledger"
+        root.mkdir(mode=0o700)
+        attachments_root = root / "attachments"
+        attachments_root.mkdir(mode=0o700)
+        target_database = root / "bookkeeping.sqlite3"
+        target = sqlite3.connect(target_database)
+        target.executescript(
+            """
+            PRAGMA foreign_keys=ON;
+            CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE transactions(
+              id INTEGER PRIMARY KEY,
+              kind TEXT NOT NULL,
+              payment_id INTEGER REFERENCES transactions(id),
+              amount_cents INTEGER NOT NULL,
+              txn_date TEXT NOT NULL,
+              vendor TEXT NOT NULL,
+              description TEXT NOT NULL,
+              is_deposit INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              void_reason TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE TABLE transaction_tags(
+              id INTEGER PRIMARY KEY,
+              transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+              tag TEXT NOT NULL,
+              tag_key TEXT NOT NULL,
+              position INTEGER NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE attachments(
+              id INTEGER PRIMARY KEY,
+              transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+              original_filename TEXT NOT NULL,
+              relative_path TEXT NOT NULL,
+              sha256 TEXT NOT NULL,
+              size_bytes INTEGER NOT NULL,
+              media_type TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE TABLE audit_log(
+              id INTEGER PRIMARY KEY,
+              transaction_id INTEGER NOT NULL REFERENCES transactions(id),
+              action TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              before_json TEXT,
+              after_json TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            """
+        )
+        source = sqlite3.connect(f"file:{source_database}?mode=ro", uri=True)
+        source.row_factory = sqlite3.Row
+        source.execute("PRAGMA query_only=ON")
+        try:
+            transaction_rows = source.execute(
+                "SELECT * FROM transactions ORDER BY portable_id"
+            ).fetchall()
+            if any(int(row["ledger_format_version"] or 1) != FORMAT_VERSION_V2 for row in transaction_rows):
+                raise PortableArchiveError("v2 主库导出不允许混入 v1 流水")
+            if any(row["portable_id"] is None for row in transaction_rows):
+                raise PortableArchiveError("v2 主库存在缺失 portable ID 的流水")
+            transaction_ids = {
+                str(row["id"]): int(row["portable_id"]) for row in transaction_rows
+            }
+            for row in transaction_rows:
+                payment_id = (
+                    transaction_ids.get(str(row["original_payment_id"]))
+                    if row["original_payment_id"] is not None
+                    else None
+                )
+                target.execute(
+                    "INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        int(row["portable_id"]),
+                        row["type"],
+                        payment_id,
+                        int(row["amount_cents"]),
+                        row["occurred_on"],
+                        row["merchant"],
+                        row["note"],
+                        int(row["is_deposit"]),
+                        "active" if row["status"] == "active" else "void",
+                        row["void_reason"],
+                        row["created_at"],
+                        row["updated_at"],
+                    ),
+                )
+            tag_id = 1
+            for row in source.execute(
+                """
+                SELECT tt.*,t.display_name,tr.portable_id
+                FROM transaction_tags tt
+                JOIN tags t ON t.normalized=tt.tag_normalized
+                JOIN transactions tr ON tr.id=tt.transaction_id
+                WHERE tr.type='payment'
+                ORDER BY tr.portable_id,tt.position,t.display_name
+                """
+            ):
+                tag = str(row["display_name"])
+                grouped_tags([tag])
+                target.execute(
+                    "INSERT INTO transaction_tags VALUES (?,?,?,?,?,?)",
+                    (
+                        tag_id,
+                        int(row["portable_id"]),
+                        tag,
+                        unicodedata.normalize("NFKC", tag).casefold(),
+                        int(row["position"]),
+                        row["created_at"] or generated_at,
+                    ),
+                )
+                tag_id += 1
+            for row in source.execute(
+                "SELECT * FROM attachments WHERE status='active' ORDER BY portable_id"
+            ):
+                if row["portable_id"] is None or str(row["transaction_id"]) not in transaction_ids:
+                    raise PortableArchiveError("v2 主库附件缺少稳定 portable ID")
+                relative = normalized_member_name(str(row["storage_name"]))
+                source_path = source_attachments.joinpath(*PurePosixPath(relative).parts)
+                target_path = attachments_root.joinpath(*PurePosixPath(relative).parts)
+                target_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                shutil.copyfile(source_path, target_path)
+                os.chmod(target_path, 0o600)
+                digest, size = sha256_file(target_path)
+                if digest != row["sha256"] or size != int(row["size_bytes"]):
+                    raise PortableArchiveError("v2 主库附件文件校验失败")
+                target.execute(
+                    "INSERT INTO attachments VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        int(row["portable_id"]),
+                        transaction_ids[str(row["transaction_id"])],
+                        row["original_filename"],
+                        relative,
+                        row["sha256"],
+                        int(row["size_bytes"]),
+                        row["mime_type"],
+                        row["created_at"],
+                    ),
+                )
+            for row in source.execute(
+                "SELECT * FROM audit_log WHERE target_type='transaction' ORDER BY id"
+            ):
+                portable_transaction_id = transaction_ids.get(str(row["target_id"]))
+                if portable_transaction_id is None:
+                    continue
+                target.execute(
+                    "INSERT INTO audit_log VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        int(row["id"]),
+                        portable_transaction_id,
+                        row["action"],
+                        row["actor_hash"],
+                        row["before_json"],
+                        row["after_json"] or canonical_json({}),
+                        row["reason"],
+                        row["created_at"],
+                    ),
+                )
+        finally:
+            source.close()
+        target.execute("INSERT INTO metadata VALUES ('schema_version','3')")
+        target.execute("INSERT INTO metadata VALUES ('source_application','renovation_hub')")
+        target.commit()
+        target.close()
+        os.chmod(target_database, 0o600)
+
+        state = _snapshot_state_v2(target_database)
+        ledger = {
+            "format_id": FORMAT_ID,
+            "format_version": FORMAT_VERSION_V2,
+            "generated_at": generated_at,
+            "currency": "CNY",
+            "amount_unit": "integer_cents",
+            **{
+                key: state[key]
+                for key in (
+                    "metadata",
+                    "transactions",
+                    "transaction_tags",
+                    "attachments",
+                    "audit_log",
+                    "invariants",
+                    "summary",
+                )
+            },
+        }
+        (root / "ledger.json").write_text(
+            json.dumps(ledger, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        (root / "schema.json").write_text(
+            json.dumps(
+                {"$schema": "https://json-schema.org/draft/2020-12/schema"},
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (root / "FORMAT.md").write_text(
+            "# 装修账本便携格式 v2\n\n使用九个固定维度的分组多标签，不使用主分类。\n",
+            encoding="utf-8",
+        )
+        (root / "verify.py").write_text(
+            "raise SystemExit('请使用 Renovation Hub 内置 verifier 校验此包')\n",
+            encoding="utf-8",
+        )
+        _write_csv_rows(
+            root / "transactions.csv",
+            _expected_transaction_csv_v2(state["transactions"]),
+            tuple(_expected_transaction_csv_v2(state["transactions"])[0].keys())
+            if state["transactions"]
+            else (
+                "id","kind","payment_id","amount_cents","amount","date","vendor",
+                "description","is_deposit","status","void_reason","created_at",
+                "updated_at","tags_json","grouped_tags_json",
+            ),
+        )
+        _write_csv_rows(
+            root / "transaction_tags.csv",
+            _expected_tag_csv(state["transaction_tags"]),
+            ("id", "transaction_id", "tag", "tag_key", "position", "created_at"),
+        )
+        _write_csv_rows(
+            root / "attachments.csv",
+            _expected_attachment_csv(state["attachments"], True),
+            (
+                "id","transaction_id","original_filename","relative_path","export_path",
+                "sha256","size_bytes","media_type","created_at","included",
+            ),
+        )
+        with (root / "audit_log.jsonl").open("w", encoding="utf-8") as handle:
+            for item in state["audit_log"]:
+                handle.write(canonical_json(item) + "\n")
+        files = []
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.name == "manifest.json":
+                continue
+            digest, size = sha256_file(path)
+            files.append(
+                {"path": path.relative_to(root).as_posix(), "sha256": digest, "size_bytes": size}
+            )
+        manifest = {
+            "format_id": FORMAT_ID,
+            "format_version": FORMAT_VERSION_V2,
+            "generated_at": generated_at,
+            "currency": "CNY",
+            "amount_unit": "integer_cents",
+            "hermes_required": False,
+            "source": {"application": "renovation_hub", "sqlite_schema_version": "3"},
+            "semantics": {
+                "primary_category_single": False,
+                "grouped_multi_tags": True,
+                "tag_totals_overlap": True,
+                "total_ledger_deduplicates_transactions": True,
+            },
+            "export": {
+                "attachments_included": True,
+                "manifest_self_excluded_from_hashes": True,
+                "sqlite_snapshot_consistent": True,
+            },
+            "invariants": state["invariants"],
+            "files": files,
+        }
+        (root / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary_zip = Path(temporary_name) / "ledger.zip"
+        with zipfile.ZipFile(temporary_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+            directory = zipfile.ZipInfo("attachments/")
+            directory.create_system = 3
+            directory.external_attr = (stat.S_IFDIR | 0o700) << 16
+            archive.writestr(directory, b"")
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    info = zipfile.ZipInfo(path.relative_to(root).as_posix())
+                    info.create_system = 3
+                    info.external_attr = (stat.S_IFREG | 0o600) << 16
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(info, path.read_bytes())
+        verify_and_extract(temporary_zip, Path(temporary_name) / "verified")
+        destination_zip.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copy2(temporary_zip, destination_zip)
+        os.chmod(destination_zip, 0o600)
+    digest, size = sha256_file(destination_zip)
+    return {"path": str(destination_zip), "sha256": digest, "size_bytes": size, "state": state}

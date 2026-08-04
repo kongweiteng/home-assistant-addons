@@ -66,7 +66,13 @@ class RenovationPageApiTests(unittest.IsolatedAsyncioTestCase):
             staging_root=root / "staging",
             max_media_bytes=20 * 1024 * 1024,
         )
-        app = create_app(store=self.store, media=self.media, api_token="t" * 32, max_request_bytes=32 * 1024 * 1024)
+        app = create_app(
+            store=self.store,
+            media=self.media,
+            api_token="t" * 32,
+            cutover_token="c" * 32,
+            max_request_bytes=32 * 1024 * 1024,
+        )
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         self.site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -186,6 +192,30 @@ class RenovationPageApiTests(unittest.IsolatedAsyncioTestCase):
         upload_state = self.media.browser_upload(upload["upload_id"])
         self.assertEqual(upload_state["state"], "created")
         self.assertFalse(Path(upload_state["path"]).exists())
+
+    async def test_cutover_requires_independent_token_and_old_writer_endpoint_cannot_activate(self) -> None:
+        bearer = {"Authorization": f"Bearer {'t' * 32}"}
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/internal/v1/admin/writer-mode",
+            json={"target": "primary_writer", "confirmation": "ACTIVATE_PRIMARY_WRITER"},
+            headers=bearer,
+        ) as response:
+            self.assertEqual(response.status, 409)
+            self.assertEqual((await response.json())["error"]["code"], "cutover_manifest_required")
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/internal/v1/admin/cutover/seed",
+            json={"manifest_id": "missing"},
+            headers={**bearer, "X-Cutover-Token": "wrong"},
+        ) as response:
+            self.assertEqual(response.status, 403)
+            self.assertEqual((await response.json())["error"]["code"], "cutover_not_authorized")
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/internal/v1/admin/cutover/seed",
+            json={"manifest_id": "missing"},
+            headers={**bearer, "X-Cutover-Token": "c" * 32},
+        ) as response:
+            self.assertEqual(response.status, 404)
+            self.assertEqual((await response.json())["error"]["code"], "manifest_not_found")
 
 
 if __name__ == "__main__":

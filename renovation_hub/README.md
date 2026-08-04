@@ -13,18 +13,24 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 - Weixin Gateway 的一次性媒体引用由 Codex Controller 主进程流式转发，媒体正文、内部 bearer 和路径不进入模型或 app-server。
 - 页面与 Codex 工具复用同一业务层、幂等键、乐观版本、单 writer 和审计规则。
 - 便携包导入不执行包内 `verify.py`，由 Hub 自身交叉核对 SQLite、JSON、CSV、JSONL、manifest、附件、退款、分类、标签、月份汇总和审计顺序。
-- v2 分组式多标签只进入私有 shadow：完整保留九个维度的 `维度:值` 标签、退款继承、`grouped_tags`、维度汇总、附件和审计，不写主库、不改变页面或 writer。
+- v2 分组式多标签现已成为正式迁移后的原生主库格式：完整保留九个维度的 `维度:值` 标签、退款继承、`grouped_tags`、维度汇总、稳定导出 ID、附件和审计；v1 本地兼容语义继续保留。
 - 正式包只写入按来源 SHA-256 隔离的私有影子目录；原始快照、附件和 Hub 兼容数据库同时保留，重复导入会重新校验而不是盲信缓存报告。
+- 正式切换使用持久 `cutover manifest + writer generation + active lease`，依次经过 `migration_prepared -> source_frozen -> primary_seeded -> cutover_ready -> primary_writer`；裸 bearer 不能推进状态。
+- 每次紧急停写都会原子轮换 writer generation；任何停写前生成的激活确认串在重启后也不能重放。
+- `options=primary_writer` 但 lease 无效或处于暂停态时，服务以 degraded/recovery-required 方式保持管理 API 在线，普通业务写继续失败关闭。
+- Legacy 附件在 writer、幂等键和目标流水校验通过后才落盘，并使用可恢复标记清理提交中断产生的临时文件或孤儿。
+- Hub 默认项目和账目空间上下文由 canonical 来源确定性派生并重新校验；staging 中额外、缺失或篡改的项目/阶段/空间/context 不会进入主库。
+- v2 主库会输出由固定 verifier 自验的 canonical v2 便携包，重复导出的业务摘要与不变量保持一致。
 - React 19、TypeScript 与 Vite 前端在镜像构建阶段编译，运行镜像只提供静态资源和 Python 服务。
 
 ## 当前阶段
 
-- 版本：`0.1.3`，实验候选。
+- 版本：`0.2.0`，实验候选。
 - 默认 `writer_mode=read_only`。
-- P1～P6 本地源码、合成验证、完整前端门禁、恢复测试和 amd64/aarch64 镜像构建均已完成。
+- P1～P6 本地源码与合成验证已完成；最终完整门禁和 amd64/aarch64 镜像证据以当前交付报告为准，不复用旧候选结果。
 - 维护者 HAOS 已完成本地 Store 只读影子安装、Ingress、权限、真实未登录 Controller 路由和重启持久化验证；未创建 GitHub Release。
-- 正式便携账本只允许导入 `/data/shadow`，不会覆盖主数据库；Controller intake、Gateway poller 和 Hub writer 仍保持关闭。
-- Hermes 在正式切换验收前继续作为唯一正式 writer。
+- 已具备 verified staging、来源冻结、空主库播种、播种中断确认性恢复、动态确认激活、重启租约恢复和 options 紧急停写/显式恢复的本地实现；本次源码交付没有执行正式迁移。
+- Hermes 是否仍为唯一正式 writer 必须以当前 HAOS 运行证据为准；代码存在不代表 writer 已切换。
 
 ## 安全边界
 
@@ -35,6 +41,7 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 - `/share` 只使用 `private/renovation-bookkeeping` 固定子目录；大视频不进入账本便携 ZIP。
 - 同一幂等键同一请求返回原结果；同键不同请求拒绝执行。
 - `primary_writer` 不能仅靠修改 options 激活，必须经过独立切换流程。
+- 管理切换除了内部 bearer，还必须提交独立 `cutover_token`；未配置时切换 API fail closed。
 
 ## 本地验证
 

@@ -25,6 +25,7 @@ class ControllerService:
         api_base_mode: str = "official",
         codex_model_mode: str = "default",
         turn_media: TurnMediaManager | None = None,
+        tool_context: Any | None = None,
     ):
         if auth_mode not in self.AUTH_MODES:
             raise ValueError("Controller auth_mode 不受支持")
@@ -40,6 +41,7 @@ class ControllerService:
         self.api_base_mode = api_base_mode
         self.codex_model_mode = codex_model_mode
         self.turn_media = turn_media
+        self.tool_context = tool_context
         self.auth_error: str | None = None
         self.pending_login: dict[str, Any] | None = None
         self.start_error: str | None = None
@@ -110,7 +112,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.1.4",
+            "version": "0.1.6",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -120,10 +122,9 @@ class ControllerService:
             "codex_model_mode": self.codex_model_mode,
             "auth_error": self.auth_error,
             "intake_configured": self.configured_intake_enabled,
-            "intake_enabled": self.intake_enabled,
+            "intake_enabled": self._intake_enabled(app),
             "ready": bool(
-                app["running"]
-                and app["initialized"]
+                self._app_server_operational(app)
                 and self._account_matches(app)
                 and self.start_error is None
                 and self.auth_error is None
@@ -149,6 +150,8 @@ class ControllerService:
             turn_id = turn.get("id") or params.get("turnId")
             status = turn.get("status")
             if isinstance(turn_id, str) and isinstance(status, str):
+                if self.tool_context is not None:
+                    self.tool_context.end_turn(turn_id)
                 if self.turn_media is not None:
                     self.turn_media.cleanup_turn(turn_id)
                 error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
@@ -181,6 +184,8 @@ class ControllerService:
         turn_started = False
         try:
             payload = job["input"]
+            if self.tool_context is not None:
+                self.tool_context.begin_job(job["job_id"], payload["message_id"])
             thread_id = self.store.conversation_thread(job["conversation_key"])
             if thread_id is None:
                 thread_id = self.app_server.start_thread()
@@ -197,6 +202,8 @@ class ControllerService:
                 job["message_id"],
                 input_items=input_items,
             )
+            if self.tool_context is not None:
+                self.tool_context.bind_turn(job["job_id"], turn_id)
             turn_started = True
             if self.turn_media is not None:
                 self.turn_media.bind_turn(job["job_id"], turn_id)
@@ -214,8 +221,11 @@ class ControllerService:
         except Exception:
             self.store.fail_claimed(job["job_id"], "controller_internal_error", uncertain=True)
         finally:
-            if not turn_started and self.turn_media is not None:
-                self.turn_media.cleanup_job(job["job_id"])
+            if not turn_started:
+                if self.tool_context is not None:
+                    self.tool_context.clear_job(job["job_id"])
+                if self.turn_media is not None:
+                    self.turn_media.cleanup_job(job["job_id"])
 
     def _buffer_event(self, turn_id: str, message: dict[str, Any]) -> None:
         with self._event_lock:
@@ -231,11 +241,26 @@ class ControllerService:
 
     @property
     def intake_enabled(self) -> bool:
+        return self._intake_enabled()
+
+    def watchdog_healthy(self, app_status: dict[str, Any] | None = None) -> bool:
+        return bool(self.start_error is None and self._app_server_operational(app_status))
+
+    def _intake_enabled(self, app_status: dict[str, Any] | None = None) -> bool:
         return bool(
             self.configured_intake_enabled
+            and self._app_server_operational(app_status)
             and self.app_server.account_ready
-            and self._account_matches()
+            and self._account_matches(app_status)
             and self.auth_error is None
+        )
+
+    def _app_server_operational(self, app_status: dict[str, Any] | None = None) -> bool:
+        app = self.app_server.status() if app_status is None else app_status
+        return bool(
+            app.get("running") is True
+            and app.get("initialized") is True
+            and app.get("protocol_error") is None
         )
 
     def _expected_account_type(self) -> str:

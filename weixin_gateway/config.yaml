@@ -1,5 +1,5 @@
 name: Weixin Gateway
-version: "0.1.2"
+version: "0.1.4"
 slug: weixin_gateway
 description: "承载个人微信 iLink 身份的最小消息、媒体与一次性 Owner 绑定网关。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"
@@ -36,6 +36,14 @@ options:
   allowed_user_ids: []
   max_media_bytes: 20971520
   spool_ttl_seconds: 86400
+  notification_bridge_enabled: false
+  notification_mqtt_host: ""
+  notification_mqtt_port: 1883
+  notification_mqtt_username: ""
+  notification_mqtt_password: ""
+  notification_mqtt_tls: false
+  notification_allowed_audiences:
+    - "owner"
 schema:
   attachment_api_token: password
   poller_enabled: bool
@@ -52,3 +60,11 @@ schema:
     - str
   max_media_bytes: "int(1024,52428800)"
   spool_ttl_seconds: "int(300,604800)"
+  notification_bridge_enabled: bool
+  notification_mqtt_host: str
+  notification_mqtt_port: "int(1,65535)"
+  notification_mqtt_username: "str?"
+  notification_mqtt_password: "password?"
+  notification_mqtt_tls: bool
+  notification_allowed_audiences:
+    - str

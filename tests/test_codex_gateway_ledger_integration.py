@@ -79,6 +79,7 @@ class AttachmentBridgeIntegrationTests(unittest.TestCase):
                     gateway_base_url=f"http://localhost:{gateway.server_port}",
                     gateway_token=gateway_token,
                 )
+                router.begin_job("fixture-integration-job", "fixture-integration-message")
                 result = router.call(
                     "ledger_attach",
                     {

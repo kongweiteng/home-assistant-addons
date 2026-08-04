@@ -42,6 +42,14 @@ TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 PARAMETER_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
 IDENTITY_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 SHA256_RE = re.compile(r"^sha256:([a-f0-9]{64})$")
+NATIVE_INTENT_FIELDS = frozenset(
+    {"version", "action_type", "target", "idempotency_key"}
+)
+NATIVE_AUTHORIZATION_REQUEST_FIELDS = frozenset({"version", "action_id"})
+EXECUTION_REQUEST_FIELDS = frozenset(
+    {"version", "receipt_id", "action_id", "proposal_hash", "idempotency_key"}
+)
+RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 
 SENSITIVE_KEY_PARTS = (
     "accesskey",
@@ -125,7 +133,7 @@ def parse_timestamp(value: Any, *, field: str) -> datetime:
 
 def parse_owner_hashes(raw: str) -> frozenset[str]:
     owners = frozenset(item.strip().lower() for item in raw.split(",") if item.strip())
-    if not owners or any(not IDENTITY_HASH_RE.fullmatch(item) for item in owners):
+    if any(not IDENTITY_HASH_RE.fullmatch(item) for item in owners):
         raise ContractError("invalid_owner_config", "Trusted owner hash configuration is invalid")
     return owners
 
@@ -202,6 +210,73 @@ def _proposal_hash(proposal: dict[str, Any]) -> tuple[str, str]:
     parameter_hash = sha256_text(canonical_json(hash_document["parameter_summary"]))
     proposal_hash = sha256_text(canonical_json(hash_document))
     return parameter_hash, proposal_hash
+
+
+def validate_native_intent(
+    intent: Any, *, restart_addon_allowlist: frozenset[str]
+) -> dict[str, str]:
+    """Validate the only executable intent without accepting arbitrary parameters."""
+    if not isinstance(intent, dict) or set(intent) != NATIVE_INTENT_FIELDS:
+        raise ContractError("invalid_intent", "Operation intent fields are invalid")
+    if intent["version"] != 1:
+        raise ContractError("unsupported_version", "Operation intent version is unsupported")
+    if intent["action_type"] != "restart_addon":
+        raise ContractError("unsupported_action", "Only restart_addon is implemented")
+    target = intent["target"]
+    if not isinstance(target, str) or not re.fullmatch(r"^[a-z0-9][a-z0-9_]{0,63}$", target):
+        raise ContractError("invalid_addon_slug", "Add-on target must be an exact slug")
+    if target not in restart_addon_allowlist:
+        raise ContractError("target_not_allowlisted", "Add-on target is not allowlisted")
+    idempotency_key = intent["idempotency_key"]
+    if not isinstance(idempotency_key, str) or not SHA256_RE.fullmatch(idempotency_key):
+        raise ContractError(
+            "invalid_idempotency_key", "idempotency_key must be a SHA-256 identifier"
+        )
+    return {
+        "action_type": "restart_addon",
+        "target": target,
+        "idempotency_key": idempotency_key,
+    }
+
+
+def validate_native_authorization_request(value: Any) -> str:
+    if not isinstance(value, dict) or set(value) != NATIVE_AUTHORIZATION_REQUEST_FIELDS:
+        raise ContractError(
+            "invalid_authorization_request", "Authorization request fields are invalid"
+        )
+    if value["version"] != 1:
+        raise ContractError("unsupported_version", "Authorization request version is unsupported")
+    action_id = value["action_id"]
+    if not isinstance(action_id, str) or not ACTION_ID_RE.fullmatch(action_id):
+        raise ContractError("invalid_action_id", "Action ID is invalid")
+    return action_id
+
+
+def validate_execution_request(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != EXECUTION_REQUEST_FIELDS:
+        raise ContractError("invalid_execution_request", "Execution request fields are invalid")
+    if value["version"] != 1:
+        raise ContractError("unsupported_version", "Execution request version is unsupported")
+    action_id = value["action_id"]
+    receipt_id = value["receipt_id"]
+    proposal_hash = value["proposal_hash"]
+    idempotency_key = value["idempotency_key"]
+    if not isinstance(action_id, str) or not ACTION_ID_RE.fullmatch(action_id):
+        raise ContractError("invalid_action_id", "Action ID is invalid")
+    if not isinstance(receipt_id, str) or not RECEIPT_ID_RE.fullmatch(receipt_id):
+        raise ContractError("invalid_receipt_id", "Receipt ID is invalid")
+    if not isinstance(proposal_hash, str) or not SHA256_RE.fullmatch(proposal_hash):
+        raise ContractError("invalid_hash", "Proposal hash is invalid")
+    if not isinstance(idempotency_key, str) or not SHA256_RE.fullmatch(idempotency_key):
+        raise ContractError(
+            "invalid_idempotency_key", "idempotency_key must be a SHA-256 identifier"
+        )
+    return {
+        "action_id": action_id,
+        "receipt_id": receipt_id,
+        "proposal_hash": proposal_hash,
+        "idempotency_key": idempotency_key,
+    }
 
 
 def validate_envelope(

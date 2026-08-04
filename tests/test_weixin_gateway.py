@@ -9,10 +9,12 @@ from pathlib import Path
 import secrets
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 from weixin_gateway.protocol import (
     ProtocolError,
+    SESSION_EXPIRED_ERRCODE,
     aes128_ecb_decrypt,
     aes128_ecb_encrypt,
     assert_cdn_url,
@@ -53,6 +55,17 @@ class StubController:
 
     async def close(self) -> None:
         return None
+
+
+class CompletedController(StubController):
+    configured = True
+
+    def __init__(self) -> None:
+        self.job_calls = 0
+
+    async def job(self, _job_id: str) -> dict:
+        self.job_calls += 1
+        return {"state": "completed", "result": "完成"}
 
 
 class StubIlinkClient:
@@ -115,6 +128,10 @@ class StubHttpSession:
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_http_server_version_matches_addon_version(self) -> None:
+        api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
+        self.assertIn('server_version = "WeixinGateway/0.1.4"', api_source)
+
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
         plaintext = "合成微信图片".encode("utf-8")
@@ -397,6 +414,59 @@ class ServiceTests(unittest.TestCase):
         reopened = GatewayStore(self.store.database_path, data_dir=self.root / "data")
         submitted = reopened.submitted()
         self.assertEqual(submitted[0]["controller_job_id"], "fixture-controller-job")
+
+    def test_session_expired_keeps_completed_result_pending_without_weixin_retry(self) -> None:
+        message = self.store.store_message(
+            message_id="fixture-session-expired",
+            sender_id="fixture-owner",
+            conversation_key="sha256:fixture",
+            text="查询",
+            media=[],
+        )
+        self.store.mark_submitted(message["message_id"], "fixture-controller-job")
+        service = self.service()
+        controller = CompletedController()
+        service.controller = controller  # type: ignore[assignment]
+        service.poller_state = "session_expired"
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertEqual(controller.job_calls, 1)
+        self.assertEqual(len(service.client.sent), 0)  # type: ignore[union-attr]
+        self.assertEqual(len(self.store.submitted()), 1)
+
+    def test_send_session_expiry_stops_followup_outbound_attempts(self) -> None:
+        service = self.service()
+        assert service.identity is not None
+        self.identity_store.set_context(service.identity, "fixture-owner", "fixture-context")
+
+        class ExpiredSendClient(StubIlinkClient):
+            async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+                await super().send_text(to_user_id, text, context_token, client_id)
+                return {"errcode": SESSION_EXPIRED_ERRCODE}
+
+        service.client = ExpiredSendClient()  # type: ignore[assignment]
+        message = {"controller_job_id": "fixture-controller-job", "sender_id": "fixture-owner"}
+
+        async def exercise() -> None:
+            with self.assertRaises(StoreError) as first:
+                await service._send_result(message, "完成")
+            self.assertEqual(first.exception.code, "session_expired")
+            self.assertEqual(service.poller_state, "session_expired")
+            with self.assertRaises(StoreError) as second:
+                await service._send_result(message, "完成")
+            self.assertEqual(second.exception.code, "session_expired")
+
+        self.run_async(exercise())
+        self.assertEqual(len(service.client.sent), 1)  # type: ignore[union-attr]
+        self.assertEqual(service.client.sent[0]["context_token"], "fixture-context")  # type: ignore[union-attr]
+        self.assertEqual(self.identity_store.context(service.identity, "fixture-owner"), "fixture-context")
 
     def test_controller_client_submits_and_recovers_job_asynchronously(self) -> None:
         session = StubHttpSession()

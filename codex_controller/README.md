@@ -19,8 +19,10 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
 - `0.1.3` 增加微信图片的受控 `localImage` 输入：Controller 通过 Gateway 非消费预览读取图片，在私有目录校验并暂存，Turn 完成后自动清理；原附件引用仍可由装修工具一次性消费。
 - `0.1.4` 明确微信是通用 Codex 入口：普通问答、讨论、分析、写作和规划默认直接回答，只有确实需要装修账本或 Home Assistant 操作时才调用对应结构化工具。
+- `0.1.5` 增加 app-server 运行态 fail-closed、watchdog 故障状态和 `recovery_required` 人工核对阻塞；状态未知的 Turn 不会自动重放或允许后续作业越过。
+- `0.1.6` 增加 Operations Broker 固定路由、按实际配置过滤工具，以及由 Controller 基于微信消息上下文生成的稳定写入幂等键。
 - 默认仍不启用正式微信任务入口。
-- Hermes 在正式切换验收前继续承担微信与记账任务。
+- 旧 Hermes iLink 身份已经失效；装修 writer 尚未迁移，但微信恢复不能依赖恢复旧 Hermes 进程。
 
 ## 安全边界
 
@@ -31,6 +33,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - Gateway 附件 bearer 也只保留在 Controller 主进程；模型仅能提交短期 `attachment_ref`。图片预览文件固定写入私有 `/data/turn-media`，权限为 `0600`，不使用微信文件名构造路径。
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
 - Controller 重启后，状态不确定的运行中作业进入 `recovery_required`，不会自动重放写操作。
+- 写工具只在当前活动 Turn 的上下文中可调用；Turn 结束后上下文立即清除，同一微信消息的同语义调用复用相同幂等键，不同消息生成不同幂等键。
 
 ## 本地验证
 

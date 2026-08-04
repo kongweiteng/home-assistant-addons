@@ -1,135 +1,104 @@
-# HA Operations Broker documentation
+# HA Operations Broker 使用说明
 
-## Status
+## 当前状态
 
-Version `0.2.0` is a source-only P6-A canary. It adds a Broker-owned Passkey
-authorization root to the P5 read-only preflight service. Do not install it as
-a production operations executor. It has no execution endpoint and always
-returns `execution_allowed: false`.
+版本 `0.3.0` 提供只读预检、Broker 自有 Passkey 授权根和一个默认关闭的最小写执行器。唯一实现的写动作是 `restart_addon`；HACS、官方 Integration、页面整理、备份、Recorder、缓存和其他 Add-on 生命周期动作仍未实现。
 
-## Configuration
+源码与本地测试通过不等于已经在正式 HAOS 完成权限、Passkey、重启或恢复验收。
 
-- `broker_api_token`: random value of at least 32 characters, stored only in
-  Home Assistant private app options.
-- `trusted_owner_identity_hashes`: lowercase SHA-256 hashes of exact
-  `weixin:user_id` identities. These remain structural P4 evidence only.
-- `webauthn_rp_id`: the exact WebAuthn relying-party domain, without scheme,
-  port, path, or wildcard.
-- `webauthn_allowed_origins`: one or more exact HTTPS origins whose host equals
-  the RP ID or is a subdomain of it. Do not include paths, queries, fragments,
-  credentials, or wildcards.
-- `passkey_enrollment_token`: temporary random value of at least 32 characters.
-  Configure it only while enrolling intended HA admin users, then clear it and
-  restart the app. It must never be sent through Hermes or Weixin.
-- `passkey_challenge_ttl_seconds`: one-time in-memory WebAuthn challenge TTL,
-  default 180 and limited to 60-600 seconds.
-- `max_passkeys`: maximum independent HA operator credentials, default 8.
-- `max_pending_passkey_flows`: in-memory challenge cap, default 100.
-- `max_request_bytes`: bounded JSON body size, default 32768.
-- `supervisor_timeout_seconds`: read-only Supervisor information timeout.
+## 配置
 
-The app is manual and experimental. Ingress uses internal port `8098`; the port
-is not mapped to the host. `panel_admin: true` makes the sidebar entry available
-only to Home Assistant admins. Supervisor supplies the authenticated
-`X-Remote-User-Id`; the Broker persists only
-`sha256("ha-user:" + X-Remote-User-Id)`.
+- `broker_api_token`：至少 32 字符的内部 bearer，只保存在 Add-on 私有 options。
+- `trusted_owner_identity_hashes`：旧 P4 envelope 兼容预检所需的结构性 owner 哈希；Broker 原生提案不依赖它批准执行。
+- `webauthn_rp_id` / `webauthn_allowed_origins`：稳定且精确的 HTTPS WebAuthn RP 与 origin。
+- `passkey_enrollment_token`：临时注册令牌；完成注册后必须清空并重启。
+- `passkey_challenge_ttl_seconds`：一次性 challenge 有效期，60–600 秒。
+- `proposal_ttl_seconds`：Broker 原生提案和对应授权收据有效期，60–1800 秒。
+- `execution_enabled`：总执行开关，默认 `false`。
+- `enabled_actions`：动作开关，当前只允许空列表或仅包含 `restart_addon`，默认空。
+- `restart_addon_allowlist`：可重启的精确 Add-on slug，默认空。
 
-Passkeys require a browser secure context. The configured Home Assistant origin
-must use HTTPS and remain stable. Example placeholders:
+即使 `hassio_role` 为 `manager`，下面三个执行条件缺一不可：
 
-```yaml
-webauthn_rp_id: example.invalid
-webauthn_allowed_origins:
-  - https://ha.example.invalid
+1. `execution_enabled: true`
+2. `enabled_actions: [restart_addon]`
+3. 目标 slug 位于 `restart_addon_allowlist`
+
+## Broker 原生提案
+
+`POST /v1/proposals` 使用内部 bearer，只接受以下精确 JSON：
+
+```json
+{
+  "version": 1,
+  "action_type": "restart_addon",
+  "target": "example_addon",
+  "idempotency_key": "sha256:64位小写十六进制"
+}
 ```
 
-Do not copy these placeholders as real configuration.
+不接受 `parameters`、URL、路径、命令、配置、自由文本或其他动作。Broker 生成 `action_id`、风险、备份要求、验证/回滚说明、到期时间和 `proposal_hash`，并将其持久化。相同幂等键和相同 intent 返回同一提案；相同键绑定不同目标时拒绝。
 
-## Enrollment
+## Passkey 授权
 
-1. Generate a random enrollment token outside Hermes and store it in the
-   private app options.
-2. Start the app and open **HA 操作审批** as the intended HA admin.
-3. Enter the enrollment token in the Ingress page and register the platform
-   Passkey. Registration requires browser user verification.
-4. Repeat for each intended HA admin operator, up to `max_passkeys`.
-5. Clear `passkey_enrollment_token` from app options and restart. Existing
-   credentials remain in `/data/authorization/passkeys.sqlite3`.
+1. `POST /v1/authorization/requests` 提交 `{"version":1,"action_id":"..."}`。
+2. HA 管理员从 Ingress 打开对应 `approval_id`。
+3. 已注册的 Passkey 在精确 RP/origin 下完成用户验证。
+4. Broker 生成绑定 action、proposal hash、HA 用户哈希、credential 哈希和有效期的一次性收据。
 
-The database directory is mode `0700`, the SQLite file is mode `0600`, and
-SQLite uses `journal_mode=DELETE`, `synchronous=FULL`, and transactions. It
-stores credential verification material, signature counters, HA user hashes,
-immutable proposal summaries, and receipts. It does not store private keys,
-biometrics, raw HA/Weixin identities, enrollment tokens, or WebAuthn challenge
-state.
+授权本身不会调用 Supervisor。浏览器也没有执行按钮；执行只能由内部 bearer API 发起。
 
-## Internal API
+## 执行 API
 
-All `/v1/*` requests require
-`Authorization: Bearer <broker_api_token>` and JSON request-size limits.
+`POST /v1/executions` 只接受：
 
-### `POST /v1/preflight`
+```json
+{
+  "version": 1,
+  "receipt_id": "RCPT-...",
+  "action_id": "OPS-...",
+  "proposal_hash": "sha256:...",
+  "idempotency_key": "sha256:..."
+}
+```
 
-Accepts the existing P4 proposal/approval envelope, performs only fixed
-Supervisor GET observations, and returns structural assurance with execution
-disabled.
+执行过程：
 
-### `POST /v1/authorization/requests`
+1. 校验运行开关、动作开关和当前目标白名单。
+2. 读取 Broker 原生提案并核对 action/hash/idempotency。
+3. 在同一 SQLite 写事务中确认 Passkey 收据未过期、未消费且来自 Broker 原生提案，然后立即消费并建立 `authorized` 执行记录。
+4. 读取 `/addons/<slug>/info`，要求精确 slug、已安装且状态为 `started`。
+5. 只调用固定 `/addons/<slug>/restart`。
+6. 再次读取精确 Add-on 信息，要求状态恢复为 `started` 且版本未变化。
 
-Accepts the same P4 envelope. The Broker revalidates the immutable proposal,
-code-owned risk, backup requirement, owner hash, state, hashes, and TTL, then
-creates an opaque `approval_id`. A repeated action ID with the same proposal
-hash is idempotent; a different proposal hash is rejected.
+`GET /v1/executions/<action_id>` 查询持久状态。相同执行请求重放只返回既有记录，不重复调用 Supervisor。
 
-The returned request includes only the bounded, secret-rejected proposal fields
-needed for human review. It cannot approve or execute an operation.
+## 状态与恢复
 
-### `GET /v1/authorization/requests/<approval_id>`
+- `authorized`：收据已单次消费，尚未开始 Supervisor 写调用。
+- `executing`：正在调用固定重启端点。
+- `verifying`：重启调用已返回，正在执行后验。
+- `succeeded`：后验通过。
+- `failed`：写调用前的预检失败，没有发出重启。
+- `recovery_required`：写调用或后验结果不确定、后验不匹配，或 Broker 在中间状态重启。
 
-Returns the request state and, after a successful Passkey assertion, the local
-`passkey_verified` receipt. The receipt binds the action ID, proposal hash,
-hashed HA user, hashed credential ID, authorization time, and expiry. It always
-contains `execution_allowed: false`.
+Broker 启动时不会自动恢复或重放中间状态。任何 `authorized/executing/verifying` 记录都会变为 `recovery_required`，后续 `start`、恢复备份或其他补偿动作必须另行设计和授权。
 
-## Ingress API
+## Passkey 数据与隐私
 
-- `GET /api/context?approval_id=<opaque-id>` returns a review document only to
-  an authenticated HA Ingress user. Its optional receipt summary exposes only
-  the opaque receipt ID, authorization time, and assurance; HA user hashes,
-  credential hashes, and the full internal receipt remain on the bearer API.
-- `POST /api/passkeys/register/begin|complete` requires the authenticated HA
-  user, an exact configured Origin header, and the private enrollment token.
-- `POST /api/approvals/<approval_id>/begin|complete` requires the authenticated
-  HA user, exact origin, an enrolled credential for that user, user verification,
-  and a valid one-time challenge.
+数据库目录权限为 `0700`，文件为 `0600`，SQLite 使用 `journal_mode=DELETE`、`synchronous=FULL` 和事务。不会保存原始 HA/微信身份、enrollment token、生物特征、私钥或 challenge state。
 
-The page displays the action ID, type, exact logical target, risk, backup
-requirement, parameter summary, expected change, validation, rollback, and
-expiry before requesting a Passkey assertion. Challenges are stored only in
-memory and are bound server-side to the approval ID, proposal hash, HA user
-hash, and expiry. Restart, timeout, user mismatch, origin/RP mismatch, invalid
-signature, counter rollback, or replay fails closed.
+Ingress 上下文只显示最小收据摘要；完整哈希和执行状态只通过内部 bearer API 返回。日志不会回显 options、Token、Supervisor 响应全文或私有标识。
 
-## Dependency integrity
+## 正式启用前门禁
 
-The image downloads `fido2 2.2.1` as a fixed wheel and verifies SHA-256
-`ed397da981b9ab133da6ead7309e41f924b566b749956129efe286fae097749f`
-before installation. Debian's packaged `python3-cryptography` supplies the
-cryptographic backend. No WebAuthn signature algorithm is implemented locally.
+- 核对当前 Home Assistant Supervisor 版本的 `manager` 权限矩阵。
+- 完成真实 HTTPS Ingress 的 Passkey 注册、确认、过期、重放和重启恢复 E2E。
+- 准备新鲜完整备份并验证离机副本；备份恢复仍是独立高风险动作。
+- 首次 canary 只允许一个精确、处于只读业务模式的 Add-on slug。
+- 验证执行前后版本、状态、Ingress/health、业务 writer 模式、数据计数和权限/端口均未扩大。
+- 未完成这些生产门禁时必须保持 `execution_enabled: false`。
 
-## Current limitations
+## 回滚
 
-- Hermes is not yet connected to the authorization-request API.
-- The app has not been installed or browser-tested on a real HAOS Ingress
-  origin.
-- Passkey receipts are not consumed because no write executor exists.
-- Supervisor remains `default`; manager, backup, Core, HACS, and cleanup writes
-  remain outside the source.
-
-## Rollback
-
-Because `0.2.0` is not a production executor, source rollback means keeping the
-app uninstalled or stopped. A future authorized canary can be rolled back by
-stopping/uninstalling it and removing its private options. Deleting the private
-authorization database removes enrolled Passkeys and receipts and must be a
-separately authorized production-data action.
+本地源码回滚可恢复 `0.2.0` 并保持执行关闭。正式 HAOS 回滚需要独立授权：先关闭 `execution_enabled`，确认没有中间执行，再停止/降级 Add-on。删除授权数据库会移除 Passkey、提案、收据和审计记录，属于生产数据清理，不得自动执行。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -13,9 +14,10 @@ import threading
 import time
 import unittest
 
-from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS
+from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
 from codex_controller.app_server import AppServerClient, AppServerError
 from codex_controller.main import normalize_codex_model, normalize_openai_base_url, read_api_key_from_fd, write_codex_config
+from codex_controller.mcp_proxy import tool_catalog
 from codex_controller.media_input import TurnMediaManager
 from codex_controller.service import ControllerService
 from codex_controller.store import ControllerStore, StoreError
@@ -32,6 +34,41 @@ def fixture_job(message_id: str = "fixture-message-1", text: str = "查询装修
         "attachments": [],
         "reply_capabilities": ["text", "image"],
     }
+
+
+def controller_request(
+    service: object,
+    method: str,
+    path: str,
+    *,
+    payload: dict | None = None,
+    authorized: bool = False,
+) -> tuple[int, dict]:
+    token = "t" * 32
+    server = create_server(
+        "127.0.0.1",
+        0,
+        service=service,  # type: ignore[arg-type]
+        api_token=token,
+        max_request_bytes=1024 * 1024,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    if authorized:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        document = json.loads(response.read())
+        return response.status, document
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
 
 
 FAKE_APP_SERVER = r'''
@@ -116,6 +153,63 @@ class ControllerStoreTests(unittest.TestCase):
         recovered = self.store.get_job(running["job_id"])
         self.assertEqual(recovered["state"], "recovery_required")
         self.assertEqual(recovered["error_code"], "turn_state_unknown")
+
+    def test_recovery_required_blocks_queue_until_explicit_audited_resolution(self) -> None:
+        self.store.create_job(fixture_job("fixture-message-1"))
+        self.store.create_job(fixture_job("fixture-message-2"))
+        running = self.store.claim_next()
+        assert running is not None
+        self.store.recover_running()
+
+        self.assertIsNone(self.store.claim_next())
+        with self.assertRaises(StoreError) as invalid:
+            self.store.resolve_recovery(running["job_id"], "retry")
+        self.assertEqual(invalid.exception.code, "invalid_recovery_resolution")
+
+        resolved = self.store.resolve_recovery(running["job_id"], "confirmed_failed")
+        self.assertEqual(resolved["state"], "failed")
+        self.assertEqual(resolved["error_code"], "recovery_review_failed")
+        with self.store._connect() as connection:
+            event = connection.execute(
+                "SELECT event_type,item_type,error_code FROM job_events WHERE job_id=? ORDER BY id DESC LIMIT 1",
+                (running["job_id"],),
+            ).fetchone()
+        self.assertEqual(dict(event), {
+            "event_type": "recovery_resolved",
+            "item_type": "confirmed_failed",
+            "error_code": "recovery_review_failed",
+        })
+        next_job = self.store.claim_next()
+        self.assertIsNotNone(next_job)
+        self.assertEqual(next_job["message_id"], "fixture-message-2")
+
+    def test_recovery_resolution_api_requires_explicit_bearer_action(self) -> None:
+        self.store.create_job(fixture_job())
+        running = self.store.claim_next()
+        assert running is not None
+        self.store.recover_running()
+
+        class RecoveryService:
+            def __init__(inner_self, store: ControllerStore):
+                inner_self.store = store
+
+        path = f"/internal/v1/jobs/{running['job_id']}/recovery-resolution"
+        unauthorized_status, _ = controller_request(
+            RecoveryService(self.store),
+            "POST",
+            path,
+            payload={"resolution": "confirmed_completed"},
+        )
+        self.assertEqual(unauthorized_status, 401)
+        status, document = controller_request(
+            RecoveryService(self.store),
+            "POST",
+            path,
+            payload={"resolution": "confirmed_completed"},
+            authorized=True,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(document["result"]["state"], "completed")
 
 
 class AppServerClientTests(unittest.TestCase):
@@ -340,6 +434,9 @@ class ControllerAuthenticationTests(unittest.TestCase):
         def __init__(self, *, auth_mode: str | None = None) -> None:
             self.auth_mode = auth_mode
             self.account_ready = auth_mode is not None
+            self.running = True
+            self.initialized = True
+            self.protocol_error: str | None = None
             self.notification_handler = None
             self.api_key_calls: list[str] = []
 
@@ -351,9 +448,9 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
         def status(self) -> dict:
             return {
-                "running": True,
-                "initialized": True,
-                "protocol_error": None,
+                "running": self.running,
+                "initialized": self.initialized,
+                "protocol_error": self.protocol_error,
                 "account": {"auth_mode": self.auth_mode, "plan_type": None, "ready": self.account_ready},
             }
 
@@ -394,6 +491,41 @@ class ControllerAuthenticationTests(unittest.TestCase):
             self.assertTrue(status["intake_enabled"])
             self.assertNotIn(secret, json.dumps(status, ensure_ascii=False))
             self.assertNotIn(secret.encode(), (Path(temporary.name) / "controller.sqlite3").read_bytes())
+        finally:
+            service.stop()
+            temporary.cleanup()
+
+    def test_runtime_failure_disables_intake_and_returns_watchdog_failure(self) -> None:
+        app = self.StubApp(auth_mode="apiKey")
+        temporary, service = self.make_service(app, auth_mode="api_key", api_key="fixture-api-key-value")
+        try:
+            self.assertTrue(service.intake_enabled)
+            for field, value in (
+                ("running", False),
+                ("initialized", False),
+                ("protocol_error", "app_server_protocol_error"),
+            ):
+                with self.subTest(field=field):
+                    app.running = True
+                    app.initialized = True
+                    app.protocol_error = None
+                    setattr(app, field, value)
+                    self.assertFalse(service.intake_enabled)
+                    status, document = controller_request(service, "GET", "/healthz")
+                    self.assertEqual(status, 503)
+                    self.assertEqual(document, {"ready": False, "status": "runtime_failed"})
+        finally:
+            service.stop()
+            temporary.cleanup()
+
+    def test_auth_not_ready_keeps_watchdog_healthy_without_enabling_intake(self) -> None:
+        app = self.StubApp()
+        temporary, service = self.make_service(app, auth_mode="chatgpt_device_code")
+        try:
+            self.assertFalse(service.intake_enabled)
+            status, document = controller_request(service, "GET", "/healthz")
+            self.assertEqual(status, 200)
+            self.assertEqual(document, {"ready": False, "status": "ok"})
         finally:
             service.stop()
             temporary.cleanup()
@@ -485,8 +617,29 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn("CONTROLLER_CODEX_MODEL", run_script)
         self.assertNotIn("export CONTROLLER_OPENAI_API_KEY=", run_script)
 
+    def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "codex_controller"
+        expected = "0.1.6"
+        self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
+        for relative in (
+            "codex_controller/service.py",
+            "codex_controller/app_server.py",
+            "codex_controller/mcp_proxy.py",
+            "README.md",
+            "CHANGELOG.md",
+        ):
+            with self.subTest(relative=relative):
+                self.assertIn(expected, (root / relative).read_text(encoding="utf-8"))
+
 
 class ToolRouterTests(unittest.TestCase):
+    def test_mcp_catalog_filters_unconfigured_tools_and_operations_schemas_are_closed(self) -> None:
+        catalog = tool_catalog(["ledger_summary", "ha_operations_propose_restart"])
+        self.assertEqual([tool["name"] for tool in catalog], ["ledger_summary", "ha_operations_propose_restart"])
+        operations = catalog[1]["inputSchema"]
+        self.assertFalse(operations["additionalProperties"])
+        self.assertEqual(operations["required"], ["target"])
+
     def test_internal_url_rejects_ip_paths_and_credentials(self) -> None:
         self.assertEqual(validate_base_url("http://renovation-hub:8101"), "http://renovation-hub:8101")
         for value in ("https://service", "http://127.0.0.1:8101", "http://user@service", "http://service/private"):
@@ -509,6 +662,130 @@ class ToolRouterTests(unittest.TestCase):
         with self.assertRaises(ToolProxyError) as context:
             router.call("execute_shell", {})
         self.assertEqual(context.exception.code, "unknown_tool")
+
+    def test_operations_routes_are_closed_and_proposal_idempotency_is_controller_derived(self) -> None:
+        observed: list[tuple[str, str, dict | None]] = []
+
+        def fake_request(method: str, url: str, _token: str, payload: dict | None) -> dict:
+            observed.append((method, url, payload))
+            return {"version": 1, "result": {"ok": True}}
+
+        router = ToolRouter(
+            operations_base_url="http://ha-operations-broker:8098",
+            operations_token="o" * 32,
+            request_json=fake_request,
+        )
+        self.assertIn("ha_operations_execute_restart", router.available_tools())
+        with self.assertRaises(ToolProxyError) as no_context:
+            router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+        self.assertEqual(no_context.exception.code, "tool_context_unavailable")
+
+        router.begin_job("fixture-ops-job", "fixture-ops-message")
+        router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+        first_payload = observed[-1][2]
+        assert first_payload is not None
+        self.assertEqual(observed[-1][0:2], ("POST", "http://ha-operations-broker:8098/v1/proposals"))
+        self.assertRegex(first_payload["idempotency_key"], r"^sha256:[a-f0-9]{64}$")
+        router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+        self.assertEqual(observed[-1][2], first_payload)
+
+        with self.assertRaises(ToolProxyError) as extra:
+            router.call(
+                "ha_operations_authorization_request",
+                {"action_id": "OPS-20260804-ABCDEF123456", "unexpected": True},
+            )
+        self.assertEqual(extra.exception.code, "invalid_arguments")
+        router.call("ha_operations_authorization_request", {"action_id": "OPS-20260804-ABCDEF123456"})
+        self.assertEqual(
+            observed[-1],
+            (
+                "POST",
+                "http://ha-operations-broker:8098/v1/authorization/requests",
+                {"version": 1, "action_id": "OPS-20260804-ABCDEF123456"},
+            ),
+        )
+        router.call("ha_operations_authorization_status", {"approval_id": "approval-fixture-1234"})
+        self.assertEqual(
+            observed[-1],
+            (
+                "GET",
+                "http://ha-operations-broker:8098/v1/authorization/requests/approval-fixture-1234",
+                None,
+            ),
+        )
+        router.call(
+            "ha_operations_execute_restart",
+            {
+                "receipt_id": "RCPT-" + "C" * 32,
+                "action_id": "OPS-20260804-ABCDEF123456",
+                "proposal_hash": "sha256:" + "a" * 64,
+                "idempotency_key": "sha256:" + "b" * 64,
+            },
+        )
+        self.assertEqual(observed[-1][0:2], ("POST", "http://ha-operations-broker:8098/v1/executions"))
+        router.call("ha_operations_execution_status", {"action_id": "OPS-20260804-ABCDEF123456"})
+        self.assertEqual(
+            observed[-1],
+            ("GET", "http://ha-operations-broker:8098/v1/executions/OPS-20260804-ABCDEF123456", None),
+        )
+        valid_execution = {
+            "receipt_id": "RCPT-" + "C" * 32,
+            "action_id": "OPS-20260804-ABCDEF123456",
+            "proposal_hash": "sha256:" + "a" * 64,
+            "idempotency_key": "sha256:" + "b" * 64,
+        }
+        for field, invalid_value in (
+            ("receipt_id", "not-a-receipt"),
+            ("action_id", "invalid-action"),
+            ("proposal_hash", "sha256:short"),
+            ("idempotency_key", "sha256:short"),
+        ):
+            with self.subTest(field=field):
+                invalid_payload = {**valid_execution, field: invalid_value}
+                with self.assertRaises(ToolProxyError) as invalid_execution:
+                    router.call("ha_operations_execute_restart", invalid_payload)
+                self.assertEqual(invalid_execution.exception.code, "invalid_arguments")
+        with self.assertRaises(ToolProxyError) as extra_execution:
+            router.call("ha_operations_execute_restart", {**valid_execution, "extra": True})
+        self.assertEqual(extra_execution.exception.code, "invalid_arguments")
+
+        with self.assertRaises(ToolProxyError) as invalid_slug:
+            router.call("ha_operations_propose_restart", {"target": "LOCAL-invalid"})
+        self.assertEqual(invalid_slug.exception.code, "invalid_target")
+
+        first_idempotency = first_payload["idempotency_key"]
+        router.clear_job("fixture-ops-job")
+        router.begin_job("fixture-ops-job-2", "fixture-ops-message-2")
+        router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+        self.assertNotEqual(observed[-1][2]["idempotency_key"], first_idempotency)
+
+    def test_turn_completion_clears_tool_context(self) -> None:
+        router = ToolRouter(
+            operations_base_url="http://ha-operations-broker:8098",
+            operations_token="o" * 32,
+            request_json=lambda *_args: {"version": 1, "result": {"ok": True}},
+        )
+        router.begin_job("fixture-context-job", "fixture-context-message")
+        router.bind_turn("fixture-context-job", "turn-context")
+
+        class App:
+            notification_handler = None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            service = ControllerService(
+                store,
+                App(),  # type: ignore[arg-type]
+                intake_enabled=False,
+                tool_context=router,
+            )
+            service.handle_notification(
+                {"method": "turn/completed", "params": {"turn": {"id": "turn-context", "status": "completed"}}}
+            )
+
+        with self.assertRaises(ToolProxyError) as context:
+            router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+        self.assertEqual(context.exception.code, "tool_context_unavailable")
 
     def test_attachment_ref_is_consumed_from_gateway_and_forwarded_only_as_content(self) -> None:
         content = "合成附件".encode("utf-8")
@@ -553,6 +830,7 @@ class ToolRouterTests(unittest.TestCase):
                 gateway_token=gateway_token,
                 request_json=fake_request,
             )
+            router.begin_job("fixture-job-attach", "fixture-message-attach")
             self.assertIn("ledger_attach", router.available_tools())
             result = router.call(
                 "ledger_attach",
@@ -636,6 +914,7 @@ class ToolRouterTests(unittest.TestCase):
             gateway_token="g" * 32,
             stream_media=fake_stream,
         )
+        router.begin_job("fixture-job-media", "fixture-message-media")
         result = router.call(
             "renovation_media_ingest",
             {
@@ -700,7 +979,18 @@ class ControllerServiceRaceTests(unittest.TestCase):
             class StubApp:
                 notification_handler = None
 
-            service = ControllerService(store, StubApp(), intake_enabled=True)  # type: ignore[arg-type]
+            router = ToolRouter(
+                operations_base_url="http://ha-operations-broker:8098",
+                operations_token="o" * 32,
+                request_json=lambda *_args: {"version": 1, "result": {"ok": True}},
+            )
+            router.begin_job(running["job_id"], running["message_id"])
+            service = ControllerService(
+                store,
+                StubApp(),  # type: ignore[arg-type]
+                intake_enabled=True,
+                tool_context=router,
+            )
             service.handle_notification(
                 {"method": "item/completed", "params": {"turnId": "turn-fast", "item": {"type": "agentMessage", "text": "完成"}}}
             )
@@ -708,11 +998,15 @@ class ControllerServiceRaceTests(unittest.TestCase):
                 {"method": "turn/completed", "params": {"turn": {"id": "turn-fast", "status": "completed"}}}
             )
             store.assign_thread(running["job_id"], "thread-fast")
+            router.bind_turn(running["job_id"], "turn-fast")
             store.assign_turn(running["job_id"], "turn-fast")
             service._flush_turn_events("turn-fast")
             completed = store.get_job(job["job_id"])
             self.assertEqual(completed["state"], "completed")
             self.assertEqual(completed["result"], "完成")
+            with self.assertRaises(ToolProxyError) as context:
+                router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+            self.assertEqual(context.exception.code, "tool_context_unavailable")
 
 
 if __name__ == "__main__":

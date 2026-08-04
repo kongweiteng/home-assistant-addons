@@ -60,11 +60,15 @@ Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Co
 - 多个微信会话分别映射到持久 Codex Thread。
 - 全局只有一个 `running` 作业；其他作业按创建顺序排队。
 - 作业在发起 `turn/start` 前先进入受保护运行态。请求超时、进程退出或重启导致副作用未知时，作业进入 `recovery_required`。
-- `recovery_required` 必须在 Ingress 中核对 Turn、Ledger 幂等记录或 Broker 收据后人工处理，不能自动重放。
+- 任一 `recovery_required` 会阻断后续 queued 作业调度；必须先核对 Turn、Ledger 幂等记录或 Broker 收据，不能自动重放。
+- 核对完成后，由管理员使用内部 bearer 调用 `POST /internal/v1/jobs/<job_id>/recovery-resolution`，正文只允许 `{"resolution":"confirmed_completed"}`、`confirmed_failed` 或 `cancelled`。结论会写入作业事件台账，然后队列才可继续。
+- app-server 进程退出、未初始化或发生协议错误时，`intake_enabled` 立即失效且 `/healthz` 返回 `503`；仅尚未登录或认证模式待修正、但 app-server 运行正常时返回 `200`，避免登录期间被 watchdog 反复重启。
 
 ## 工具代理
 
 app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把固定工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Ledger 或 Broker。
+
+MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 URL/Token 未配置完整时，对应工具不会暴露。所有写工具必须处于当前 Controller 作业与 Turn 上下文中；Controller 忽略模型提供的写入幂等键，改用微信 `message_id`、工具名与排序后的规范化参数计算稳定 SHA-256。Turn 完成或启动失败后上下文立即清除。
 
 微信图片在创建 Turn 前由 Controller 主进程从 Gateway 的受认证预览接口读取，严格核对作业元数据、MIME、大小和 SHA-256，再以随机受控文件名写入 `/data/turn-media/<job-id>/`。官方 app-server 收到 `{"type":"localImage","path":"...","detail":"auto"}`；Turn 完成、明确失败或 Controller 重启时清理私有暂存。预览不会消费原 `attachment_ref`，因此模型识别图片后仍可调用装修归档工具保存同一原件。
 
@@ -74,7 +78,7 @@ app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runt
 
 `renovation_media_ingest` 用于新图片/视频档案。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时再从 Gateway 以二进制流读取正文，并直接转发到 Renovation Hub。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
 
-第一版 Broker 只提供只读预检和 Passkey 授权请求/状态；现有 Broker 没有正式执行器，因此 Controller 也不会伪装提供 HA 写执行能力。
+Broker 工具固定为重启提案、Passkey 授权请求/状态、执行和执行状态查询。是否允许真正执行仍由 Broker 的固定 allowlist、一次性收据、状态机和默认关闭的 `execution_enabled` 决定；Controller 不能绕过这些门禁或提交任意 Supervisor 动作。
 
 ## 更新
 
@@ -91,4 +95,4 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 
 使用自定义 URL 回滚时，同时清空 `openai_base_url` 和 `openai_api_key` 或恢复升级前备份；不要把旧 Key 复制到普通文件。
 
-在微信、账本和 HA 管理真实验收完成前，Hermes 继续作为正式后端和回滚路径。
+当前旧 Hermes iLink 身份已经失效，不能作为微信恢复目标。回滚 Controller 时应关闭 intake、保留队列和新 Gateway 身份；微信恢复必须修复当前 Gateway 或重新扫码并重新绑定。

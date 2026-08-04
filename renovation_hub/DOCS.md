@@ -5,6 +5,7 @@
 | 配置项 | 说明 |
 | --- | --- |
 | `api_token` | Controller 调用内部 API 的独立 Token，至少 32 个字符 |
+| `cutover_token` | 独立切换 Token；只用于 manifest 管理接口，不与普通内部 bearer 复用 |
 | `writer_mode` | 默认 `read_only`；`primary_writer` 只能在数据内已完成独立切换后继续运行 |
 | `max_request_bytes` | 单个页面或内部请求的总大小上限 |
 | `max_attachment_bytes` | 旧 Ledger v1 Base64 附件的单文件明文上限 |
@@ -30,6 +31,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 - `/data/attachments`：Legacy Ledger v1 内容寻址附件。
 - `/data/charts`：短期中文统计图。
 - `/data/import`、`/data/shadow`：便携包只读导入候选与影子数据库。
+- `/data/migrations/<manifest-id>`：verified staging、来源快照、兼容数据库、附件和回滚基线。
 - `/data/media-previews`：图片缩略图和视频封面。
 - `/data/media-staging`：尚未完成校验的浏览器或 Controller 流式上传文件。
 - `/media/renovation-hub/originals`：图片和视频原件，只使用服务端生成的内容寻址文件名。
@@ -39,7 +41,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.1.3` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.0` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
@@ -50,13 +52,27 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 成功导入后，`/data/shadow/<来源 SHA-256>/` 保存只读来源快照、全部附件、Hub 兼容 `ledger.sqlite3` 和 `report.json`。报告只包含结构计数、校验布尔值和摘要哈希，不包含金额、商家、备注、附件正文或绝对私有路径。重复导入会重新校验来源快照、规范化数据库和附件，不会仅返回旧报告。
 
-v2 的 Hub 兼容 shadow 数据库会把 `main_category` 保留为空占位，并完整保存全部分组标签。该数据库只用于只读比对，不能作为主库迁移或页面 writer 的输入；正式迁移 v2 需要后续独立数据模型设计和授权。
+v2 的 Hub 兼容数据库会把 `main_category` 保留为空占位，并完整保存全部分组标签。只读 shadow 仍不会自动成为正式主库；正式迁移必须另行创建持久 cutover manifest，验证来源 SHA-256、verification digest、四类备份证据和全部附件后，才会建立 staging。
 
 ## Writer 状态
 
 正常迁移顺序为：
 
-`uninitialized -> read_only -> shadow_validated -> cutover_ready -> primary_writer`
+`read_only -> migration_prepared -> source_frozen -> primary_seeded -> cutover_ready -> primary_writer`
+
+`shadow_validated` 只表示只读兼容验证，不属于正式 writer 捷径。正式模式中 `_require_writer` 同时核对 active manifest、writer generation 和 active lease；任一不一致都拒绝写入。
+
+options 的紧急语义：
+
+- `suspended`：立即撤销 lease 并停写，但保留 manifest 已验证阶段；恢复必须重新提交动态确认串并重建唯一 active lease。
+- `read_only`：若数据库已处于任何切换中间态或 `primary_writer`，启动时进入 `suspended`，不会静默继续写。
+- `primary_writer`：仅在持久 manifest、generation 和 lease 全部有效时恢复；否则服务保持在线并报告 `health=degraded`、`recovery_required=true`，普通写入继续拒绝，管理员可经独立 cutover API 提交新 generation 的动态确认串恢复。
+
+每次进入 `suspended` 都会在同一数据库事务中撤销 lease，并同时轮换 metadata 与 active manifest 的 writer generation。停写前的确认串即使被旧脚本、重试请求或日志外部捕获，也不能再次激活 writer。
+
+Legacy 附件只在 writer、幂等键和目标流水验证通过后写入内容寻址目录。写入期间生成私有恢复标记；数据库提交失败会立即回滚并清理，进程在文件切换中断时会在下次启动仅按有效标记清理未被数据库引用的临时文件或孤儿，不扫描删除其他人工文件。
+
+正式播种只复制 canonical 账本表；默认项目和 `transaction_context` 根据来源 SHA-256 与来源时间确定性重建。staging 中的项目、阶段、空间、事件、媒体或 context 只要出现额外、缺失或字段漂移，都会返回 `invariant_mismatch`，不会进入正式主库。
 
 发现完整性、空间、权限或导出异常时进入 `suspended`。任何时刻都不得与 Hermes 同时写正式账本。页面存在写按钮不代表正式 writer 已切换；`read_only` 时写入口会被禁用或显式拒绝。
 
@@ -93,7 +109,17 @@ Authorization: Bearer <独立 Token>
 Content-Type: application/json
 ```
 
-兼容工具入口为 `POST /internal/v1/tools/call`。Ledger v1 工具名继续以 `contracts/renovation_ledger_tools_v1.json` 为准；项目、阶段、空间、事件、驾驶舱和媒体工具以 `contracts/renovation_hub_tools_v1.json` 为准。
+切换管理接口还必须增加：
+
+```text
+X-Cutover-Token: <独立 cutover token>
+```
+
+接口依次为 `/internal/v1/admin/cutover/prepare`、`freeze`、`seed`、`ready`、`activate` 和 `suspend`。激活确认串必须精确为 `ACTIVATE_PRIMARY_WRITER:<manifest-id>:<generation>`。旧 `/internal/v1/admin/writer-mode` 不再允许推进正式状态，只保留紧急暂停和只读状态确认。
+
+`seed` 会先保存数据库与附件 rollback baseline。若进程在数据库提交和附件目录替换之间中断，再次调用同一 manifest 的 `seed` 只会在主库、staging 和 baseline 可证明一致时完成恢复；无法证明时返回 `seed_recovery_required` 并保持停写，不会覆盖未知数据。
+
+兼容工具入口为 `POST /internal/v1/tools/call`。Ledger v1 工具名继续以 `contracts/renovation_ledger_tools_v1.json` 为准；原生分组标签输入以 `contracts/renovation_ledger_tools_v2.json` 为准；项目、阶段、空间、事件、驾驶舱和媒体工具以 `contracts/renovation_hub_tools_v1.json` 为准。
 
 `renovation_media_ingest` 只允许模型提交一次性 `attachment_ref` 和结构化元数据。Controller 主进程先检查 Hub 幂等结果，再从 Gateway 流式读取正文并转发到 `/internal/v1/media/ingest`；不会生成 Base64 JSON，也不会把 Gateway bearer、Hub bearer、内部路径或媒体正文交给模型。
 

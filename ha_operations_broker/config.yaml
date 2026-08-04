@@ -1,7 +1,7 @@
 name: HA Operations Broker
-version: "0.2.0"
+version: "0.3.0"
 slug: ha_operations_broker
-description: "Experimental read-only preflight and Passkey authorization broker for Home Assistant operation proposals."
+description: "默认禁用、由 Passkey 授权且只允许精确白名单 Add-on 重启的 Home Assistant 操作代理。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ha_operations_broker"
 arch:
   - amd64
@@ -11,7 +11,7 @@ startup: application
 boot: manual
 stage: experimental
 hassio_api: true
-hassio_role: default
+hassio_role: manager
 ingress: true
 ingress_port: 8098
 panel_icon: mdi:shield-key
@@ -33,6 +33,10 @@ options:
   passkey_challenge_ttl_seconds: 180
   max_passkeys: 8
   max_pending_passkey_flows: 100
+  proposal_ttl_seconds: 600
+  execution_enabled: false
+  enabled_actions: []
+  restart_addon_allowlist: []
 schema:
   broker_api_token: "password"
   trusted_owner_identity_hashes:
@@ -46,3 +50,9 @@ schema:
   passkey_challenge_ttl_seconds: "int(60,600)"
   max_passkeys: "int(1,32)"
   max_pending_passkey_flows: "int(10,500)"
+  proposal_ttl_seconds: "int(60,1800)"
+  execution_enabled: bool
+  enabled_actions:
+    - "match(^(restart_addon)$)"
+  restart_addon_allowlist:
+    - "match(^[a-z0-9][a-z0-9_]{0,63}$)"

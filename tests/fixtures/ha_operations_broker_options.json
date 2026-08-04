@@ -12,5 +12,9 @@
   "passkey_enrollment_token": "test-enrollment-token-000000000000000",
   "passkey_challenge_ttl_seconds": 180,
   "max_passkeys": 8,
-  "max_pending_passkey_flows": 100
+  "max_pending_passkey_flows": 100,
+  "proposal_ttl_seconds": 600,
+  "execution_enabled": false,
+  "enabled_actions": [],
+  "restart_addon_allowlist": []
 }

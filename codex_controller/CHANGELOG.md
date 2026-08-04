@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.1.6
+
+- 未配置 Renovation Hub 或 Operations Broker 时不再向 Codex 暴露对应工具，避免模型看到不可执行能力。
+- Operations 工具收敛为固定 propose、authorization request/status、execute 和 execution status 路由；参数 schema 禁止额外字段。
+- Controller 使用微信 `message_id`、工具名和规范化参数生成写工具幂等键；同一消息同一语义稳定复用，不同消息不会共享写入键。
+- 工具上下文只在当前活动作业和 Turn 内有效，Turn 完成或启动失败后立即清除。
+
+## 0.1.5
+
+- Controller intake 现在同时要求 app-server 进程运行、完成初始化且没有协议错误；子进程故障后立即停止接收和调度新作业。
+- `/healthz` 在 app-server 启动、退出或协议故障时返回 `503` 以触发 watchdog；仅认证未完成而运行时正常时继续返回 `200`，避免受控登录状态形成重启风暴。
+- 任一 `recovery_required` 作业会阻断后续队列调度。新增受 bearer 保护的人工恢复核对接口，只允许明确确认完成、确认失败或取消，不自动重放 Turn。
+
 ## 0.1.4
 
 - 明确微信入口是通用 Codex 助手，而不是装修专用机器人。

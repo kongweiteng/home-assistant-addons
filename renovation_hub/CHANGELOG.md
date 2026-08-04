@@ -1,5 +1,23 @@
 # 更新记录
 
+## 0.2.0
+
+- 新增 v2 原生主库字段：账本格式版本、稳定流水/附件 portable ID，以及九维分组标签的 dimension/value/created_at。
+- 新增持久 cutover manifest、writer generation 和单 active lease；正式写入同时校验三者，旧裸 writer-mode API 不再允许推进状态。
+- 新增 verified staging、来源冻结证据、空主库播种、默认历史项目/context、cutover ready、动态确认激活和幂等恢复。
+- Add-on 新增独立 `cutover_token`；未配置或错误时切换管理 API fail closed。
+- options=`read_only`/`suspended` 可紧急撤销 lease 并停写；options=`primary_writer` 仅在持久状态完整时恢复。
+- 播种在数据库提交与附件原子替换之间中断时，可利用既有 rollback baseline 和 staging 自动完成确认性恢复；无法证明一致时保持停写并返回 `seed_recovery_required`。
+- 紧急停写只撤销 lease 和运行态 writer，不破坏 manifest 的已验证阶段；恢复必须重新提交动态确认串并重建唯一 lease。
+- 每次紧急停写会原子轮换 metadata 与 manifest 的 writer generation，旧动态确认串在同进程或重启后均失效。
+- `options=primary_writer` 遇到暂停态或无效 lease 时不再让服务在 Web API 创建前退出；服务保持 degraded/recovery-required 管理面在线，业务写继续失败关闭。
+- Legacy 附件改为先验证 writer、幂等键和目标流水，再以恢复标记、临时文件、数据库事务和内容寻址切换落盘；失败请求不再制造孤儿文件，启动只清理有效标记覆盖的未引用文件。
+- 正式播种不再复制 staging 中未受来源 manifest 覆盖的 Hub 扩展表；默认项目和 context 改为确定性重建并全量校验，额外、缺失或篡改的项目/阶段/空间/context 均拒绝。
+- 增加附件零副作用、停写代际轮换、暂停态恢复管理面、Hub 派生表篡改和播种多断点中断恢复回归测试。
+- v2 付款不再需要主分类，支持九个固定维度、最多 24 个且单项最长 40 字符；退款继承版本与全部标签。
+- 新增 canonical v2 自验导出，保持附件、审计、退款关系、稳定 ID、摘要和不变量。
+- 本版本只交付本地源码和合成测试，不代表已执行正式账本迁移、writer 切换或 Hermes 退役。
+
 ## 0.1.3
 
 - 便携包固定读取器新增 `kanhuwan-renovation-ledger` v2 / SQLite Schema 3 支持，同时保留 v1 和早期 legacy 包兼容。

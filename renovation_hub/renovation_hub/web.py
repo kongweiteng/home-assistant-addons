@@ -28,6 +28,7 @@ def _make_app_key(name: str, value_type: type[Any]) -> Any:
 STORE_KEY = _make_app_key("store", RenovationHubStore)
 MEDIA_KEY = _make_app_key("media", MediaService)
 API_TOKEN_KEY = _make_app_key("api_token", str)
+CUTOVER_TOKEN_KEY = _make_app_key("cutover_token", str)
 STATIC_DIR_KEY = _make_app_key("static_dir", object)
 CSRF_TOKEN_KEY = _make_app_key("csrf_token", str)
 PAGE_ACTOR = "sha256:renovation-hub-ingress-admin"
@@ -38,6 +39,7 @@ def create_app(
     store: RenovationHubStore,
     media: MediaService,
     api_token: str,
+    cutover_token: str = "",
     max_request_bytes: int,
     static_dir: str | Path | None = None,
 ) -> web.Application:
@@ -48,6 +50,7 @@ def create_app(
     app[STORE_KEY] = store
     app[MEDIA_KEY] = media
     app[API_TOKEN_KEY] = api_token
+    app[CUTOVER_TOKEN_KEY] = cutover_token
     app[STATIC_DIR_KEY] = Path(static_dir) if static_dir else None
     app[CSRF_TOKEN_KEY] = secrets.token_urlsafe(32)
 
@@ -86,6 +89,12 @@ def create_app(
     app.router.add_get("/internal/v1/status", internal_status)
     app.router.add_post("/internal/v1/tools/call", tools_call)
     app.router.add_post("/internal/v1/admin/writer-mode", writer_mode)
+    app.router.add_post("/internal/v1/admin/cutover/prepare", cutover_prepare)
+    app.router.add_post("/internal/v1/admin/cutover/freeze", cutover_freeze)
+    app.router.add_post("/internal/v1/admin/cutover/seed", cutover_seed)
+    app.router.add_post("/internal/v1/admin/cutover/ready", cutover_ready)
+    app.router.add_post("/internal/v1/admin/cutover/activate", cutover_activate)
+    app.router.add_post("/internal/v1/admin/cutover/suspend", cutover_suspend)
     app.router.add_get("/internal/v1/media/replay", media_replay)
     app.router.add_post("/internal/v1/media/ingest", media_ingest)
     app.router.add_get("/{tail:.*}", spa)
@@ -138,6 +147,15 @@ def _authorized(request: web.Request) -> None:
             text=json.dumps({"error": {"code": "not_authorized"}}),
             content_type="application/json",
         )
+
+
+def _cutover_authorized(request: web.Request) -> None:
+    expected = request.app[CUTOVER_TOKEN_KEY]
+    supplied = request.headers.get("X-Cutover-Token", "")
+    if not expected:
+        raise LedgerError("cutover_disabled", "未配置独立 cutover token", status=503)
+    if not hmac.compare_digest(supplied, expected):
+        raise LedgerError("cutover_not_authorized", "cutover token 无效", status=403)
 
 
 def _require_csrf(request: web.Request) -> None:
@@ -395,9 +413,65 @@ async def tools_call(request: web.Request) -> web.Response:
 async def writer_mode(request: web.Request) -> web.Response:
     payload = await _json(request, internal=True)
     target = payload.get("target")
-    if target == "primary_writer" and payload.get("confirmation") != "ACTIVATE_PRIMARY_WRITER":
-        raise LedgerError("confirmation_required", "切换正式 writer 需要精确确认", status=409)
-    return _result(_store(request).set_writer_mode(str(target)))
+    if target == "suspended":
+        return _result(_store(request).suspend_writer(str(payload.get("reason") or "admin_suspend")))
+    if target == "read_only" and _store(request).writer_mode() == "read_only":
+        return _result({"previous": "read_only", "current": "read_only"})
+    raise LedgerError("cutover_manifest_required", "writer 状态只能通过 cutover manifest 推进", status=409)
+
+
+async def _cutover_payload(request: web.Request) -> dict[str, Any]:
+    payload = await _json(request, internal=True)
+    _cutover_authorized(request)
+    return payload
+
+
+async def cutover_prepare(request: web.Request) -> web.Response:
+    payload = await _cutover_payload(request)
+    return _result(
+        _store(request).prepare_primary_migration(
+            str(payload.get("path") or ""),
+            payload.get("evidence") or {},
+        )
+    )
+
+
+async def cutover_freeze(request: web.Request) -> web.Response:
+    payload = await _cutover_payload(request)
+    return _result(
+        _store(request).mark_source_frozen(
+            str(payload.get("manifest_id") or ""), payload.get("evidence") or {}
+        )
+    )
+
+
+async def cutover_seed(request: web.Request) -> web.Response:
+    payload = await _cutover_payload(request)
+    return _result(_store(request).seed_primary(str(payload.get("manifest_id") or "")))
+
+
+async def cutover_ready(request: web.Request) -> web.Response:
+    payload = await _cutover_payload(request)
+    return _result(
+        _store(request).mark_cutover_ready(
+            str(payload.get("manifest_id") or ""), payload.get("evidence") or {}
+        )
+    )
+
+
+async def cutover_activate(request: web.Request) -> web.Response:
+    payload = await _cutover_payload(request)
+    return _result(
+        _store(request).activate_primary_writer(
+            str(payload.get("manifest_id") or ""),
+            str(payload.get("confirmation") or ""),
+        )
+    )
+
+
+async def cutover_suspend(request: web.Request) -> web.Response:
+    payload = await _cutover_payload(request)
+    return _result(_store(request).suspend_writer(str(payload.get("reason") or "admin_suspend")))
 
 
 async def media_replay(request: web.Request) -> web.Response:

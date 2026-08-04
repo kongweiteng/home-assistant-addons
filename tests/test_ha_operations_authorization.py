@@ -26,6 +26,8 @@ from operations_broker.authorization import (
     AuthorizationStore,
 )
 from operations_broker.contract import PROPOSAL_HASH_FIELDS, canonical_json, sha256_text
+from operations_broker.execution import ExecutionManager
+from operations_broker.supervisor import SupervisorError
 
 
 UTC = timezone.utc
@@ -33,6 +35,22 @@ NOW = datetime(2026, 7, 31, 13, 0, tzinfo=UTC)
 OWNER_HASH = sha256_text("weixin:owner-example")
 ENROLLMENT_TOKEN = "enrollment-example-" + "x" * 32
 INGRESS_ORIGIN = "https://ha.example.invalid"
+ALLOWED_ADDON = "example_addon"
+
+
+def idempotency(label: str) -> str:
+    return "sha256:" + sha256_text(f"operations:{label}")
+
+
+def make_intent(
+    *, target: str = ALLOWED_ADDON, key: str = idempotency("restart")
+) -> dict:
+    return {
+        "version": 1,
+        "action_type": "restart_addon",
+        "target": target,
+        "idempotency_key": key,
+    }
 
 
 def make_envelope(*, target: str = "example_addon", expires_in: int = 600) -> dict:
@@ -130,6 +148,39 @@ class FakePasskeys:
         }
 
 
+class FakeExecutionSupervisor:
+    def __init__(
+        self,
+        *,
+        postflight_state: str = "started",
+        postflight_version: str = "1.2.3",
+        block_restart: bool = False,
+    ) -> None:
+        self.postflight_state = postflight_state
+        self.postflight_version = postflight_version
+        self.block_restart = block_restart
+        self.calls: list[tuple[str, str]] = []
+        self.restart_started = threading.Event()
+        self.restart_release = threading.Event()
+        self.info_count = 0
+
+    def addon_info(self, slug: str) -> dict:
+        self.calls.append(("info", slug))
+        self.info_count += 1
+        return {
+            "slug": slug,
+            "state": "started" if self.info_count == 1 else self.postflight_state,
+            "version": "1.2.3" if self.info_count == 1 else self.postflight_version,
+            "installed": True,
+        }
+
+    def restart_addon(self, slug: str) -> None:
+        self.calls.append(("restart", slug))
+        self.restart_started.set()
+        if self.block_restart and not self.restart_release.wait(timeout=3):
+            raise SupervisorError("test_timeout", "test restart timed out")
+
+
 class AuthorizationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -143,6 +194,7 @@ class AuthorizationTests(unittest.TestCase):
             passkeys=self.backend,
             trusted_owner_hashes=frozenset({OWNER_HASH}),
             enrollment_token=ENROLLMENT_TOKEN,
+            restart_addon_allowlist=frozenset({ALLOWED_ADDON, "other_addon"}),
             clock=self.clock,
         )
 
@@ -184,6 +236,49 @@ class AuthorizationTests(unittest.TestCase):
         conflict = make_envelope(target="other_addon")
         with self.assertRaisesRegex(AuthorizationError, "another proposal hash"):
             self.manager.create_request(conflict)
+
+    def test_broker_native_proposal_is_immutable_and_idempotent(self) -> None:
+        first = self.manager.create_proposal(make_intent())
+        second = self.manager.create_proposal(make_intent())
+        self.assertEqual(first, second)
+        self.assertTrue(first["action_id"].startswith("OPS-20260731-"))
+        self.assertEqual(first["action_type"], "restart_addon")
+        self.assertEqual(first["target"], ALLOWED_ADDON)
+        self.assertEqual(first["risk_level"], "L3")
+        self.assertTrue(first["requires_backup"])
+        self.assertEqual(first["state"], "awaiting_approval")
+        self.assertEqual(first["parameter_summary"], {"idempotency_key": idempotency("restart")})
+        self.assertFalse(first["execution_allowed"])
+
+        with self.assertRaisesRegex(AuthorizationError, "another operation intent"):
+            self.manager.create_proposal(
+                make_intent(target="other_addon", key=idempotency("restart"))
+            )
+
+    def test_native_proposal_rejects_extra_fields_actions_and_slugs(self) -> None:
+        extra = {**make_intent(), "parameters": {"anything": True}}
+        with self.assertRaisesRegex(AuthorizationError, "fields are invalid"):
+            self.manager.create_proposal(extra)
+        unsupported = {**make_intent(), "action_type": "install_addon"}
+        with self.assertRaisesRegex(AuthorizationError, "Only restart_addon"):
+            self.manager.create_proposal(unsupported)
+        with self.assertRaisesRegex(AuthorizationError, "exact slug"):
+            self.manager.create_proposal(make_intent(target="../bad"))
+        with self.assertRaisesRegex(AuthorizationError, "not allowlisted"):
+            self.manager.create_proposal(make_intent(target="not_allowed"))
+
+    def test_native_authorization_request_references_broker_proposal_only(self) -> None:
+        proposal = self.manager.create_proposal(make_intent())
+        request = self.manager.create_native_request(
+            {"version": 1, "action_id": proposal["action_id"]}
+        )
+        self.assertEqual(request["proposal_hash"], proposal["proposal_hash"])
+        self.assertEqual(request["proposal_origin"], "broker_native")
+        self.assertEqual(request["state"], "pending")
+        with self.assertRaisesRegex(AuthorizationError, "fields are invalid"):
+            self.manager.create_native_request(
+                {"version": 1, "action_id": proposal["action_id"], "owner_hash": OWNER_HASH}
+            )
 
     def test_passkey_assertion_binds_request_and_never_enables_execution(self) -> None:
         self.register()
@@ -262,6 +357,7 @@ class AuthorizationTests(unittest.TestCase):
             passkeys=backend,
             trusted_owner_hashes=frozenset({OWNER_HASH}),
             enrollment_token=ENROLLMENT_TOKEN,
+            restart_addon_allowlist=frozenset({ALLOWED_ADDON}),
             clock=MutableClock(),
         )
         registration = manager.begin_registration(
@@ -286,6 +382,155 @@ class AuthorizationTests(unittest.TestCase):
             )
 
 
+class ExecutionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.clock = MutableClock()
+        self.store = AuthorizationStore(
+            pathlib.Path(self.temporary.name) / "private" / "passkeys.sqlite3"
+        )
+        self.manager = AuthorizationManager(
+            store=self.store,
+            passkeys=FakePasskeys(),
+            trusted_owner_hashes=frozenset({OWNER_HASH}),
+            enrollment_token=ENROLLMENT_TOKEN,
+            restart_addon_allowlist=frozenset({ALLOWED_ADDON}),
+            clock=self.clock,
+        )
+        registration = self.manager.begin_registration(
+            remote_user_id="ha-user-example", enrollment_token=ENROLLMENT_TOKEN
+        )
+        self.manager.complete_registration(
+            remote_user_id="ha-user-example",
+            enrollment_token=ENROLLMENT_TOKEN,
+            flow_id=registration["flow_id"],
+            response={"ok": True},
+        )
+
+    def authorized_execution(self, label: str = "restart") -> tuple[dict, dict, dict]:
+        proposal = self.manager.create_proposal(make_intent(key=idempotency(label)))
+        request = self.manager.create_native_request(
+            {"version": 1, "action_id": proposal["action_id"]}
+        )
+        begin = self.manager.begin_authorization(
+            approval_id=request["approval_id"], remote_user_id="ha-user-example"
+        )
+        authorized = self.manager.complete_authorization(
+            approval_id=request["approval_id"],
+            remote_user_id="ha-user-example",
+            flow_id=begin["flow_id"],
+            response={"ok": True},
+        )
+        payload = {
+            "version": 1,
+            "receipt_id": authorized["receipt"]["receipt_id"],
+            "action_id": proposal["action_id"],
+            "proposal_hash": proposal["proposal_hash"],
+            "idempotency_key": proposal["idempotency_key"],
+        }
+        return proposal, request, payload
+
+    def executor(
+        self,
+        supervisor: FakeExecutionSupervisor,
+        *,
+        enabled: bool = True,
+        actions: frozenset[str] = frozenset({"restart_addon"}),
+    ) -> ExecutionManager:
+        return ExecutionManager(
+            store=self.store,
+            supervisor=supervisor,
+            execution_enabled=enabled,
+            enabled_actions=actions,
+            restart_addon_allowlist=frozenset({ALLOWED_ADDON}),
+            clock=self.clock,
+        )
+
+    def test_default_disabled_does_not_consume_receipt_or_call_supervisor(self) -> None:
+        _proposal, request, payload = self.authorized_execution()
+        supervisor = FakeExecutionSupervisor()
+        execution = self.executor(supervisor, enabled=False, actions=frozenset())
+        with self.assertRaisesRegex(AuthorizationError, "disabled"):
+            execution.execute(payload)
+        self.assertEqual(supervisor.calls, [])
+        self.assertFalse(self.store.receipt_for_request(request["approval_id"])["consumed"])
+
+    def test_single_use_receipt_executes_once_and_replay_returns_same_result(self) -> None:
+        _proposal, request, payload = self.authorized_execution()
+        supervisor = FakeExecutionSupervisor()
+        execution = self.executor(supervisor)
+        first = execution.execute(payload)
+        second = execution.execute(payload)
+        self.assertEqual(first["state"], "succeeded")
+        self.assertTrue(second["replayed"])
+        self.assertEqual(
+            supervisor.calls,
+            [("info", ALLOWED_ADDON), ("restart", ALLOWED_ADDON), ("info", ALLOWED_ADDON)],
+        )
+        self.assertTrue(self.store.receipt_for_request(request["approval_id"])["consumed"])
+
+    def test_arbitrary_execution_fields_and_postflight_mismatch_fail_closed(self) -> None:
+        _proposal, _request, payload = self.authorized_execution()
+        supervisor = FakeExecutionSupervisor(postflight_version="9.9.9")
+        execution = self.executor(supervisor)
+        with self.assertRaisesRegex(AuthorizationError, "fields are invalid"):
+            execution.execute({**payload, "parameters": {"path": "/config"}})
+        result = execution.execute(payload)
+        self.assertEqual(result["state"], "recovery_required")
+        self.assertEqual(result["error_code"], "postflight_mismatch")
+
+    def test_missing_and_expired_receipts_fail_without_supervisor_write(self) -> None:
+        supervisor = FakeExecutionSupervisor()
+        execution = self.executor(supervisor)
+        missing = {
+            "version": 1,
+            "receipt_id": "RCPT-" + "A" * 32,
+            "action_id": "OPS-20260731-A1B2C3D4E5F6",
+            "proposal_hash": "sha256:" + "a" * 64,
+            "idempotency_key": "sha256:" + "b" * 64,
+        }
+        with self.assertRaisesRegex(AuthorizationError, "not found"):
+            execution.execute(missing)
+
+        _proposal, request, payload = self.authorized_execution("expired")
+        self.clock.advance(601)
+        with self.assertRaisesRegex(AuthorizationError, "expired"):
+            execution.execute(payload)
+        self.assertEqual(supervisor.calls, [])
+        self.assertFalse(self.store.receipt_for_request(request["approval_id"])["consumed"])
+
+    def test_concurrent_execution_is_rejected_and_only_one_restart_occurs(self) -> None:
+        _proposal, _request, payload = self.authorized_execution()
+        supervisor = FakeExecutionSupervisor(block_restart=True)
+        execution = self.executor(supervisor)
+        result: list[dict] = []
+        worker = threading.Thread(target=lambda: result.append(execution.execute(payload)))
+        worker.start()
+        self.assertTrue(supervisor.restart_started.wait(timeout=2))
+        with self.assertRaisesRegex(AuthorizationError, "Another operation"):
+            execution.execute(payload)
+        supervisor.restart_release.set()
+        worker.join(timeout=3)
+        self.assertEqual(result[0]["state"], "succeeded")
+        self.assertEqual(supervisor.calls.count(("restart", ALLOWED_ADDON)), 1)
+
+    def test_restart_recovery_marks_claimed_execution_recovery_required(self) -> None:
+        _proposal, _request, payload = self.authorized_execution()
+        claimed, replayed = self.store.claim_execution(
+            receipt_id=payload["receipt_id"],
+            action_id=payload["action_id"],
+            proposal_hash=payload["proposal_hash"],
+            idempotency_key=payload["idempotency_key"],
+            claimed_at=self.clock(),
+        )
+        self.assertFalse(replayed)
+        self.assertEqual(claimed["state"], "authorized")
+        execution = self.executor(FakeExecutionSupervisor())
+        self.assertEqual(execution.recovered_executions, 1)
+        self.assertEqual(execution.status(payload["action_id"])["state"], "recovery_required")
+
+
 class AuthorizationApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -297,6 +542,7 @@ class AuthorizationApiTests(unittest.TestCase):
             passkeys=FakePasskeys(),
             trusted_owner_hashes=frozenset({OWNER_HASH}),
             enrollment_token=ENROLLMENT_TOKEN,
+            restart_addon_allowlist=frozenset({ALLOWED_ADDON}),
             clock=MutableClock(),
         )
         self.server = create_server(
@@ -327,14 +573,20 @@ class AuthorizationApiTests(unittest.TestCase):
 
     def test_internal_request_creation_requires_bearer(self) -> None:
         with self.assertRaises(HTTPError) as context:
-            self.request_json("/v1/authorization/requests", make_envelope())
+            self.request_json("/v1/proposals", make_intent())
         self.assertEqual(context.exception.code, 401)
+        proposal = self.request_json(
+            "/v1/proposals",
+            make_intent(),
+            headers={"Authorization": "Bearer " + "a" * 32},
+        )
         created = self.request_json(
             "/v1/authorization/requests",
-            make_envelope(),
+            {"version": 1, "action_id": proposal["action_id"]},
             headers={"Authorization": "Bearer " + "a" * 32},
         )
         self.assertTrue(created["approval_id"].startswith("AUTH-"))
+        self.assertEqual(created["proposal_origin"], "broker_native")
         self.assertFalse(created["execution_allowed"])
 
     def test_ingress_requires_authenticated_user_and_exact_origin(self) -> None:

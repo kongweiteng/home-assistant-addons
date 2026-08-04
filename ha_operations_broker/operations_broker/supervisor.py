@@ -1,4 +1,4 @@
-"""Narrow read-only Supervisor API client for the P5 canary."""
+"""Narrow Supervisor client with fixed reads and one exact restart action."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class SupervisorClient:
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
-                "User-Agent": "ha-operations-broker/0.1",
+                "User-Agent": "ha-operations-broker/0.3.0",
             },
             method="GET",
         )
@@ -114,6 +114,46 @@ class SupervisorClient:
             "host_network",
             "full_access",
         )
+
+    def restart_addon(self, slug: str) -> None:
+        if not ADDON_SLUG_RE.fullmatch(slug):
+            raise SupervisorError("invalid_addon_slug", "Add-on target must be an exact slug")
+        request = Request(
+            f"{self._base_url}/addons/{slug}/restart",
+            data=b"{}",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "ha-operations-broker/0.3.0",
+            },
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=self._timeout_seconds) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except HTTPError as exc:
+            raise SupervisorError(
+                "supervisor_restart_rejected", f"Supervisor returned HTTP {exc.code}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise SupervisorError(
+                "supervisor_restart_uncertain", "Supervisor restart result is unavailable"
+            ) from exc
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise SupervisorError(
+                "supervisor_response_too_large", "Supervisor response is too large"
+            )
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SupervisorError(
+                "supervisor_restart_uncertain", "Supervisor restart response is invalid"
+            ) from exc
+        if not isinstance(payload, dict) or payload.get("result") != "ok":
+            raise SupervisorError(
+                "supervisor_restart_rejected", "Supervisor rejected the add-on restart"
+            )
 
 
 def _select(data: dict[str, Any], *keys: str) -> dict[str, Any]:

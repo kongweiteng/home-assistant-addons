@@ -35,6 +35,23 @@ class CodexHermesContractTests(unittest.TestCase):
             if tool["write"]:
                 self.assertIn("idempotency_key", tool["required"])
 
+    def test_v2_ledger_catalog_is_indexed_and_receipt_schema_matches_runtime(self) -> None:
+        contracts_readme = (CONTRACTS / "README.md").read_text(encoding="utf-8")
+        self.assertIn("renovation_ledger_tools_v2.json", contracts_readme)
+
+        catalog = json.loads((CONTRACTS / "renovation_ledger_tools_v2.json").read_text(encoding="utf-8"))
+        self.assertEqual(catalog["version"], 2)
+        self.assertEqual(catalog["format_id"], "kanhuwan-renovation-ledger")
+        self.assertEqual(catalog["format_version"], 2)
+
+        receipt_schema = json.loads(
+            (CONTRACTS / "ha_operations_receipt_v1.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            receipt_schema["properties"]["receipt_id"],
+            {"type": "string", "pattern": r"^RCPT-[A-F0-9]{32}$"},
+        )
+
     def test_hub_catalog_keeps_legacy_contract_and_idempotent_writes(self) -> None:
         catalog = json.loads((CONTRACTS / "renovation_hub_tools_v1.json").read_text())
         self.assertEqual(catalog["version"], 1)

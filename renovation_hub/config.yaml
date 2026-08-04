@@ -1,5 +1,5 @@
 name: Renovation Hub
-version: "0.1.3"
+version: "0.2.0"
 slug: renovation_hub
 description: "独立、可审计的装修项目、账目、阶段、时间线与媒体档案。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/renovation_hub"
@@ -26,6 +26,7 @@ map:
   - media:rw
 options:
   api_token: ""
+  cutover_token: ""
   writer_mode: read_only
   max_request_bytes: 33554432
   max_attachment_bytes: 20971520
@@ -33,6 +34,7 @@ options:
   portable_history_limit: 20
 schema:
   api_token: password
+  cutover_token: password
   writer_mode: "list(read_only|primary_writer|suspended)"
   max_request_bytes: "int(4096,52428800)"
   max_attachment_bytes: "int(1024,52428800)"

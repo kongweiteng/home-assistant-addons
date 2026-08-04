@@ -38,7 +38,7 @@ INDEX_HTML = """<!doctype html>
       <input id="enrollment-token" type="password" autocomplete="off" minlength="32">
       <button id="register" class="secondary">注册 Passkey</button>
     </section>
-    <footer>授权结果始终包含 <code>execution_allowed=false</code>，直到后续执行阶段单独通过安全审计。</footer>
+    <footer>Passkey 只生成一次性授权收据，不会在浏览器中直接执行。执行还必须通过内部接口、运行开关、动作开关和精确目标白名单。</footer>
   </main>
   <script src="static/app.js" defer></script>
 </body>

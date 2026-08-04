@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/contracts/unified-notification-v1.schema.json",
+  "title": "Unified notification MQTT messages v1",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/result"},
+    {"$ref": "#/$defs/status"}
+  ],
+  "$defs": {
+    "stableIdentifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,254}$"
+    },
+    "messageId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "message_id",
+        "created_at",
+        "level",
+        "title",
+        "message",
+        "source",
+        "dedupe_key",
+        "ttl",
+        "audience"
+      ],
+      "properties": {
+        "version": {"const": 1},
+        "message_id": {"$ref": "#/$defs/messageId"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "level": {"enum": ["info", "warning", "critical"]},
+        "title": {"type": "string", "minLength": 1, "maxLength": 100},
+        "message": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "source": {"$ref": "#/$defs/stableIdentifier"},
+        "dedupe_key": {"$ref": "#/$defs/stableIdentifier"},
+        "ttl": {"type": "integer", "minimum": 30, "maximum": 86400},
+        "audience": {"const": "owner"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "message_id",
+        "status",
+        "channel",
+        "finished_at",
+        "attempt",
+        "error_code"
+      ],
+      "properties": {
+        "version": {"const": 1},
+        "message_id": {"$ref": "#/$defs/messageId"},
+        "status": {
+          "enum": ["accepted", "retrying", "sending", "duplicate", "expired", "sent", "failed"]
+        },
+        "channel": {"const": "weixin"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "attempt": {"type": "integer", "minimum": 0},
+        "error_code": {"type": ["string", "null"], "maxLength": 128}
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["online", "channel", "version", "updated_at"],
+      "properties": {
+        "online": {"type": "boolean"},
+        "channel": {"const": "weixin"},
+        "version": {"const": 1},
+        "updated_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

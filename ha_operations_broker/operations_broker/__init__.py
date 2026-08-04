@@ -1,5 +1,5 @@
-"""Read-only Home Assistant operations preflight broker."""
+"""Authorization-gated Home Assistant operations broker."""
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

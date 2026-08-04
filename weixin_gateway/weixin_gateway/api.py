@@ -31,7 +31,7 @@ def create_server(
     max_request_bytes: int = 1024 * 1024,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "WeixinGateway/0.1"
+        server_version = "WeixinGateway/0.1.4"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

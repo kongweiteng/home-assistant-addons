@@ -29,11 +29,30 @@ export WEIXIN_MAX_MEDIA_BYTES=$(jq -r '.max_media_bytes // 20971520' "$OPTIONS_F
 export WEIXIN_SPOOL_TTL_SECONDS=$(jq -r '.spool_ttl_seconds // 86400' "$OPTIONS_FILE")
 export WEIXIN_DATA_DIR=/data
 export WEIXIN_DATABASE_PATH=/data/gateway.sqlite3
+export WEIXIN_ADDON_VERSION=0.1.4
+export WEIXIN_NOTIFICATION_BRIDGE_ENABLED=$(jq -r '.notification_bridge_enabled // false' "$OPTIONS_FILE")
+export WEIXIN_NOTIFICATION_MQTT_HOST=$(jq -r '.notification_mqtt_host // ""' "$OPTIONS_FILE")
+export WEIXIN_NOTIFICATION_MQTT_PORT=$(jq -r '.notification_mqtt_port // 1883' "$OPTIONS_FILE")
+export WEIXIN_NOTIFICATION_MQTT_USERNAME=$(jq -r '.notification_mqtt_username // ""' "$OPTIONS_FILE")
+export WEIXIN_NOTIFICATION_MQTT_PASSWORD=$(jq -r '.notification_mqtt_password // ""' "$OPTIONS_FILE")
+export WEIXIN_NOTIFICATION_MQTT_TLS=$(jq -r '.notification_mqtt_tls // false' "$OPTIONS_FILE")
+export WEIXIN_NOTIFICATION_ALLOWED_AUDIENCES=$(jq -r '(.notification_allowed_audiences // ["owner"]) | join(",")' "$OPTIONS_FILE")
 
 if [ "$WEIXIN_POLLER_ENABLED" = "true" ] && [ "$WEIXIN_ACTIVATION_CONFIRMATION" != "HERMES_POLLER_STOPPED" ]; then
     bashio::log.fatal "启动真实 poller 前必须确认 Hermes poller 已停止"
     exit 1
 fi
 
-bashio::log.info "启动 Weixin Gateway，poller_enabled=${WEIXIN_POLLER_ENABLED}"
+if [ "$WEIXIN_NOTIFICATION_BRIDGE_ENABLED" = "true" ]; then
+    if [ -z "$WEIXIN_NOTIFICATION_MQTT_HOST" ] || [ -z "$WEIXIN_NOTIFICATION_MQTT_USERNAME" ] || [ -z "$WEIXIN_NOTIFICATION_MQTT_PASSWORD" ]; then
+        bashio::log.fatal "启用主动通知时必须配置 MQTT host、username 和 password"
+        exit 1
+    fi
+    if [ "$WEIXIN_NOTIFICATION_ALLOWED_AUDIENCES" != "owner" ]; then
+        bashio::log.fatal "主动通知 v1 仅允许 owner audience"
+        exit 1
+    fi
+fi
+
+bashio::log.info "启动 Weixin Gateway，poller_enabled=${WEIXIN_POLLER_ENABLED}，notification_bridge_enabled=${WEIXIN_NOTIFICATION_BRIDGE_ENABLED}"
 exec python3 -m weixin_gateway.main

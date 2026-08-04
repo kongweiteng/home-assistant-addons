@@ -16,6 +16,7 @@ from .ui import APP_CSS, APP_JS, INDEX_HTML
 
 APPROVAL_PATH_RE = re.compile(r"^/api/approvals/([^/]+)/(begin|complete)$")
 INTERNAL_STATUS_RE = re.compile(r"^/v1/authorization/requests/([^/]+)$")
+EXECUTION_STATUS_RE = re.compile(r"^/v1/executions/([^/]+)$")
 
 
 def create_server(
@@ -26,10 +27,14 @@ def create_server(
     max_request_bytes: int,
     preflight_handler: Callable[[Any], dict[str, Any]],
     authorization_manager: AuthorizationManager | None = None,
+    execution_handler: Callable[[Any], dict[str, Any]] | None = None,
+    execution_status_handler: Callable[[str], dict[str, Any]] | None = None,
+    execution_enabled: bool = False,
+    enabled_actions: frozenset[str] = frozenset(),
     allowed_ingress_origins: frozenset[str] = frozenset(),
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "HAOperationsBroker/0.2"
+        server_version = "HAOperationsBroker/0.3.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -40,7 +45,12 @@ def create_server(
             if path == "/healthz":
                 self._json(
                     HTTPStatus.OK,
-                    {"status": "ok", "version": 2, "execution_enabled": False},
+                    {
+                        "status": "ok",
+                        "version": 3,
+                        "execution_enabled": execution_enabled,
+                        "enabled_actions": sorted(enabled_actions),
+                    },
                 )
                 return
             if path in {"", "/", "/index.html"}:
@@ -78,6 +88,16 @@ def create_server(
                 approval_id = unquote(status_match.group(1))
                 self._authorization_call(lambda: manager.internal_status(approval_id))
                 return
+            execution_match = EXECUTION_STATUS_RE.fullmatch(path)
+            if execution_match:
+                if not self._bearer_authorized():
+                    return
+                if execution_status_handler is None:
+                    self._not_found()
+                    return
+                action_id = unquote(execution_match.group(1))
+                self._authorization_call(lambda: execution_status_handler(action_id))
+                return
             self._not_found()
 
         def do_POST(self) -> None:  # noqa: N802
@@ -90,6 +110,17 @@ def create_server(
                     return
                 self._json(HTTPStatus.OK, preflight_handler(payload))
                 return
+            if path == "/v1/proposals":
+                if not self._bearer_authorized():
+                    return
+                manager = self._manager()
+                if manager is None:
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                self._authorization_call(lambda: manager.create_proposal(payload))
+                return
             if path == "/v1/authorization/requests":
                 if not self._bearer_authorized():
                     return
@@ -99,7 +130,18 @@ def create_server(
                 payload = self._read_json()
                 if payload is None:
                     return
-                self._authorization_call(lambda: manager.create_request(payload))
+                self._authorization_call(lambda: manager.create_native_request(payload))
+                return
+            if path == "/v1/executions":
+                if not self._bearer_authorized():
+                    return
+                if execution_handler is None:
+                    self._not_found()
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                self._authorization_call(lambda: execution_handler(payload))
                 return
             manager = self._manager()
             if manager is None:
@@ -232,13 +274,23 @@ def create_server(
                     "approval_expired": HTTPStatus.GONE,
                     "challenge_expired": HTTPStatus.GONE,
                     "action_conflict": HTTPStatus.CONFLICT,
+                    "idempotency_conflict": HTTPStatus.CONFLICT,
+                    "execution_conflict": HTTPStatus.CONFLICT,
+                    "execution_state_conflict": HTTPStatus.CONFLICT,
+                    "receipt_consumed": HTTPStatus.CONFLICT,
                     "approval_not_pending": HTTPStatus.CONFLICT,
                     "passkey_already_enrolled": HTTPStatus.CONFLICT,
                     "challenge_limit": HTTPStatus.TOO_MANY_REQUESTS,
+                    "execution_busy": HTTPStatus.TOO_MANY_REQUESTS,
                     "passkey_limit": HTTPStatus.TOO_MANY_REQUESTS,
                     "enrollment_denied": HTTPStatus.FORBIDDEN,
                     "enrollment_disabled": HTTPStatus.FORBIDDEN,
                     "ingress_user_required": HTTPStatus.UNAUTHORIZED,
+                    "proposal_not_found": HTTPStatus.NOT_FOUND,
+                    "receipt_not_found": HTTPStatus.NOT_FOUND,
+                    "execution_not_found": HTTPStatus.NOT_FOUND,
+                    "proposal_expired": HTTPStatus.GONE,
+                    "receipt_expired": HTTPStatus.GONE,
                 }.get(exc.code, HTTPStatus.BAD_REQUEST)
                 self._json(
                     status,
@@ -250,7 +302,7 @@ def create_server(
                     {
                         "error": {
                             "code": "internal_error",
-                            "message": "Authorization failed without executing an operation.",
+                            "message": "Request failed without bypassing operation controls.",
                         }
                     },
                 )

@@ -225,6 +225,112 @@ class RenovationHubStore(LedgerStore):
             (transaction_id, project_id, stage_id, area_id, utc_now()),
         )
 
+    def _after_canonical_restore(
+        self,
+        connection: sqlite3.Connection,
+        state: dict[str, Any],
+        source_sha256: str,
+    ) -> None:
+        project_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"renovation-hub:{source_sha256}")
+        )
+        timestamp = max(
+            (str(item["updated_at"]) for item in state["transactions"]),
+            default="1970-01-01T00:00:00Z",
+        )
+        connection.execute(
+            """
+            INSERT INTO projects(
+                id,name,timezone,budget_cents,status,version,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (
+                project_id,
+                "装修历史账本",
+                "Asia/Shanghai",
+                0,
+                "active",
+                1,
+                timestamp,
+                timestamp,
+            ),
+        )
+        for item in state["transactions"]:
+            connection.execute(
+                """
+                INSERT INTO transaction_context(
+                    transaction_id,project_id,stage_id,area_id,version,updated_at
+                ) VALUES (?,?,NULL,NULL,1,?)
+                ON CONFLICT(transaction_id) DO NOTHING
+                """,
+                (str(item["id"]), project_id, timestamp),
+            )
+
+    def _validate_canonical_extensions(
+        self,
+        connection: sqlite3.Connection,
+        state: dict[str, Any],
+        source_sha256: str,
+    ) -> None:
+        project_id = str(
+            uuid.uuid5(uuid.NAMESPACE_URL, f"renovation-hub:{source_sha256}")
+        )
+        timestamp = max(
+            (str(item["updated_at"]) for item in state["transactions"]),
+            default="1970-01-01T00:00:00Z",
+        )
+        projects = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT id,name,timezone,budget_cents,status,version,created_at,updated_at FROM projects ORDER BY id"
+            )
+        ]
+        expected_projects = [
+            {
+                "id": project_id,
+                "name": "装修历史账本",
+                "timezone": "Asia/Shanghai",
+                "budget_cents": 0,
+                "status": "active",
+                "version": 1,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            }
+        ]
+        if projects != expected_projects:
+            raise LedgerError("invariant_mismatch", "影子默认项目与来源派生状态不一致")
+        contexts = [
+            dict(row)
+            for row in connection.execute(
+                "SELECT transaction_id,project_id,stage_id,area_id,version,updated_at FROM transaction_context ORDER BY transaction_id"
+            )
+        ]
+        expected_contexts = [
+            {
+                "transaction_id": str(item["id"]),
+                "project_id": project_id,
+                "stage_id": None,
+                "area_id": None,
+                "version": 1,
+                "updated_at": timestamp,
+            }
+            for item in sorted(state["transactions"], key=lambda item: int(item["id"]))
+        ]
+        if contexts != expected_contexts:
+            raise LedgerError("invariant_mismatch", "影子账目空间上下文与来源派生状态不一致")
+        for table in (
+            "stages",
+            "areas",
+            "events",
+            "media_assets",
+            "media_links",
+            "uploads",
+            "media_ingest_results",
+        ):
+            if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]:
+                raise LedgerError("invariant_mismatch", f"影子派生表 {table} 包含未授权数据")
+
     def _validate_transaction_version(
         self,
         connection: sqlite3.Connection,

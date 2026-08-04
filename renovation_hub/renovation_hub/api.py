@@ -23,7 +23,7 @@ def create_server(
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "RenovationHub/0.1"
+        server_version = "RenovationHub/0.2.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -95,10 +95,16 @@ def create_server(
                     result = dispatch_tool(store, payload)
                 elif path == "/internal/v1/admin/writer-mode":
                     target = payload.get("target")
-                    confirmation = payload.get("confirmation")
-                    if target == "primary_writer" and confirmation != "ACTIVATE_PRIMARY_WRITER":
-                        raise LedgerError("confirmation_required", "切换正式 writer 需要精确确认", status=409)
-                    result = store.set_writer_mode(str(target))
+                    if target == "suspended":
+                        result = store.suspend_writer(str(payload.get("reason") or "admin_suspend"))
+                    elif target == "read_only" and store.writer_mode() == "read_only":
+                        result = {"previous": "read_only", "current": "read_only"}
+                    else:
+                        raise LedgerError(
+                            "cutover_manifest_required",
+                            "writer 状态只能通过 aiohttp cutover manifest API 推进",
+                            status=409,
+                        )
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
                     return

@@ -14,6 +14,7 @@ from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 
 from .api import create_server
 from .app_server import AppServerClient
+from .media_input import TurnMediaManager
 from .service import ControllerService
 from .store import ControllerStore
 from .tool_proxy import ToolProxyServer, ToolRouter
@@ -215,6 +216,8 @@ def main() -> None:
     proxy = ToolProxyServer(socket_path, router)
     proxy.start()
 
+    turn_media = TurnMediaManager(data_dir / "turn-media", router.preview_attachment)
+
     store = ControllerStore(
         os.environ.get("CONTROLLER_DATABASE_PATH", data_dir / "controller.sqlite3"),
         max_queue=int(os.environ.get("CONTROLLER_MAX_QUEUE", "200")),
@@ -230,6 +233,7 @@ def main() -> None:
         api_key=read_api_key_from_fd(),
         api_base_mode="custom" if openai_base_url else "official",
         codex_model_mode="custom" if codex_model else "default",
+        turn_media=turn_media,
     )
     service.start()
     server = create_server(

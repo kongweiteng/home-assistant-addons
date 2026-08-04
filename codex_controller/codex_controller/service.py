@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from .app_server import AppServerClient, AppServerError
+from .media_input import MediaInputError, TurnMediaManager
 from .store import ControllerStore, StoreError
 
 
@@ -23,6 +24,7 @@ class ControllerService:
         api_key: str = "",
         api_base_mode: str = "official",
         codex_model_mode: str = "default",
+        turn_media: TurnMediaManager | None = None,
     ):
         if auth_mode not in self.AUTH_MODES:
             raise ValueError("Controller auth_mode 不受支持")
@@ -37,6 +39,7 @@ class ControllerService:
         self._api_key = api_key if auth_mode == "api_key" else ""
         self.api_base_mode = api_base_mode
         self.codex_model_mode = codex_model_mode
+        self.turn_media = turn_media
         self.auth_error: str | None = None
         self.pending_login: dict[str, Any] | None = None
         self.start_error: str | None = None
@@ -107,7 +110,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.1.2",
+            "version": "0.1.3",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -146,6 +149,8 @@ class ControllerService:
             turn_id = turn.get("id") or params.get("turnId")
             status = turn.get("status")
             if isinstance(turn_id, str) and isinstance(status, str):
+                if self.turn_media is not None:
+                    self.turn_media.cleanup_turn(turn_id)
                 error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
                 error_code = "turn_failed" if status == "failed" else None
                 if error.get("codexErrorInfo") == "contextWindowExceeded":
@@ -173,6 +178,7 @@ class ControllerService:
             self._dispatch(job)
 
     def _dispatch(self, job: dict[str, Any]) -> None:
+        turn_started = False
         try:
             payload = job["input"]
             thread_id = self.store.conversation_thread(job["conversation_key"])
@@ -182,7 +188,18 @@ class ControllerService:
             else:
                 self.app_server.resume_thread(thread_id)
                 self.store.assign_thread(job["job_id"], thread_id)
-            turn_id = self.app_server.start_turn(thread_id, payload["text"], job["message_id"])
+            input_items = None
+            if self.turn_media is not None:
+                input_items = self.turn_media.prepare(job["job_id"], payload)
+            turn_id = self.app_server.start_turn(
+                thread_id,
+                payload["text"],
+                job["message_id"],
+                input_items=input_items,
+            )
+            turn_started = True
+            if self.turn_media is not None:
+                self.turn_media.bind_turn(job["job_id"], turn_id)
             self.store.assign_turn(job["job_id"], turn_id)
             self._flush_turn_events(turn_id)
         except AppServerError as exc:
@@ -192,8 +209,13 @@ class ControllerService:
             self.store.fail_claimed(job["job_id"], exc.code, uncertain=not exc.definitive)
         except StoreError as exc:
             self.store.fail_claimed(job["job_id"], exc.code, uncertain=True)
+        except MediaInputError as exc:
+            self.store.fail_claimed(job["job_id"], exc.code, uncertain=False)
         except Exception:
             self.store.fail_claimed(job["job_id"], "controller_internal_error", uncertain=True)
+        finally:
+            if not turn_started and self.turn_media is not None:
+                self.turn_media.cleanup_job(job["job_id"])
 
     def _buffer_event(self, turn_id: str, message: dict[str, Any]) -> None:
         with self._event_lock:

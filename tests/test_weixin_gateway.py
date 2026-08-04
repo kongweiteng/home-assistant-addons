@@ -163,11 +163,20 @@ class StoreTests(unittest.TestCase):
         stored = self.store.spool_dir / digest
         self.assertTrue(stored.is_file())
         self.assertEqual(stored.resolve().parent, self.store.spool_dir.resolve())
+        preview_metadata, preview_content = self.store.preview_attachment(reference)
+        self.assertEqual(preview_content, content)
+        self.assertEqual(preview_metadata["sha256"], f"sha256:{digest}")
+        second_preview_metadata, second_preview_content = self.store.preview_attachment(reference)
+        self.assertEqual(second_preview_content, content)
+        self.assertEqual(second_preview_metadata, preview_metadata)
         metadata, consumed = self.store.consume_attachment(reference)
         self.assertEqual(consumed, content)
         self.assertEqual(metadata["sha256"], f"sha256:{digest}")
         with self.assertRaises(StoreError) as context:
             self.store.consume_attachment(reference)
+        self.assertEqual(context.exception.code, "attachment_unavailable")
+        with self.assertRaises(StoreError) as context:
+            self.store.preview_attachment(reference)
         self.assertEqual(context.exception.code, "attachment_unavailable")
 
         expired = self.store.store_message(

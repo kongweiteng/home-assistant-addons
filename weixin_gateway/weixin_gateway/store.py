@@ -489,9 +489,18 @@ class GatewayStore:
                 ("sent" if success else "failed", utc_now() if success else None, error_code, job_id, chunk_index),
             )
 
+    def preview_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
+        """Read and verify an attachment without consuming its one-time reference."""
+        return self._read_attachment(reference, consume=False)
+
     def consume_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
+        """Read and atomically consume an attachment reference."""
+        return self._read_attachment(reference, consume=True)
+
+    def _read_attachment(self, reference: str, *, consume: bool) -> tuple[dict[str, Any], bytes]:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            if consume:
+                connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT * FROM attachments WHERE attachment_ref=?", (reference,)).fetchone()
             if row is None or row["consumed_at"] is not None or parse_time(row["expires_at"]) <= datetime.now(timezone.utc):
                 raise StoreError("attachment_unavailable", "附件引用不存在、已消费或已过期", status=404)
@@ -501,7 +510,8 @@ class GatewayStore:
             content = path.read_bytes()
             if len(content) != row["size_bytes"] or hashlib.sha256(content).hexdigest() != row["sha256"]:
                 raise StoreError("attachment_invalid", "附件大小或摘要不一致", status=409)
-            connection.execute("UPDATE attachments SET consumed_at=? WHERE attachment_ref=?", (utc_now(), reference))
+            if consume:
+                connection.execute("UPDATE attachments SET consumed_at=? WHERE attachment_ref=?", (utc_now(), reference))
             return {
                 "original_filename": row["original_filename"],
                 "mime_type": row["mime_type"],

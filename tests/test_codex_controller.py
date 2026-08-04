@@ -16,6 +16,7 @@ import unittest
 from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS
 from codex_controller.app_server import AppServerClient, AppServerError
 from codex_controller.main import normalize_codex_model, normalize_openai_base_url, read_api_key_from_fd, write_codex_config
+from codex_controller.media_input import TurnMediaManager
 from codex_controller.service import ControllerService
 from codex_controller.store import ControllerStore, StoreError
 from codex_controller.tool_proxy import ToolProxyError, ToolRouter, validate_base_url
@@ -159,6 +160,28 @@ class AppServerClientTests(unittest.TestCase):
         self.assertEqual(turn_id, "turn-fixture")
         self.assertTrue(self.event.wait(2))
         self.assertIn("item/completed", [message.get("method") for message in self.notifications])
+
+    def test_turn_accepts_official_local_image_input(self) -> None:
+        observed: list[tuple[str, dict]] = []
+
+        def fake_request(method: str, params: dict) -> dict:
+            observed.append((method, params))
+            return {"turn": {"id": "turn-local-image", "status": "inProgress", "items": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        items = [
+            {"type": "text", "text": "识别这张图片"},
+            {"type": "localImage", "path": "/data/turn-media/job/image.jpg", "detail": "auto"},
+        ]
+        turn_id = self.client.start_turn(
+            "thread-fixture",
+            "识别这张图片",
+            "fixture-message-image",
+            input_items=items,
+        )
+        self.assertEqual(turn_id, "turn-local-image")
+        self.assertEqual(observed[0][0], "turn/start")
+        self.assertEqual(observed[0][1]["input"], items)
 
     def test_api_key_login_is_exact_and_normalized(self) -> None:
         self.client.start()
@@ -545,6 +568,34 @@ class ToolRouterTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_attachment_preview_uses_non_consuming_gateway_endpoint(self) -> None:
+        content = b"synthetic-image"
+        digest = hashlib.sha256(content).hexdigest()
+        observed: list[str] = []
+
+        def fake_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[dict, bytes]:
+            observed.append(url)
+            self.assertEqual(method, "GET")
+            self.assertEqual(token, "g" * 32)
+            self.assertEqual(max_bytes, 20 * 1024 * 1024)
+            return {
+                "original_filename": "receipt.jpg",
+                "mime_type": "image/jpeg",
+                "size_bytes": len(content),
+                "sha256": f"sha256:{digest}",
+            }, content
+
+        router = ToolRouter(
+            gateway_base_url="http://weixin-gateway:8103",
+            gateway_token="g" * 32,
+            request_bytes=fake_bytes,
+        )
+        metadata, preview = router.preview_attachment("a" * 43)
+        self.assertEqual(preview, content)
+        self.assertEqual(metadata["sha256"], f"sha256:{digest}")
+        self.assertEqual(observed, [f"http://weixin-gateway:8103/internal/v1/attachments/{'a' * 43}/preview"])
+
+
     def test_attachment_tool_is_hidden_without_gateway_credentials(self) -> None:
         router = ToolRouter(ledger_base_url="http://renovation-hub:8101", ledger_token="l" * 32)
         self.assertNotIn("ledger_attach", router.available_tools())
@@ -581,6 +632,45 @@ class ToolRouterTests(unittest.TestCase):
         forwarded = observed[0][5]
         self.assertNotIn("attachment_ref", forwarded)
         self.assertNotIn("content_base64", forwarded)
+
+
+class TurnMediaManagerTests(unittest.TestCase):
+    def test_image_preview_becomes_private_local_image_and_is_cleaned_after_turn(self) -> None:
+        content = b"synthetic-jpeg-content"
+        digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "turn-media"
+
+            def preview(reference: str) -> tuple[dict, bytes]:
+                self.assertEqual(reference, "a" * 43)
+                return {
+                    "original_filename": "receipt.jpg",
+                    "mime_type": "image/jpeg",
+                    "size_bytes": len(content),
+                    "sha256": digest,
+                }, content
+
+            manager = TurnMediaManager(root, preview)
+            payload = fixture_job(text="请识别并记录")
+            payload["attachments"] = [
+                {
+                    "attachment_ref": "a" * 43,
+                    "media_type": "image",
+                    "size_bytes": len(content),
+                    "sha256": digest,
+                }
+            ]
+            items = manager.prepare("fixture-job-image", payload)
+            self.assertEqual([item["type"] for item in items], ["text", "localImage"])
+            self.assertIn("attachment_ref=" + "a" * 43, items[0]["text"])
+            image_path = Path(items[1]["path"])
+            self.assertTrue(image_path.is_file())
+            self.assertEqual(image_path.read_bytes(), content)
+            self.assertEqual(image_path.stat().st_mode & 0o777, 0o600)
+            manager.bind_turn("fixture-job-image", "turn-image")
+            manager.cleanup_turn("turn-image")
+            self.assertFalse(image_path.exists())
+            self.assertEqual(list(root.iterdir()), [])
 
 
 class ControllerServiceRaceTests(unittest.TestCase):

@@ -106,7 +106,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.2"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.3"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -240,13 +240,20 @@ class AppServerClient:
         if not isinstance(thread, dict) or thread.get("id") != thread_id:
             raise AppServerError("thread_unavailable", "thread/resume 返回不匹配")
 
-    def start_turn(self, thread_id: str, text: str, message_id: str) -> str:
+    def start_turn(
+        self,
+        thread_id: str,
+        text: str,
+        message_id: str,
+        *,
+        input_items: list[dict[str, Any]] | None = None,
+    ) -> str:
         result = self.request(
             "turn/start",
             {
                 "threadId": thread_id,
                 "clientUserMessageId": message_id,
-                "input": [{"type": "text", "text": text}],
+                "input": input_items if input_items is not None else [{"type": "text", "text": text}],
                 "approvalPolicy": "never",
             },
         )

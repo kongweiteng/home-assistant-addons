@@ -18,6 +18,7 @@ from .store import StoreError
 
 
 ATTACHMENT_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})$")
+ATTACHMENT_PREVIEW_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/preview$")
 
 
 def create_server(
@@ -56,6 +57,17 @@ def create_server(
                 else:
                     self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "qr_not_found"}})
                 return
+            preview_match = ATTACHMENT_PREVIEW_RE.fullmatch(path)
+            if preview_match:
+                if not self._authorized():
+                    return
+                try:
+                    metadata, content = service.store.preview_attachment(unquote(preview_match.group(1)))
+                except StoreError as exc:
+                    self._json(HTTPStatus(exc.status), {"error": {"code": exc.code, "message": str(exc)}})
+                    return
+                self._attachment(metadata, content)
+                return
             match = ATTACHMENT_RE.fullmatch(path)
             if match:
                 if not self._authorized():
@@ -65,12 +77,7 @@ def create_server(
                 except StoreError as exc:
                     self._json(HTTPStatus(exc.status), {"error": {"code": exc.code, "message": str(exc)}})
                     return
-                self.send_response(HTTPStatus.OK)
-                self._headers(metadata["mime_type"], len(content))
-                self.send_header("X-Attachment-Filename", base64.urlsafe_b64encode(metadata["original_filename"].encode("utf-8")).decode("ascii"))
-                self.send_header("X-Attachment-Sha256", metadata["sha256"])
-                self.end_headers()
-                self.wfile.write(content)
+                self._attachment(metadata, content)
                 return
             self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
 
@@ -151,6 +158,17 @@ def create_server(
             self._headers(content_type, len(body))
             self.end_headers()
             self.wfile.write(body)
+
+        def _attachment(self, metadata: dict[str, Any], content: bytes) -> None:
+            self.send_response(HTTPStatus.OK)
+            self._headers(metadata["mime_type"], len(content))
+            self.send_header(
+                "X-Attachment-Filename",
+                base64.urlsafe_b64encode(metadata["original_filename"].encode("utf-8")).decode("ascii"),
+            )
+            self.send_header("X-Attachment-Sha256", metadata["sha256"])
+            self.end_headers()
+            self.wfile.write(content)
 
         def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

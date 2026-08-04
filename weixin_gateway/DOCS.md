@@ -43,6 +43,8 @@
 - 游标只在消息已持久化后推进；跨重启以 SQLite `message_id` 去重。
 - 原始微信 ID 只用于 Gateway allowlist；Controller 收到 `sha256("weixin:" + user_id)`。
 - 入站图片、文件、视频和语音使用固定微信 CDN、大小限制与 AES 解密，生成短期一次性 `attachment_ref`。
+- Controller 可通过同一 bearer 调用 `/internal/v1/attachments/<ref>/preview` 非消费读取正文，用于官方 Codex `localImage`；预览后原引用仍可由账本或媒体归档工具消费。
+- `/internal/v1/attachments/<ref>` 保持一次性消费语义。预览与消费都核验文件路径、大小和 SHA-256；引用已消费或过期后，两种接口都返回不可用。
 - 出站文本按最多 4000 字符分块，并使用确定性 client ID，重试不会生成新发送键。
 
 ## 回滚

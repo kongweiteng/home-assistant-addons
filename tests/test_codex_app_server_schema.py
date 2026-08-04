@@ -65,6 +65,9 @@ class AppServerSchemaCompatibilityTests(unittest.TestCase):
         self.assertEqual(set(turn_start["required"]), {"input", "threadId"})
         for field in ("clientUserMessageId", "approvalPolicy"):
             self.assertIn(field, turn_start["properties"])
+        turn_start_serialized = json.dumps(turn_start, ensure_ascii=False)
+        for field in ('"localImage"', '"path"', '"detail"'):
+            self.assertIn(field, turn_start_serialized)
 
         item_completed = self.load("v2/ItemCompletedNotification.json")
         self.assertTrue({"threadId", "turnId", "item"}.issubset(item_completed["required"]))

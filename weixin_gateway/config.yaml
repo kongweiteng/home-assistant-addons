@@ -1,5 +1,5 @@
 name: Weixin Gateway
-version: "0.1.0"
+version: "0.1.1"
 slug: weixin_gateway
 description: "保留个人微信 iLink 身份的最小消息与媒体网关。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"

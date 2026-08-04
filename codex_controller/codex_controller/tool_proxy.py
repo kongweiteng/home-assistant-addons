@@ -124,6 +124,19 @@ class ToolRouter:
             tools.extend(sorted(OPERATIONS_TOOLS))
         return tools
 
+    def preview_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
+        """Fetch a verified, non-consuming attachment preview for Codex input."""
+        if not self.gateway_base_url or len(self.gateway_token) < 32:
+            raise ToolProxyError("gateway_unavailable", "Weixin Gateway 附件接口未配置")
+        if not isinstance(reference, str) or not ATTACHMENT_REF_RE.fullmatch(reference):
+            raise ToolProxyError("attachment_ref_invalid", "attachment_ref 无效")
+        return self.request_bytes(
+            "GET",
+            f"{self.gateway_base_url}/internal/v1/attachments/{quote(reference, safe='')}/preview",
+            self.gateway_token,
+            MAX_GATEWAY_ATTACHMENT_BYTES,
+        )
+
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")

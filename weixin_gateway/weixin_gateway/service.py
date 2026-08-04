@@ -406,7 +406,7 @@ class GatewayService:
     def status(self) -> dict[str, Any]:
         identity = None if self.identity is None else self.identity_store.public_summary(self.identity)
         return {
-            "version": "0.1.0",
+            "version": "0.1.1",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,

@@ -24,6 +24,12 @@ class AppServerError(RuntimeError):
 class AppServerClient:
     """Owns one app-server process and its request/notification correlation."""
 
+    DEVELOPER_INSTRUCTIONS = (
+        "你通过微信作为所有者的通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
+        "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，才使用已配置的结构化 MCP 工具；"
+        "不得使用 Shell、任意文件路径或自然语言绕过审批。不要输出内部推理、Token、路径或工具秘密。"
+    )
+
     SAFE_ENV_KEYS = {
         "PATH",
         "LANG",
@@ -106,7 +112,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.3"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.4"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -222,10 +228,7 @@ class AppServerClient:
                 "cwd": str(self.workspace),
                 "sandbox": "read-only",
                 "approvalPolicy": "never",
-                "developerInstructions": (
-                    "你通过微信为所有者处理任务。只使用已配置的结构化 MCP 工具执行装修账本或 Home Assistant 操作；"
-                    "不得使用 Shell、任意文件路径或自然语言绕过审批。不要输出内部推理、Token、路径或工具秘密。"
-                ),
+                "developerInstructions": self.DEVELOPER_INSTRUCTIONS,
             },
         )
         thread = result.get("thread") if isinstance(result, dict) else None

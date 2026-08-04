@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.1.4
+
+- 明确微信入口是通用 Codex 助手，而不是装修专用机器人。
+- 普通问答、讨论、分析、写作和规划默认由 Codex 直接回答；仅在用户意图确实需要装修账本或 Home Assistant 操作时调用结构化 MCP 工具。
+- 保持只读 sandbox、`approvalPolicy=never`、单活动 Turn、最小权限工具和秘密隔离边界不变。
+
 ## 0.1.3
 
 - 新增 Gateway 非消费附件预览到官方 app-server `localImage` 的微信图片输入链路。

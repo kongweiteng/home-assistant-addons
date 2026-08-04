@@ -161,6 +161,22 @@ class AppServerClientTests(unittest.TestCase):
         self.assertTrue(self.event.wait(2))
         self.assertIn("item/completed", [message.get("method") for message in self.notifications])
 
+    def test_thread_instructions_keep_weixin_as_general_codex_entry(self) -> None:
+        observed: list[tuple[str, dict]] = []
+
+        def fake_request(method: str, params: dict) -> dict:
+            observed.append((method, params))
+            return {"thread": {"id": "thread-general", "turns": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(self.client.start_thread(), "thread-general")
+        instructions = observed[0][1]["developerInstructions"]
+        self.assertIn("通用 Codex 助手", instructions)
+        self.assertIn("不得把所有消息默认解释为装修事项", instructions)
+        self.assertIn("只有用户意图确实需要装修账本或 Home Assistant 操作时", instructions)
+        self.assertIn("普通问答", instructions)
+        self.assertIn("不得使用 Shell", instructions)
+
     def test_turn_accepts_official_local_image_input(self) -> None:
         observed: list[tuple[str, dict]] = []
 

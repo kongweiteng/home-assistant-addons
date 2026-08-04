@@ -303,7 +303,7 @@ class RenovationHubStore(LedgerStore):
         contexts = [
             dict(row)
             for row in connection.execute(
-                "SELECT transaction_id,project_id,stage_id,area_id,version,updated_at FROM transaction_context ORDER BY transaction_id"
+                "SELECT transaction_id,project_id,stage_id,area_id,version,updated_at FROM transaction_context ORDER BY CAST(transaction_id AS INTEGER)"
             )
         ]
         expected_contexts = [

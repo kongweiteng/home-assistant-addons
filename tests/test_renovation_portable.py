@@ -568,6 +568,55 @@ class RenovationPortableTests(unittest.TestCase):
                 2,
             )
 
+    def test_canonical_extension_validation_uses_numeric_transaction_order(self) -> None:
+        root = self.root / "numeric-transaction-order"
+        store = RenovationHubStore(
+            root / "ledger.sqlite3",
+            data_dir=root,
+            share_dir=root / "share",
+            enforce_cutover_manifest=True,
+        )
+        state = {
+            "transactions": [
+                {
+                    "id": transaction_id,
+                    "updated_at": "2026-08-04T00:00:00Z",
+                }
+                for transaction_id in range(1, 13)
+            ]
+        }
+        source_sha256 = "a" * 64
+        with store._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO transactions(
+                    id,legacy_id,type,amount_cents,occurred_on,created_at,updated_at
+                ) VALUES (?,?,?,?,?,?,?)
+                """,
+                [
+                    (
+                        str(transaction_id),
+                        transaction_id,
+                        "payment",
+                        1,
+                        "2026-08-04",
+                        "2026-08-04T00:00:00Z",
+                        "2026-08-04T00:00:00Z",
+                    )
+                    for transaction_id in range(1, 13)
+                ],
+            )
+            store._after_canonical_restore(connection, state, source_sha256)
+            store._validate_canonical_extensions(connection, state, source_sha256)
+            transaction_ids = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT transaction_id FROM transaction_context "
+                    "ORDER BY CAST(transaction_id AS INTEGER)"
+                )
+            ]
+        self.assertEqual(transaction_ids, [str(item) for item in range(1, 13)])
+
     def test_each_suspend_rotates_writer_generation_and_rejects_prior_confirmation(self) -> None:
         root = self.root / "generation-rotation"
         store = RenovationHubStore(

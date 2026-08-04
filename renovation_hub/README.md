@@ -25,11 +25,12 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 
 ## 当前阶段
 
-- 版本：`0.2.0`，实验候选。
+- 版本：`0.2.1`，实验候选。
 - 默认 `writer_mode=read_only`。
 - P1～P6 本地源码与合成验证已完成；最终完整门禁和 amd64/aarch64 镜像证据以当前交付报告为准，不复用旧候选结果。
 - 维护者 HAOS 已完成本地 Store 只读影子安装、Ingress、权限、真实未登录 Controller 路由和重启持久化验证；未创建 GitHub Release。
 - 已具备 verified staging、来源冻结、空主库播种、播种中断确认性恢复、动态确认激活、重启租约恢复和 options 紧急停写/显式恢复的本地实现；本次源码交付没有执行正式迁移。
+- 真实规模来源账本的 `transaction_context` 校验按数值流水 ID 排序，避免 `1,10,100...` 的文本顺序误报不变量漂移。
 - Hermes 是否仍为唯一正式 writer 必须以当前 HAOS 运行证据为准；代码存在不代表 writer 已切换。
 
 ## 安全边界

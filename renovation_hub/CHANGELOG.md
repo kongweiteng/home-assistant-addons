@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.1
+
+- 修复正式播种前 Hub 派生 `transaction_context` 使用文本流水 ID 排序的问题；真实账本超过 9 条流水时不再因 `1,10,100...` 与数值顺序不一致而误报 `invariant_mismatch`。
+- 新增 12 条流水的数值排序回归测试；不改变 portable v1/v2、manifest、writer generation、active lease 或正式写入语义。
+
 ## 0.2.0
 
 - 新增 v2 原生主库字段：账本格式版本、稳定流水/附件 portable ID，以及九维分组标签的 dimension/value/created_at。

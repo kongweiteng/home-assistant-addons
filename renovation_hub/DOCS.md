@@ -41,7 +41,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.0` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.1` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
@@ -49,6 +49,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 - `ledger.json`、三个 CSV、`audit_log.jsonl` 与 SQLite 的逐字段一致性。
 - 分类、标签、月份汇总、附件元数据/文件哈希、审计数量/顺序/前后值。
 - v2 的 SQLite Schema 3、无主分类约束、九个固定标签维度、标签数量/长度/顺序、`grouped_tags`、`grouped_tags_json` 和 `tags + dimensions` 汇总。
+- Hub 派生 `transaction_context` 按整数流水 ID 排序后与来源状态逐项核对，兼容超过 9 条流水的真实账本。
 
 成功导入后，`/data/shadow/<来源 SHA-256>/` 保存只读来源快照、全部附件、Hub 兼容 `ledger.sqlite3` 和 `report.json`。报告只包含结构计数、校验布尔值和摘要哈希，不包含金额、商家、备注、附件正文或绝对私有路径。重复导入会重新校验来源快照、规范化数据库和附件，不会仅返回旧报告。
 

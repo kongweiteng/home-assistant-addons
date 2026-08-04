@@ -19,7 +19,7 @@ from codex_controller.app_server import AppServerClient, AppServerError
 from codex_controller.main import normalize_codex_model, normalize_openai_base_url, read_api_key_from_fd, write_codex_config
 from codex_controller.mcp_proxy import socket_call, tool_catalog
 from codex_controller.media_input import TurnMediaManager
-from codex_controller.service import ControllerService
+from codex_controller.service import ControllerService, NEW_THREAD_RESULT, is_new_thread_command
 from codex_controller.store import ControllerStore, StoreError
 from codex_controller.tool_proxy import ToolProxyError, ToolProxyServer, ToolRouter, validate_base_url
 
@@ -591,6 +591,35 @@ class ControllerAuthenticationTests(unittest.TestCase):
             service.stop()
             temporary.cleanup()
 
+    def test_status_exposes_only_sanitized_tool_catalog(self) -> None:
+        app = self.StubApp(auth_mode="apiKey")
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            operations_base_url="http://ha-operations-broker:8098",
+            operations_token="o" * 32,
+        )
+        temporary, service = self.make_service(
+            app,
+            auth_mode="api_key",
+            api_key="fixture-api-key-value",
+            tool_context=router,
+        )
+        try:
+            status = service.status()
+            self.assertEqual(status["tools"]["count"], 31)
+            self.assertTrue(status["tools"]["renovation_hub"])
+            self.assertTrue(status["tools"]["operations"])
+            self.assertIn("ledger_summary", status["tools"]["names"])
+            serialized = json.dumps(status, ensure_ascii=False)
+            self.assertNotIn("renovation-hub:8101", serialized)
+            self.assertNotIn("fixture-api-key-value", serialized)
+            self.assertNotIn("l" * 32, serialized)
+            self.assertNotIn("o" * 32, serialized)
+        finally:
+            service.stop()
+            temporary.cleanup()
+
     def test_existing_wrong_account_fails_closed_until_explicit_retry(self) -> None:
         secret = "fixture-api-key-value"
         app = self.StubApp(auth_mode="chatgpt")
@@ -657,7 +686,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.1.7"
+        expected = "0.1.8"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/service.py",
@@ -707,6 +736,80 @@ class ControllerAuthenticationTests(unittest.TestCase):
             self.assertEqual(app.started, [])
             self.assertEqual(app.resumed, ["thread-existing"])
             self.assertEqual(store.get_job(second_running["job_id"])["thread_id"], "thread-existing")
+
+    def test_new_thread_command_is_exact_and_attachment_free(self) -> None:
+        self.assertTrue(is_new_thread_command(fixture_job(text="打开新会话")))
+        self.assertTrue(is_new_thread_command(fixture_job(text="  打开新会话  ")))
+        self.assertTrue(is_new_thread_command(fixture_job(text="/new")))
+        self.assertTrue(is_new_thread_command(fixture_job(text="  /new  ")))
+        self.assertFalse(is_new_thread_command(fixture_job(text="请打开新会话")))
+        self.assertFalse(is_new_thread_command(fixture_job(text="/new topic")))
+        self.assertFalse(is_new_thread_command(fixture_job(text="打开一个新会话")))
+        with_attachment = fixture_job(text="打开新会话")
+        with_attachment["attachments"] = [
+            {
+                "attachment_ref": "a" * 43,
+                "media_type": "image",
+                "size_bytes": 1,
+                "sha256": "sha256:" + "b" * 64,
+            }
+        ]
+        self.assertFalse(is_new_thread_command(with_attachment))
+
+    def test_dispatch_replaces_existing_thread_without_starting_a_model_turn(self) -> None:
+        class App:
+            notification_handler = None
+
+            def __init__(self) -> None:
+                self.started = 0
+                self.resumed: list[str] = []
+                self.turns: list[tuple[str, str]] = []
+
+            def start_thread(self) -> str:
+                self.started += 1
+                return "thread-refreshed"
+
+            def resume_thread(self, thread_id: str) -> None:
+                self.resumed.append(thread_id)
+
+            def start_turn(self, thread_id: str, text: str, _message_id: str, *, input_items: object = None) -> str:
+                self.turns.append((thread_id, text))
+                return "turn-after-refresh"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            first = store.create_job(fixture_job("fixture-before-refresh"))
+            first_running = store.claim_next()
+            assert first_running is not None
+            store.assign_thread(first["job_id"], "thread-stale")
+            store.assign_turn(first["job_id"], "turn-stale")
+            store.complete_turn("turn-stale", "completed")
+
+            reset = store.create_job(fixture_job("fixture-reset", text="打开新会话"))
+            reset_running = store.claim_next()
+            assert reset_running is not None
+            app = App()
+            service = ControllerService(store, app, intake_enabled=False)  # type: ignore[arg-type]
+            service._dispatch(reset_running)
+
+            completed = store.get_job(reset["job_id"])
+            self.assertEqual(completed["state"], "completed")
+            self.assertEqual(completed["thread_id"], "thread-refreshed")
+            self.assertEqual(completed["result"], NEW_THREAD_RESULT)
+            self.assertEqual(app.started, 1)
+            self.assertEqual(app.resumed, [])
+            self.assertEqual(app.turns, [])
+
+            duplicate = store.create_job(fixture_job("fixture-reset", text="打开新会话"))
+            self.assertEqual(duplicate["job_id"], reset["job_id"])
+            self.assertEqual(duplicate["state"], "completed")
+
+            store.create_job(fixture_job("fixture-after-refresh", text="当前连接装修账本了吗"))
+            next_running = store.claim_next()
+            assert next_running is not None
+            service._dispatch(next_running)
+            self.assertEqual(app.resumed, ["thread-refreshed"])
+            self.assertEqual(app.turns, [("thread-refreshed", "当前连接装修账本了吗")])
 
 
 class ToolRouterTests(unittest.TestCase):

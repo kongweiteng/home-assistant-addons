@@ -11,6 +11,17 @@ from .media_input import MediaInputError, TurnMediaManager
 from .store import ControllerStore, StoreError
 
 
+NEW_THREAD_COMMANDS = frozenset({"打开新会话", "/new"})
+NEW_THREAD_RESULT = "新会话已建立。下一条消息将使用当前 Codex 配置和工具目录。"
+
+
+def is_new_thread_command(payload: dict[str, Any]) -> bool:
+    """Recognize the exact attachment-free user control command."""
+    text = payload.get("text")
+    attachments = payload.get("attachments")
+    return isinstance(text, str) and text.strip() in NEW_THREAD_COMMANDS and attachments == []
+
+
 class ControllerService:
     AUTH_MODES = {"chatgpt_device_code", "api_key"}
 
@@ -109,10 +120,11 @@ class ControllerService:
 
     def status(self) -> dict[str, Any]:
         app = self.app_server.status()
+        available_tools = self.tool_context.available_tools() if self.tool_context is not None else []
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.1.7",
+            "version": "0.1.8",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -131,6 +143,15 @@ class ControllerService:
             ),
             "start_error": self.start_error,
             "app_server": app,
+            "tools": {
+                "count": len(available_tools),
+                "renovation_hub": any(
+                    name.startswith("ledger_") or name.startswith("renovation_")
+                    for name in available_tools
+                ),
+                "operations": any(name.startswith("ha_operations_") for name in available_tools),
+                "names": available_tools,
+            },
             "pending_login": self.pending_login,
             "queue": self.store.status(),
         }
@@ -184,6 +205,10 @@ class ControllerService:
         turn_started = False
         try:
             payload = job["input"]
+            if is_new_thread_command(payload):
+                thread_id = self.app_server.start_thread()
+                self.store.complete_new_thread(job["job_id"], thread_id, NEW_THREAD_RESULT)
+                return
             if self.tool_context is not None:
                 self.tool_context.begin_job(job["job_id"], payload["message_id"])
             thread_id = self.store.conversation_thread(job["conversation_key"])

@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.8
+
+- 将无附件且文本精确为“打开新会话”或 `/new` 的微信作业识别为 Controller 控制命令，不再把它交给旧 Codex Thread 当普通问题处理。
+- 控制命令通过官方 app-server 创建新 Thread，并在同一 SQLite 事务中替换当前会话映射、完成作业和写入审计；模型不会自行宣称是否创建成功。
+- 旧 Thread 不删除、不重放；下一条普通消息恢复新 Thread，重新使用当前 developer instructions 和 MCP 工具目录。队列、幂等、单活动 Turn 与 `recovery_required` 阻断保持不变。
+- 状态 API 和 Ingress 新增脱敏工具目录计数及 Renovation Hub/Operations 配置状态，便于区分旧 Thread、无工具目录和外部路由失败，不显示 bearer 或 URL。
+
 ## 0.1.7
 
 - 修复持久 Thread 只在首次创建时注入 developer instructions、恢复时继续沿用旧架构上下文的问题；`thread/resume` 现在按官方 app-server Schema 重新传入当前 developer instructions、只读 sandbox、工作目录和 `approvalPolicy=never`。

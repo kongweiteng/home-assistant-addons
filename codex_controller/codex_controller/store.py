@@ -231,6 +231,38 @@ class ControllerStore:
             )
             connection.execute("UPDATE jobs SET thread_id=? WHERE job_id=?", (thread_id, job_id))
 
+    def complete_new_thread(self, job_id: str, thread_id: str, result_text: str) -> dict[str, Any]:
+        """Atomically replace the conversation Thread and complete its control job."""
+        if not thread_id:
+            raise StoreError("thread_unavailable", "Thread ID 为空", status=502)
+        bounded = result_text[: self.max_result_chars]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT conversation_key,state FROM jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+            if row is None or row["state"] != "running":
+                raise StoreError("job_state_conflict", "作业不在运行状态", status=409)
+            now = utc_now()
+            connection.execute(
+                "UPDATE conversations SET thread_id=?,updated_at=? WHERE conversation_key=?",
+                (thread_id, now, row["conversation_key"]),
+            )
+            connection.execute(
+                "UPDATE jobs SET thread_id=?,state='completed',result_text=?,error_code=NULL,finished_at=? "
+                "WHERE job_id=? AND state='running'",
+                (thread_id, bounded, now, job_id),
+            )
+            self._event(
+                connection,
+                job_id,
+                "new_thread_started",
+                item_type="controllerControl",
+                content_length=len(result_text),
+            )
+            completed = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            return self._job_document(connection, completed)
+
     def conversation_thread(self, conversation_key: str) -> str | None:
         with self._connect() as connection:
             row = connection.execute(

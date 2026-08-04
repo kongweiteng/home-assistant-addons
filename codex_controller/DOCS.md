@@ -1,5 +1,7 @@
 # Codex Controller 使用说明
 
+当前版本：`0.1.9`。
+
 ## 通用微信会话
 
 - 微信入口默认是通用 Codex 助手，可处理普通问答、讨论、分析、写作、规划和其他不需要外部执行的任务。
@@ -7,6 +9,7 @@
 - 只有用户意图确实需要装修账本或 Home Assistant 操作时，才允许调用对应的结构化 MCP 工具；工具权限、审批和写入边界仍按各组件配置执行。
 - 每次新建或恢复持久 Thread 都会重新注入当前 developer instructions、只读 sandbox 和 `approvalPolicy=never`。即使历史会话曾讨论 Mac 代理、Hermes 或旧迁移状态，当前能力也必须以本轮 MCP 工具目录和实际调用结果为准。
 - 微信 owner 发送无附件且文本精确为“打开新会话”或 `/new` 时，Controller 会在既有队列与幂等门禁内创建新 Thread，并返回确定性确认。近似文本或带附件消息不会触发重置；旧 Thread 不删除，下一条普通消息才进入新 Thread。
+- 新 Thread 在当前 app-server 进程中已经处于加载状态，下一条消息不会重复调用 `thread/resume`；Controller/app-server 重启后进程内状态清空，持久 Thread 才会重新执行一次安全恢复。
 - Ingress 详情显示当前工具总数，以及装修/运维工具是否已配置。该状态只反映启动时脱敏目录，不显示 URL 或 bearer；正式可用仍需实际只读工具调用验证。
 - Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
 

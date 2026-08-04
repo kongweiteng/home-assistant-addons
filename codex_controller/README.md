@@ -23,6 +23,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.1.6` 增加 Operations Broker 固定路由、按实际配置过滤工具，以及由 Controller 基于微信消息上下文生成的稳定写入幂等键。
 - `0.1.7` 在每次恢复持久 Thread 时重新注入当前 developer instructions 和只读安全策略；提示词按实际工具目录声明 Renovation Hub/Operations 能力，并要求账本连接状态、汇总和明细先做结构化只读核验，禁止沿用旧 Mac 代理或 Hermes 上下文误报“未连接”。
 - `0.1.8` 支持精确微信控制命令“打开新会话”和 `/new`：Controller 确定性创建新 Thread 并原子替换当前映射，不让旧 Thread 或模型伪装成已经切换；下一条消息使用当前工具目录。
+- `0.1.9` 修复同一 app-server 进程内新建 Thread 被下一条消息重复 `thread/resume` 的问题；当前进程已加载的 Thread 直接进入 `turn/start`，Controller/app-server 重启后才按持久映射恢复。
 - 默认仍不启用正式微信任务入口。
 - 旧 Hermes iLink 身份已经失效；正式装修 writer 已迁移到 Renovation Hub，Hermes 已停止，微信恢复不能依赖恢复旧 Hermes 进程，也不得形成双 poller 或双 writer。
 

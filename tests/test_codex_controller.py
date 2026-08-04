@@ -75,6 +75,7 @@ FAKE_APP_SERVER = r'''
 import json, sys
 thread_id = "thread-fixture"
 account_type = "chatgpt"
+thread_loaded = False
 for line in sys.stdin:
     message = json.loads(line)
     if "id" not in message:
@@ -103,7 +104,14 @@ for line in sys.stdin:
     elif method == "account/logout":
         account_type = None
         result = {}
-    elif method in ("thread/start", "thread/resume"):
+    elif method == "thread/start":
+        thread_loaded = True
+        result = {"thread":{"id":thread_id,"turns":[]}}
+    elif method == "thread/resume":
+        if thread_loaded:
+            print(json.dumps({"id":request_id,"error":{"code":-32602,"message":"thread already loaded"}}), flush=True)
+            continue
+        thread_loaded = True
         result = {"thread":{"id":thread_id,"turns":[]}}
     elif method == "turn/start":
         result = {"turn":{"id":"turn-fixture","status":"inProgress","items":[]}}
@@ -269,6 +277,7 @@ class AppServerClientTests(unittest.TestCase):
 
         self.client.request = fake_request  # type: ignore[method-assign]
         self.assertEqual(self.client.start_thread(), "thread-general")
+        self.assertEqual(observed[0][0], "thread/start")
         instructions = observed[0][1]["developerInstructions"]
         self.assertIn("通用 Codex 助手", instructions)
         self.assertIn("不得把所有消息默认解释为装修事项", instructions)
@@ -297,6 +306,91 @@ class AppServerClientTests(unittest.TestCase):
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(params["developerInstructions"], self.client.developer_instructions)
         self.assertIn("Renovation Hub", params["developerInstructions"])
+
+    def test_new_thread_is_not_resumed_again_in_the_same_process(self) -> None:
+        observed: list[str] = []
+
+        def fake_request(method: str, _params: dict) -> dict:
+            observed.append(method)
+            return {"thread": {"id": "thread-new", "turns": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(self.client.start_thread(), "thread-new")
+        self.client.resume_thread("thread-new")
+        self.assertEqual(observed, ["thread/start"])
+
+    def test_stop_clears_loaded_threads_and_requires_resume_after_restart(self) -> None:
+        observed: list[str] = []
+
+        def fake_request(method: str, _params: dict) -> dict:
+            observed.append(method)
+            return {"thread": {"id": "thread-restart", "turns": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(self.client.start_thread(), "thread-restart")
+        self.client.stop()
+        self.client.resume_thread("thread-restart")
+        self.assertEqual(observed, ["thread/start", "thread/resume"])
+
+    def test_concurrent_resume_of_unknown_thread_sends_only_one_rpc(self) -> None:
+        observed: list[str] = []
+        entered = threading.Event()
+        release = threading.Event()
+        failures: list[BaseException] = []
+
+        def fake_request(method: str, _params: dict) -> dict:
+            observed.append(method)
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {"thread": {"id": "thread-concurrent", "turns": []}}
+
+        def resume() -> None:
+            try:
+                self.client.resume_thread("thread-concurrent")
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                failures.append(exc)
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        first = threading.Thread(target=resume)
+        second = threading.Thread(target=resume)
+        first.start()
+        self.assertTrue(entered.wait(2))
+        second.start()
+        release.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(observed, ["thread/resume"])
+
+    def test_new_command_then_next_job_reaches_turn_without_duplicate_resume(self) -> None:
+        self.client.start()
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            service = ControllerService(store, self.client, intake_enabled=False)
+
+            reset = store.create_job(fixture_job("fixture-new-command", text="/new"))
+            reset_running = store.claim_next()
+            assert reset_running is not None
+            service._dispatch(reset_running)
+            self.assertEqual(store.get_job(reset["job_id"])["state"], "completed")
+
+            query = store.create_job(
+                fixture_job("fixture-query-after-new", text="当前连接装修账本了吗")
+            )
+            query_running = store.claim_next()
+            assert query_running is not None
+            service._dispatch(query_running)
+
+            deadline = time.monotonic() + 2
+            current = store.get_job(query["job_id"])
+            while current["state"] == "running" and time.monotonic() < deadline:
+                time.sleep(0.01)
+                current = store.get_job(query["job_id"])
+            self.assertEqual(current["state"], "completed")
+            self.assertEqual(current["thread_id"], "thread-fixture")
+            self.assertEqual(current["result"], "查询完成。")
 
     def test_current_instructions_describe_only_the_configured_tool_families(self) -> None:
         operations_only = AppServerClient.build_developer_instructions(
@@ -686,13 +780,15 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.1.8"
+        expected = "0.1.9"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
+            "codex_controller/api.py",
             "codex_controller/service.py",
             "codex_controller/app_server.py",
             "codex_controller/mcp_proxy.py",
             "README.md",
+            "DOCS.md",
             "CHANGELOG.md",
         ):
             with self.subTest(relative=relative):

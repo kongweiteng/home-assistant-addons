@@ -28,7 +28,7 @@ def create_server(
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.1.8"
+        server_version = "CodexController/0.1.9"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

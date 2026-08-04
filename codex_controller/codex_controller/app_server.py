@@ -68,6 +68,8 @@ class AppServerClient:
         self._pending: dict[int, queue.Queue[dict[str, Any]]] = {}
         self._pending_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._thread_load_lock = threading.Lock()
+        self._loaded_thread_ids: set[str] = set()
         self._stopped = threading.Event()
         self._threads: list[threading.Thread] = []
         self._protocol_error: AppServerError | None = None
@@ -109,6 +111,8 @@ class AppServerClient:
     def start(self) -> None:
         if self.process is not None and self.process.poll() is None:
             return
+        with self._thread_load_lock:
+            self._loaded_thread_ids.clear()
         self.codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.workspace.mkdir(parents=True, mode=0o700, exist_ok=True)
         self._stopped.clear()
@@ -133,7 +137,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.8"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.9"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -158,6 +162,8 @@ class AppServerClient:
         for thread in self._threads:
             thread.join(timeout=1)
         self._threads = []
+        with self._thread_load_lock:
+            self._loaded_thread_ids.clear()
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if self.process is None or self.process.poll() is not None:
@@ -243,35 +249,41 @@ class AppServerClient:
         return result
 
     def start_thread(self) -> str:
-        result = self.request(
-            "thread/start",
-            {
-                "cwd": str(self.workspace),
-                "sandbox": "read-only",
-                "approvalPolicy": "never",
-                "developerInstructions": self.developer_instructions,
-            },
-        )
-        thread = result.get("thread") if isinstance(result, dict) else None
-        thread_id = thread.get("id") if isinstance(thread, dict) else None
-        if not isinstance(thread_id, str) or not thread_id:
-            raise AppServerError("thread_unavailable", "thread/start 未返回 Thread ID")
-        return thread_id
+        with self._thread_load_lock:
+            result = self.request(
+                "thread/start",
+                {
+                    "cwd": str(self.workspace),
+                    "sandbox": "read-only",
+                    "approvalPolicy": "never",
+                    "developerInstructions": self.developer_instructions,
+                },
+            )
+            thread = result.get("thread") if isinstance(result, dict) else None
+            thread_id = thread.get("id") if isinstance(thread, dict) else None
+            if not isinstance(thread_id, str) or not thread_id:
+                raise AppServerError("thread_unavailable", "thread/start 未返回 Thread ID")
+            self._loaded_thread_ids.add(thread_id)
+            return thread_id
 
     def resume_thread(self, thread_id: str) -> None:
-        result = self.request(
-            "thread/resume",
-            {
-                "threadId": thread_id,
-                "cwd": str(self.workspace),
-                "sandbox": "read-only",
-                "approvalPolicy": "never",
-                "developerInstructions": self.developer_instructions,
-            },
-        )
-        thread = result.get("thread") if isinstance(result, dict) else None
-        if not isinstance(thread, dict) or thread.get("id") != thread_id:
-            raise AppServerError("thread_unavailable", "thread/resume 返回不匹配")
+        with self._thread_load_lock:
+            if thread_id in self._loaded_thread_ids:
+                return
+            result = self.request(
+                "thread/resume",
+                {
+                    "threadId": thread_id,
+                    "cwd": str(self.workspace),
+                    "sandbox": "read-only",
+                    "approvalPolicy": "never",
+                    "developerInstructions": self.developer_instructions,
+                },
+            )
+            thread = result.get("thread") if isinstance(result, dict) else None
+            if not isinstance(thread, dict) or thread.get("id") != thread_id:
+                raise AppServerError("thread_unavailable", "thread/resume 返回不匹配")
+            self._loaded_thread_ids.add(thread_id)
 
     def start_turn(
         self,

@@ -23,6 +23,7 @@ from operations_broker.contract import (
     canonical_json,
     sha256_text,
 )
+from operations_broker.manager_executor import ManagerExecutorClient, ManagerExecutorError
 from operations_broker.service import preflight
 from operations_broker.supervisor import SupervisorClient, SupervisorError
 
@@ -124,6 +125,7 @@ class PackagingTests(unittest.TestCase):
             "operations_broker/api.py",
             "operations_broker/authorization.py",
             "operations_broker/execution.py",
+            "operations_broker/manager_executor.py",
             "operations_broker/passkeys.py",
             "operations_broker/ui.py",
             "../tests/fixtures/ha_operations_broker_options.json",
@@ -135,11 +137,11 @@ class PackagingTests(unittest.TestCase):
         package = (ADDON / "operations_broker" / "__init__.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('version: "0.4.0"', config)
-        self.assertIn('server_version = "HAOperationsBroker/0.4.0"', api)
+        self.assertIn('version: "0.5.0"', config)
+        self.assertIn('server_version = "HAOperationsBroker/0.5.0"', api)
         self.assertNotIn('ha-operations-broker/0.1"', supervisor)
-        self.assertIn('ha-operations-broker/0.4.0"', supervisor)
-        self.assertIn('__version__ = "0.4.0"', package)
+        self.assertIn('ha-operations-broker/0.5.0"', supervisor)
+        self.assertIn('__version__ = "0.5.0"', package)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: manager", config)
@@ -152,6 +154,12 @@ class PackagingTests(unittest.TestCase):
         self.assertRegex(config, r"(?m)^\s+execution_enabled: false$")
         self.assertRegex(config, r"(?m)^\s+enabled_actions: \[\]$")
         self.assertRegex(config, r"(?m)^\s+restart_addon_allowlist: \[\]$")
+        self.assertIn('recovery_api_token: ""', config)
+        self.assertIn('backup_evidence_api_token: ""', config)
+        self.assertRegex(config, r"(?m)^\s+manager_shadow_enabled: false$")
+        self.assertIn('manager_executor_base_url: ""', config)
+        self.assertIn('manager_executor_api_token: ""', config)
+        self.assertIn('adapter_version: "manager-restart-v1"', config)
         for forbidden in (
             "homeassistant_api: true",
             "hassio_role: backup",
@@ -166,10 +174,17 @@ class PackagingTests(unittest.TestCase):
     def test_runtime_fails_closed_and_does_not_echo_tokens(self) -> None:
         run = (ADDON / "run.sh").read_text(encoding="utf-8")
         self.assertIn('"${#BROKER_API_TOKEN}" -lt 32', run)
+        self.assertIn('"${#BROKER_RECOVERY_API_TOKEN}" -lt 32', run)
+        self.assertIn('"${#BROKER_BACKUP_EVIDENCE_API_TOKEN}" -lt 32', run)
+        self.assertIn('"$BROKER_API_TOKEN" = "$BROKER_RECOVERY_API_TOKEN"', run)
+        self.assertIn('"$BROKER_RECOVERY_API_TOKEN" = "$BROKER_BACKUP_EVIDENCE_API_TOKEN"', run)
+        self.assertIn('BROKER_MANAGER_SHADOW_ENABLED', run)
         self.assertIn('BROKER_SUPERVISOR_BASE_URL="http://supervisor"', run)
         self.assertIn("unset SUPERVISOR_TOKEN", run)
         self.assertNotIn("set -x", run)
         self.assertNotIn('echo "$BROKER_API_TOKEN', run)
+        self.assertNotIn('echo "$BROKER_RECOVERY_API_TOKEN', run)
+        self.assertNotIn('echo "$BROKER_BACKUP_EVIDENCE_API_TOKEN', run)
         self.assertNotIn('echo "$SUPERVISOR_TOKEN', run)
         self.assertNotIn('echo "$BROKER_PASSKEY_ENROLLMENT_TOKEN', run)
 
@@ -380,6 +395,102 @@ class SupervisorClientTests(unittest.TestCase):
             client.restart_addon("../bad")
 
 
+class ManagerExecutorClientTests(unittest.TestCase):
+    def proposal(self) -> dict:
+        return {
+            "action_id": "OPS-20260805-A1B2C3D4E5F6",
+            "proposal_hash": "sha256:" + "a" * 64,
+            "target": "example_addon",
+            "adapter_version": "manager-restart-v1",
+            "adapter_schema_version": 1,
+            "baseline_etag": "sha256:" + "b" * 64,
+        }
+
+    def test_fixed_internal_shadow_request_and_response(self) -> None:
+        seen = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _limit):
+                proposal = self_outer.proposal()
+                return json.dumps(
+                    {
+                        "version": 1,
+                        "mode": "shadow",
+                        "action_id": proposal["action_id"],
+                        "proposal_hash": proposal["proposal_hash"],
+                        "action_type": "restart_addon",
+                        "target": proposal["target"],
+                        "adapter_version": proposal["adapter_version"],
+                        "adapter_schema_version": proposal["adapter_schema_version"],
+                        "baseline_etag": proposal["baseline_etag"],
+                        "execution_allowed": False,
+                        "observation": {
+                            "slug": "example_addon",
+                            "state": "started",
+                            "version": "1.2.3",
+                            "installed": True,
+                        },
+                    }
+                ).encode()
+
+        self_outer = self
+
+        def opener(request, timeout):
+            seen["method"] = request.get_method()
+            seen["url"] = request.full_url
+            seen["authorization"] = request.headers["Authorization"]
+            seen["timeout"] = timeout
+            return Response()
+
+        client = ManagerExecutorClient(
+            "http://ha-manager-executor:8099", "m" * 32, timeout_seconds=7, opener=opener
+        )
+        result = client.shadow_restart(self.proposal())
+        self.assertEqual(result["mode"], "shadow")
+        self.assertEqual(seen["method"], "POST")
+        self.assertEqual(
+            seen["url"],
+            "http://ha-manager-executor:8099/internal/v1/shadow/restart-addon",
+        )
+        self.assertEqual(seen["authorization"], "Bearer " + "m" * 32)
+        self.assertEqual(seen["timeout"], 7)
+
+    def test_url_and_response_mismatch_fail_closed(self) -> None:
+        for value in (
+            "https://ha-manager-executor:8099",
+            "http://127.0.0.1:8099",
+            "http://ha-manager-executor:8099/path",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ManagerExecutorError):
+                    ManagerExecutorClient(value, "m" * 32)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self, _limit):
+                return json.dumps({"mode": "shadow", "execution_allowed": True}).encode()
+
+        client = ManagerExecutorClient(
+            "http://ha-manager-executor:8099",
+            "m" * 32,
+            opener=lambda *_args, **_kwargs: Response(),
+        )
+        with self.assertRaises(ManagerExecutorError) as raised:
+            client.shadow_restart(self.proposal())
+        self.assertEqual(raised.exception.code, "manager_shadow_mismatch")
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.recovery_calls: list[tuple[str, dict]] = []
@@ -405,6 +516,8 @@ class ApiTests(unittest.TestCase):
             "127.0.0.1",
             0,
             api_token="a" * 32,
+            recovery_api_token="r" * 32,
+            backup_evidence_api_token="b" * 32,
             max_request_bytes=4096,
             preflight_handler=lambda payload: {
                 "received_version": payload.get("version"),
@@ -439,7 +552,7 @@ class ApiTests(unittest.TestCase):
             payload,
             {
                 "status": "ok",
-                "version": 4,
+                "version": 6,
                 "execution_enabled": False,
                 "enabled_actions": [],
             },
@@ -529,11 +642,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(context.exception.code, 401)
         self.assertEqual(self.recovery_calls, [])
 
-        authorized = Request(
+        ordinary_bearer = Request(
             self.base + path,
             data=json.dumps(payload).encode(),
             headers={
                 "Authorization": "Bearer " + "a" * 32,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as context:
+            urlopen(ordinary_bearer)
+        self.assertEqual(context.exception.code, 401)
+        self.assertEqual(self.recovery_calls, [])
+
+        authorized = Request(
+            self.base + path,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Authorization": "Bearer " + "r" * 32,
                 "Content-Type": "application/json",
             },
             method="POST",
@@ -556,7 +683,7 @@ class ApiTests(unittest.TestCase):
                 }
             ).encode(),
             headers={
-                "Authorization": "Bearer " + "a" * 32,
+                "Authorization": "Bearer " + "r" * 32,
                 "Content-Type": "application/json",
             },
             method="POST",

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -15,12 +16,21 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .contract import (
+    DEFAULT_ADAPTER_SCHEMA_VERSION,
+    DEFAULT_ADAPTER_VERSION,
+    DEFAULT_POLICY_EPOCH,
+    DEFAULT_POLICY_HASH,
+    BACKUP_EVIDENCE_ID_RE,
+    NATIVE_PROPOSAL_HASH_FIELDS,
     PROPOSAL_HASH_FIELDS,
+    SHA256_RE,
     ContractError,
+    allowlist_fingerprint,
     canonical_json,
     parse_timestamp,
     sha256_text,
     validate_envelope,
+    validate_backup_evidence,
     validate_native_authorization_request,
     validate_native_intent,
 )
@@ -190,6 +200,52 @@ class AuthorizationStore:
                     FOREIGN KEY(receipt_id) REFERENCES authorization_receipts(receipt_id),
                     FOREIGN KEY(action_id) REFERENCES operation_proposals(action_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS operation_leases (
+                    lease_id TEXT PRIMARY KEY,
+                    resource TEXT NOT NULL,
+                    action_id TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    epoch INTEGER NOT NULL,
+                    heartbeat_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN (
+                        'active', 'recovery_required', 'released'
+                    )),
+                    created_at TEXT NOT NULL,
+                    released_at TEXT,
+                    UNIQUE(resource, epoch),
+                    FOREIGN KEY(action_id) REFERENCES operation_executions(action_id)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_leases_held_resource
+                    ON operation_leases(resource)
+                    WHERE state IN ('active', 'recovery_required');
+
+                CREATE TABLE IF NOT EXISTS backup_evidence (
+                    logical_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL CHECK(scope IN ('full', 'addon', 'dashboard', 'recorder')),
+                    completed INTEGER NOT NULL CHECK(completed = 1),
+                    created_at TEXT NOT NULL,
+                    size INTEGER NOT NULL CHECK(size > 0),
+                    sha256 TEXT NOT NULL,
+                    off_device_sha256 TEXT NOT NULL,
+                    readable INTEGER NOT NULL CHECK(readable = 1),
+                    baseline TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    registered_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_backup_evidence_selection
+                    ON backup_evidence(scope, baseline, expires_at, created_at);
+                CREATE TRIGGER IF NOT EXISTS backup_evidence_no_update
+                    BEFORE UPDATE ON backup_evidence
+                    BEGIN
+                        SELECT RAISE(ABORT, 'backup_evidence_immutable');
+                    END;
+                CREATE TRIGGER IF NOT EXISTS backup_evidence_no_delete
+                    BEFORE DELETE ON backup_evidence
+                    BEGIN
+                        SELECT RAISE(ABORT, 'backup_evidence_immutable');
+                    END;
                 """
             )
             self._ensure_column(
@@ -216,7 +272,37 @@ class AuthorizationStore:
                 "recovery_resolved_at",
                 "TEXT",
             )
-            connection.execute("PRAGMA user_version=4")
+            binding_columns = (
+                ("proposal_version", "INTEGER NOT NULL DEFAULT 1"),
+                ("policy_epoch", "INTEGER"),
+                ("policy_hash", "TEXT"),
+                ("allowlist_hash", "TEXT"),
+                ("adapter_version", "TEXT"),
+                ("adapter_schema_version", "INTEGER"),
+                ("baseline_etag", "TEXT"),
+                ("backup_evidence_id", "TEXT"),
+            )
+            for table in (
+                "operation_proposals",
+                "authorization_requests",
+                "authorization_receipts",
+                "operation_executions",
+            ):
+                for column, declaration in binding_columns:
+                    self._ensure_column(connection, table, column, declaration)
+            self._ensure_column(
+                connection,
+                "operation_executions",
+                "lease_instance_id",
+                "TEXT",
+            )
+            self._ensure_column(
+                connection,
+                "operation_executions",
+                "lease_epoch",
+                "INTEGER",
+            )
+            connection.execute("PRAGMA user_version=6")
         os.chmod(self.path, 0o600)
 
     @staticmethod
@@ -233,6 +319,143 @@ class AuthorizationStore:
         with self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS count FROM passkeys").fetchone()
         return int(row["count"])
+
+    def register_backup_evidence(
+        self, evidence: Any, *, registered_at: datetime
+    ) -> dict[str, Any]:
+        try:
+            validated = validate_backup_evidence(evidence, now=registered_at)
+        except ContractError as exc:
+            raise AuthorizationError(exc.code, str(exc)) from exc
+        registered_text = iso_timestamp(registered_at)
+        fields = (
+            "logical_id",
+            "scope",
+            "completed",
+            "created_at",
+            "size",
+            "sha256",
+            "off_device_sha256",
+            "readable",
+            "baseline",
+            "expires_at",
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM backup_evidence WHERE logical_id = ?",
+                (validated["logical_id"],),
+            ).fetchone()
+            if existing is not None:
+                stored = self._backup_evidence_document(existing)
+                if any(stored[field] != validated[field] for field in fields):
+                    raise AuthorizationError(
+                        "backup_evidence_conflict",
+                        "Backup evidence logical ID already has different content",
+                    )
+                return stored
+            connection.execute(
+                """
+                INSERT INTO backup_evidence(
+                    logical_id, scope, completed, created_at, size, sha256,
+                    off_device_sha256, readable, baseline, expires_at, registered_at
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, 1, ?, ?, ?)
+                """,
+                (
+                    validated["logical_id"],
+                    validated["scope"],
+                    validated["created_at"],
+                    validated["size"],
+                    validated["sha256"],
+                    validated["off_device_sha256"],
+                    validated["baseline"],
+                    validated["expires_at"],
+                    registered_text,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM backup_evidence WHERE logical_id = ?",
+                (validated["logical_id"],),
+            ).fetchone()
+        return self._backup_evidence_document(row)
+
+    def get_backup_evidence(self, logical_id: str) -> dict[str, Any]:
+        if not isinstance(logical_id, str) or not BACKUP_EVIDENCE_ID_RE.fullmatch(logical_id):
+            raise AuthorizationError("backup_evidence_not_found", "Backup evidence was not found")
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM backup_evidence WHERE logical_id = ?", (logical_id,)
+            ).fetchone()
+        if row is None:
+            raise AuthorizationError("backup_evidence_not_found", "Backup evidence was not found")
+        return self._backup_evidence_document(row)
+
+    def select_backup_evidence(
+        self,
+        *,
+        scopes: tuple[str, ...],
+        baseline: str,
+        now: datetime,
+        valid_until: datetime,
+    ) -> dict[str, Any]:
+        if not scopes or any(scope not in {"full", "addon", "dashboard", "recorder"} for scope in scopes):
+            raise AuthorizationError("backup_evidence_scope_invalid", "Backup evidence scope is invalid")
+        now_text = iso_timestamp(now)
+        valid_until_text = iso_timestamp(valid_until)
+        placeholders = ",".join("?" for _scope in scopes)
+        priority = " ".join(
+            f"WHEN '{scope}' THEN {index}" for index, scope in enumerate(scopes)
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                f"""
+                SELECT * FROM backup_evidence
+                WHERE scope IN ({placeholders}) AND baseline = ?
+                    AND completed = 1 AND readable = 1
+                    AND created_at <= ? AND expires_at >= ?
+                ORDER BY CASE scope {priority} ELSE {len(scopes)} END,
+                         created_at DESC, logical_id ASC
+                LIMIT 1
+                """,
+                (*scopes, baseline, now_text, valid_until_text),
+            ).fetchone()
+        if row is None:
+            raise AuthorizationError(
+                "backup_evidence_required",
+                "A completed, readable, unexpired backup evidence record is required",
+            )
+        self._assert_backup_evidence_row(
+            row,
+            logical_id=row["logical_id"],
+            scopes=scopes,
+            baseline=baseline,
+            now=now,
+            valid_until=valid_until,
+        )
+        return self._backup_evidence_document(row)
+
+    def assert_backup_evidence_valid(
+        self,
+        *,
+        logical_id: str | None,
+        scopes: tuple[str, ...],
+        baseline: str,
+        now: datetime,
+        valid_until: datetime,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM backup_evidence WHERE logical_id = ?", (logical_id,)
+            ).fetchone()
+        self._assert_backup_evidence_row(
+            row,
+            logical_id=logical_id,
+            scopes=scopes,
+            baseline=baseline,
+            now=now,
+            valid_until=valid_until,
+        )
+        return self._backup_evidence_document(row)
 
     def credentials_for_user(self, user_id_hash: str) -> list[StoredCredential]:
         with self._connect() as connection:
@@ -324,19 +547,34 @@ class AuthorizationStore:
         intent: Any,
         *,
         restart_addon_allowlist: frozenset[str],
+        policy_epoch: int,
+        policy_hash: str,
+        adapter_version: str,
+        adapter_schema_version: int,
+        baseline_etag: str,
         created_at: datetime,
         ttl_seconds: int,
     ) -> dict[str, Any]:
         try:
             validated = validate_native_intent(
-                intent, restart_addon_allowlist=restart_addon_allowlist
+                intent,
+                restart_addon_allowlist=restart_addon_allowlist,
             )
         except ContractError as exc:
             raise AuthorizationError(exc.code, str(exc)) from exc
+        if not isinstance(baseline_etag, str) or not SHA256_RE.fullmatch(baseline_etag):
+            raise AuthorizationError("baseline_invalid", "baseline_etag is invalid")
+        allowlist_hash = allowlist_fingerprint(restart_addon_allowlist)
         now = created_at.astimezone(timezone.utc)
         expires_at = now + timedelta(seconds=ttl_seconds)
+        backup_evidence = self.select_backup_evidence(
+            scopes=("addon", "full"),
+            baseline=baseline_etag,
+            now=now,
+            valid_until=expires_at,
+        )
         proposal = {
-            "version": 1,
+            "version": 2,
             "action_id": f"OPS-{now.strftime('%Y%m%d')}-{secrets.token_hex(6).upper()}",
             "action_type": "restart_addon",
             "target": validated["target"],
@@ -354,13 +592,22 @@ class AuthorizationStore:
                 "若结果不确定则停止自动操作并标记 recovery_required",
                 "后续恢复或备份还原必须单独授权",
             ],
+            "policy_epoch": policy_epoch,
+            "policy_hash": policy_hash,
+            "allowlist_hash": allowlist_hash,
+            "adapter_version": adapter_version,
+            "adapter_schema_version": adapter_schema_version,
+            "baseline_etag": baseline_etag,
+            "backup_evidence_id": backup_evidence["logical_id"],
             "created_at": iso_timestamp(now),
             "expires_at": iso_timestamp(expires_at),
             "state": "awaiting_approval",
         }
         parameter_hash = sha256_text(canonical_json(proposal["parameter_summary"]))
         proposal_hash = sha256_text(
-            canonical_json({field: proposal[field] for field in PROPOSAL_HASH_FIELDS})
+            canonical_json(
+                {field: proposal[field] for field in NATIVE_PROPOSAL_HASH_FIELDS}
+            )
         )
         proposal["parameter_summary_hash"] = f"sha256:{parameter_hash}"
         proposal["proposal_hash"] = f"sha256:{proposal_hash}"
@@ -386,8 +633,10 @@ class AuthorizationStore:
                     action_id, idempotency_key, action_type, target, proposal_hash,
                     risk_level, requires_backup, parameter_summary_json,
                     expected_change, validation_plan_json, rollback_plan_json,
-                    created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, expires_at, proposal_version, policy_epoch,
+                    policy_hash, allowlist_hash, adapter_version,
+                    adapter_schema_version, baseline_etag, backup_evidence_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     proposal["action_id"],
@@ -403,12 +652,40 @@ class AuthorizationStore:
                     canonical_json(proposal["rollback_plan"]),
                     proposal["created_at"],
                     proposal["expires_at"],
+                    proposal["version"],
+                    proposal["policy_epoch"],
+                    proposal["policy_hash"],
+                    proposal["allowlist_hash"],
+                    proposal["adapter_version"],
+                    proposal["adapter_schema_version"],
+                    proposal["baseline_etag"],
+                    proposal["backup_evidence_id"],
                 ),
             )
             row = connection.execute(
                 "SELECT * FROM operation_proposals WHERE action_id = ?",
                 (proposal["action_id"],),
             ).fetchone()
+        return self._proposal_document(row, now=now)
+
+    def existing_native_proposal(
+        self, validated_intent: dict[str, Any], *, now: datetime
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM operation_proposals WHERE idempotency_key = ?",
+                (validated_intent["idempotency_key"],),
+            ).fetchone()
+        if row is None:
+            return None
+        if (
+            row["action_type"] != validated_intent["action_type"]
+            or row["target"] != validated_intent["target"]
+        ):
+            raise AuthorizationError(
+                "idempotency_conflict",
+                "Idempotency key already belongs to another operation intent",
+            )
         return self._proposal_document(row, now=now)
 
     def get_native_proposal(self, action_id: str, *, now: datetime) -> dict[str, Any]:
@@ -453,8 +730,11 @@ class AuthorizationStore:
                     approval_id, action_id, action_type, target, proposal_hash,
                     risk_level, requires_backup, parameter_summary_json,
                     expected_change, validation_plan_json, rollback_plan_json,
-                    structural_owner_hash, created_at, expires_at, state, proposal_origin
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'broker_native')
+                    structural_owner_hash, created_at, expires_at, state, proposal_origin,
+                    proposal_version, policy_epoch, policy_hash, allowlist_hash,
+                    adapter_version, adapter_schema_version, baseline_etag,
+                    backup_evidence_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'broker_native', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval_id,
@@ -471,6 +751,14 @@ class AuthorizationStore:
                     "broker-native-passkey",
                     iso_timestamp(now),
                     proposal["expires_at"],
+                    proposal["proposal_version"],
+                    proposal["policy_epoch"],
+                    proposal["policy_hash"],
+                    proposal["allowlist_hash"],
+                    proposal["adapter_version"],
+                    proposal["adapter_schema_version"],
+                    proposal["baseline_etag"],
+                    proposal["backup_evidence_id"],
                 ),
             )
             row = connection.execute(
@@ -580,8 +868,10 @@ class AuthorizationStore:
                 INSERT INTO authorization_receipts(
                     receipt_id, approval_id, action_id, proposal_hash,
                     authorized_user_hash, credential_id_hash, authorized_at,
-                    expires_at, assurance
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'passkey_verified')
+                    expires_at, assurance, proposal_version, policy_epoch,
+                    policy_hash, allowlist_hash, adapter_version,
+                    adapter_schema_version, baseline_etag, backup_evidence_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'passkey_verified', ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     receipt_id,
@@ -592,6 +882,14 @@ class AuthorizationStore:
                     credential_hash,
                     iso_timestamp(authorized_at),
                     request["expires_at"],
+                    request["proposal_version"],
+                    request["policy_epoch"],
+                    request["policy_hash"],
+                    request["allowlist_hash"],
+                    request["adapter_version"],
+                    request["adapter_schema_version"],
+                    request["baseline_etag"],
+                    request["backup_evidence_id"],
                 ),
             )
             connection.execute(
@@ -617,9 +915,21 @@ class AuthorizationStore:
         action_id: str,
         proposal_hash: str,
         idempotency_key: str,
+        policy_epoch: int,
+        policy_hash: str,
+        allowlist_hash: str,
+        adapter_version: str,
+        adapter_schema_version: int,
+        baseline_etag: str,
+        backup_evidence_id: str | None,
+        instance_id: str,
+        lease_ttl_seconds: int,
         claimed_at: datetime,
     ) -> tuple[dict[str, Any], bool]:
         now = claimed_at.astimezone(timezone.utc)
+        now_text = iso_timestamp(now)
+        expires_text = iso_timestamp(now + timedelta(seconds=lease_ttl_seconds))
+        expired_lease_action: str | None = None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
@@ -635,6 +945,48 @@ class AuthorizationStore:
                         "execution_conflict", "Action already has another execution claim"
                     )
                 return self._execution_document(existing), True
+            expired = connection.execute(
+                """
+                SELECT action_id FROM operation_leases
+                WHERE state = 'active' AND expires_at <= ?
+                ORDER BY created_at LIMIT 1
+                """,
+                (now_text,),
+            ).fetchone()
+            if expired is not None:
+                expired_lease_action = expired["action_id"]
+                connection.execute(
+                    """
+                    UPDATE operation_executions
+                    SET state = 'recovery_required', error_code = 'lease_expired',
+                        updated_at = ?, finished_at = COALESCE(finished_at, ?)
+                    WHERE action_id = ?
+                        AND state IN ('authorized', 'executing', 'verifying')
+                    """,
+                    (now_text, now_text, expired_lease_action),
+                )
+                connection.execute(
+                    """
+                    UPDATE operation_leases
+                    SET state = 'recovery_required', heartbeat_at = ?
+                    WHERE action_id = ? AND state = 'active'
+                    """,
+                    (now_text, expired_lease_action),
+                )
+            if expired_lease_action is not None:
+                pass
+            else:
+                held = connection.execute(
+                    """
+                    SELECT action_id FROM operation_leases
+                    WHERE state IN ('active', 'recovery_required')
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if held is not None:
+                    raise AuthorizationError(
+                        "execution_busy", "A persistent operation lease is already held"
+                    )
             unresolved = connection.execute(
                 """
                 SELECT action_id FROM operation_executions
@@ -642,30 +994,42 @@ class AuthorizationStore:
                 LIMIT 1
                 """
             ).fetchone()
-            if unresolved is not None:
+            if expired_lease_action is None and unresolved is not None:
                 raise AuthorizationError(
                     "unresolved_recovery",
                     "A previous execution still requires recovery resolution",
                 )
-            row = connection.execute(
+            if expired_lease_action is not None:
+                row = None
+            else:
+                row = connection.execute(
                 """
                 SELECT r.*, q.state AS request_state, q.proposal_origin,
-                       p.action_type, p.target, p.idempotency_key AS proposal_idempotency_key
+                       p.action_type, p.target,
+                       p.idempotency_key AS proposal_idempotency_key,
+                       p.proposal_version AS stored_proposal_version,
+                       p.policy_epoch AS stored_policy_epoch,
+                       p.policy_hash AS stored_policy_hash,
+                       p.allowlist_hash AS stored_allowlist_hash,
+                       p.adapter_version AS stored_adapter_version,
+                       p.adapter_schema_version AS stored_adapter_schema_version,
+                       p.baseline_etag AS stored_baseline_etag,
+                       p.backup_evidence_id AS stored_backup_evidence_id
                 FROM authorization_receipts r
                 JOIN authorization_requests q ON q.approval_id = r.approval_id
                 JOIN operation_proposals p ON p.action_id = r.action_id
                 WHERE r.receipt_id = ?
                 """,
                 (receipt_id,),
-            ).fetchone()
-            if row is None:
+                ).fetchone()
+            if expired_lease_action is None and row is None:
                 raise AuthorizationError("receipt_not_found", "Authorization receipt was not found")
-            if row["proposal_origin"] != "broker_native":
+            if expired_lease_action is None and row["proposal_origin"] != "broker_native":
                 raise AuthorizationError(
                     "legacy_receipt_not_executable",
                     "Only Broker-native proposals can be executed",
                 )
-            if (
+            if expired_lease_action is None and (
                 row["action_id"] != action_id
                 or row["proposal_hash"] != proposal_hash
                 or row["proposal_idempotency_key"] != idempotency_key
@@ -673,44 +1037,151 @@ class AuthorizationStore:
                 raise AuthorizationError(
                     "receipt_mismatch", "Authorization receipt does not match the execution request"
                 )
-            if row["request_state"] != "authorized" or row["assurance"] != "passkey_verified":
+            if expired_lease_action is None and (
+                row["request_state"] != "authorized" or row["assurance"] != "passkey_verified"
+            ):
                 raise AuthorizationError(
                     "receipt_not_authorized", "Authorization receipt is not executable"
                 )
-            if row["consumed_at"] is not None:
+            if expired_lease_action is None and row["consumed_at"] is not None:
                 raise AuthorizationError("receipt_consumed", "Authorization receipt was consumed")
-            if now >= parse_timestamp(row["expires_at"], field="receipt.expires_at"):
+            if expired_lease_action is None and now >= parse_timestamp(
+                row["expires_at"], field="receipt.expires_at"
+            ):
                 raise AuthorizationError("receipt_expired", "Authorization receipt expired")
-            cursor = connection.execute(
-                """
-                UPDATE authorization_receipts SET consumed_at = ?
-                WHERE receipt_id = ? AND consumed_at IS NULL
-                """,
-                (iso_timestamp(now), receipt_id),
+            if expired_lease_action is None:
+                evidence = connection.execute(
+                    "SELECT * FROM backup_evidence WHERE logical_id = ?",
+                    (backup_evidence_id,),
+                ).fetchone()
+                self._assert_backup_evidence_row(
+                    evidence,
+                    logical_id=backup_evidence_id,
+                    scopes=("addon", "full"),
+                    baseline=baseline_etag,
+                    now=now,
+                    valid_until=parse_timestamp(row["expires_at"], field="receipt.expires_at"),
+                )
+                expected_binding = {
+                    "stored_proposal_version": 2,
+                    "stored_policy_epoch": policy_epoch,
+                    "stored_policy_hash": policy_hash,
+                    "stored_allowlist_hash": allowlist_hash,
+                    "stored_adapter_version": adapter_version,
+                    "stored_adapter_schema_version": adapter_schema_version,
+                    "stored_baseline_etag": baseline_etag,
+                    "stored_backup_evidence_id": backup_evidence_id,
+                }
+                drift_codes = {
+                    "stored_proposal_version": "proposal_version_changed",
+                    "stored_policy_epoch": "policy_changed",
+                    "stored_policy_hash": "policy_changed",
+                    "stored_allowlist_hash": "allowlist_changed",
+                    "stored_adapter_version": "adapter_changed",
+                    "stored_adapter_schema_version": "adapter_changed",
+                    "stored_baseline_etag": "baseline_changed",
+                    "stored_backup_evidence_id": "backup_evidence_changed",
+                }
+                for field, expected in expected_binding.items():
+                    if row[field] != expected:
+                        raise AuthorizationError(
+                            drift_codes[field], "Operation binding changed before execution"
+                        )
+                receipt_binding_fields = (
+                    ("proposal_version", 2),
+                    ("policy_epoch", policy_epoch),
+                    ("policy_hash", policy_hash),
+                    ("allowlist_hash", allowlist_hash),
+                    ("adapter_version", adapter_version),
+                    ("adapter_schema_version", adapter_schema_version),
+                    ("baseline_etag", baseline_etag),
+                    ("backup_evidence_id", backup_evidence_id),
+                )
+                for field, expected in receipt_binding_fields:
+                    if row[field] != expected:
+                        raise AuthorizationError(
+                            "receipt_binding_changed",
+                            "Authorization receipt binding changed before execution",
+                        )
+            if expired_lease_action is not None:
+                claimed = None
+            else:
+                cursor = connection.execute(
+                    """
+                    UPDATE authorization_receipts SET consumed_at = ?
+                    WHERE receipt_id = ? AND consumed_at IS NULL
+                    """,
+                    (now_text, receipt_id),
+                )
+                if cursor.rowcount != 1:
+                    raise AuthorizationError("receipt_consumed", "Authorization receipt was consumed")
+                resource = f"addon:{row['target']}"
+                epochs = {}
+                for lease_resource in ("singleton:operations", resource):
+                    epoch_row = connection.execute(
+                        "SELECT COALESCE(MAX(epoch), 0) + 1 AS next_epoch "
+                        "FROM operation_leases WHERE resource = ?",
+                        (lease_resource,),
+                    ).fetchone()
+                    epochs[lease_resource] = int(epoch_row["next_epoch"])
+                connection.execute(
+                    """
+                    INSERT INTO operation_executions(
+                        action_id, receipt_id, proposal_hash, idempotency_key,
+                        action_type, target, state, started_at, updated_at,
+                        proposal_version, policy_epoch, policy_hash, allowlist_hash,
+                        adapter_version, adapter_schema_version, baseline_etag,
+                        backup_evidence_id, lease_instance_id, lease_epoch
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'authorized', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        action_id,
+                        receipt_id,
+                        proposal_hash,
+                        idempotency_key,
+                        row["action_type"],
+                        row["target"],
+                        now_text,
+                        now_text,
+                        2,
+                        policy_epoch,
+                        policy_hash,
+                        allowlist_hash,
+                        adapter_version,
+                        adapter_schema_version,
+                        baseline_etag,
+                        backup_evidence_id,
+                        instance_id,
+                        epochs["singleton:operations"],
+                    ),
+                )
+                for lease_resource in ("singleton:operations", resource):
+                    connection.execute(
+                        """
+                        INSERT INTO operation_leases(
+                            lease_id, resource, action_id, instance_id, epoch,
+                            heartbeat_at, expires_at, state, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                        """,
+                        (
+                            f"LEASE-{secrets.token_hex(16).upper()}",
+                            lease_resource,
+                            action_id,
+                            instance_id,
+                            epochs[lease_resource],
+                            now_text,
+                            expires_text,
+                            now_text,
+                        ),
+                    )
+                claimed = connection.execute(
+                    "SELECT * FROM operation_executions WHERE action_id = ?", (action_id,)
+                ).fetchone()
+        if expired_lease_action is not None:
+            raise AuthorizationError(
+                "lease_recovery_required",
+                "An expired persistent lease requires recovery before new execution",
             )
-            if cursor.rowcount != 1:
-                raise AuthorizationError("receipt_consumed", "Authorization receipt was consumed")
-            connection.execute(
-                """
-                INSERT INTO operation_executions(
-                    action_id, receipt_id, proposal_hash, idempotency_key,
-                    action_type, target, state, started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'authorized', ?, ?)
-                """,
-                (
-                    action_id,
-                    receipt_id,
-                    proposal_hash,
-                    idempotency_key,
-                    row["action_type"],
-                    row["target"],
-                    iso_timestamp(now),
-                    iso_timestamp(now),
-                ),
-            )
-            claimed = connection.execute(
-                "SELECT * FROM operation_executions WHERE action_id = ?", (action_id,)
-            ).fetchone()
         return self._execution_document(claimed), False
 
     def update_execution(
@@ -758,10 +1229,76 @@ class AuthorizationStore:
                     action_id,
                 ),
             )
+            if state == "recovery_required":
+                connection.execute(
+                    """
+                    UPDATE operation_leases
+                    SET state = 'recovery_required', heartbeat_at = ?
+                    WHERE action_id = ? AND state = 'active'
+                    """,
+                    (now, action_id),
+                )
+            elif finished:
+                connection.execute(
+                    """
+                    UPDATE operation_leases
+                    SET state = 'released', heartbeat_at = ?, released_at = ?
+                    WHERE action_id = ? AND state = 'active'
+                    """,
+                    (now, now, action_id),
+                )
             updated = connection.execute(
                 "SELECT * FROM operation_executions WHERE action_id = ?", (action_id,)
             ).fetchone()
         return self._execution_document(updated)
+
+    def heartbeat_execution_leases(
+        self,
+        *,
+        action_id: str,
+        instance_id: str,
+        heartbeat_at: datetime,
+        lease_ttl_seconds: int,
+    ) -> None:
+        now = heartbeat_at.astimezone(timezone.utc)
+        now_text = iso_timestamp(now)
+        expires_text = iso_timestamp(now + timedelta(seconds=lease_ttl_seconds))
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT instance_id, state FROM operation_leases
+                WHERE action_id = ?
+                """,
+                (action_id,),
+            ).fetchall()
+            if len(rows) != 2 or any(
+                row["instance_id"] != instance_id or row["state"] != "active"
+                for row in rows
+            ):
+                raise AuthorizationError(
+                    "lease_lost", "Persistent operation lease is unavailable"
+                )
+            connection.execute(
+                """
+                UPDATE operation_leases
+                SET heartbeat_at = ?, expires_at = ?
+                WHERE action_id = ? AND instance_id = ? AND state = 'active'
+                """,
+                (now_text, expires_text, action_id, instance_id),
+            )
+
+    def leases_for_action(self, action_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT resource, action_id, instance_id, epoch, heartbeat_at,
+                       expires_at, state, created_at, released_at
+                FROM operation_leases WHERE action_id = ? ORDER BY resource
+                """,
+                (action_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_execution(self, action_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -771,6 +1308,21 @@ class AuthorizationStore:
         if row is None:
             raise AuthorizationError("execution_not_found", "Execution was not found")
         return self._execution_document(row)
+
+    def assert_execution_interlock_clear(self) -> None:
+        with self._connect() as connection:
+            unresolved = connection.execute(
+                """
+                SELECT action_id FROM operation_executions
+                WHERE state = 'recovery_required' AND recovery_resolution IS NULL
+                LIMIT 1
+                """
+            ).fetchone()
+            if unresolved is not None:
+                raise AuthorizationError(
+                    "unresolved_recovery",
+                    "A previous execution still requires recovery resolution",
+                )
 
     def resolve_recovery(
         self,
@@ -810,6 +1362,14 @@ class AuthorizationStore:
                 raise AuthorizationError(
                     "recovery_already_resolved", "Execution recovery is already resolved"
                 )
+            connection.execute(
+                """
+                UPDATE operation_leases
+                SET state = 'released', heartbeat_at = ?, released_at = ?
+                WHERE action_id = ? AND state = 'recovery_required'
+                """,
+                (now, now, action_id),
+            )
             updated = connection.execute(
                 "SELECT * FROM operation_executions WHERE action_id = ?", (action_id,)
             ).fetchone()
@@ -828,6 +1388,14 @@ class AuthorizationStore:
                 """,
                 (now, now),
             )
+            connection.execute(
+                """
+                UPDATE operation_leases
+                SET state = 'recovery_required', heartbeat_at = ?
+                WHERE state = 'active'
+                """,
+                (now,),
+            )
         return cursor.rowcount
 
     @staticmethod
@@ -835,8 +1403,8 @@ class AuthorizationStore:
         expired = now.astimezone(timezone.utc) >= parse_timestamp(
             row["expires_at"], field="proposal.expires_at"
         )
-        return {
-            "version": 1,
+        document = {
+            "version": int(row["proposal_version"]),
             "action_id": row["action_id"],
             "action_type": row["action_type"],
             "target": row["target"],
@@ -853,11 +1421,14 @@ class AuthorizationStore:
             "state": "expired" if expired else "awaiting_approval",
             "execution_allowed": False,
         }
+        if int(row["proposal_version"]) >= 2:
+            document.update(AuthorizationStore._binding_document(row))
+        return document
 
     @staticmethod
     def _request_document(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "version": 1,
+        document = {
+            "version": int(row["proposal_version"]),
             "approval_id": row["approval_id"],
             "action_id": row["action_id"],
             "action_type": row["action_type"],
@@ -877,11 +1448,14 @@ class AuthorizationStore:
             "proposal_origin": row["proposal_origin"],
             "execution_allowed": False,
         }
+        if int(row["proposal_version"]) >= 2:
+            document.update(AuthorizationStore._binding_document(row))
+        return document
 
     @staticmethod
     def _receipt_document(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "version": 1,
+        document = {
+            "version": int(row["proposal_version"]),
             "receipt_id": row["receipt_id"],
             "approval_id": row["approval_id"],
             "action_id": row["action_id"],
@@ -894,6 +1468,9 @@ class AuthorizationStore:
             "consumed": row["consumed_at"] is not None,
             "execution_allowed": False,
         }
+        if int(row["proposal_version"]) >= 2:
+            document.update(AuthorizationStore._binding_document(row))
+        return document
 
     @staticmethod
     def _execution_document(row: sqlite3.Row) -> dict[str, Any]:
@@ -905,8 +1482,8 @@ class AuthorizationStore:
                 "evidence_hash": row["recovery_evidence_hash"],
                 "resolved_at": row["recovery_resolved_at"],
             }
-        return {
-            "version": 1,
+        document = {
+            "version": int(row["proposal_version"]),
             "receipt_id": row["receipt_id"],
             "action_id": row["action_id"],
             "proposal_hash": row["proposal_hash"],
@@ -926,6 +1503,95 @@ class AuthorizationStore:
             "error_code": row["error_code"],
             "recovery": recovery,
         }
+        if int(row["proposal_version"]) >= 2:
+            document.update(AuthorizationStore._binding_document(row))
+            document["lease"] = {
+                "instance_id": row["lease_instance_id"],
+                "epoch": row["lease_epoch"],
+            }
+        return document
+
+    @staticmethod
+    def _binding_document(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "policy_epoch": row["policy_epoch"],
+            "policy_hash": row["policy_hash"],
+            "allowlist_hash": row["allowlist_hash"],
+            "adapter_version": row["adapter_version"],
+            "adapter_schema_version": row["adapter_schema_version"],
+            "baseline_etag": row["baseline_etag"],
+            "backup_evidence_id": row["backup_evidence_id"],
+        }
+
+    @staticmethod
+    def _backup_evidence_document(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "scope": row["scope"],
+            "logical_id": row["logical_id"],
+            "completed": bool(row["completed"]),
+            "created_at": row["created_at"],
+            "size": int(row["size"]),
+            "sha256": row["sha256"],
+            "off_device_sha256": row["off_device_sha256"],
+            "readable": bool(row["readable"]),
+            "baseline": row["baseline"],
+            "expires_at": row["expires_at"],
+        }
+
+    @staticmethod
+    def _assert_backup_evidence_row(
+        row: sqlite3.Row | None,
+        *,
+        logical_id: str | None,
+        scopes: tuple[str, ...],
+        baseline: str,
+        now: datetime,
+        valid_until: datetime,
+    ) -> None:
+        if row is None or logical_id is None:
+            raise AuthorizationError("backup_evidence_required", "Backup evidence is missing")
+        if (
+            row["logical_id"] != logical_id
+            or row["scope"] not in scopes
+            or row["baseline"] != baseline
+        ):
+            raise AuthorizationError(
+                "backup_evidence_changed", "Backup evidence binding changed"
+            )
+        if (
+            row["completed"] != 1
+            or row["readable"] != 1
+            or not isinstance(row["size"], int)
+            or row["size"] < 1
+            or not SHA256_RE.fullmatch(row["sha256"] or "")
+            or not SHA256_RE.fullmatch(row["off_device_sha256"] or "")
+            or not SHA256_RE.fullmatch(row["baseline"] or "")
+        ):
+            raise AuthorizationError(
+                "backup_evidence_changed", "Backup evidence is no longer usable"
+            )
+        current = now.astimezone(timezone.utc)
+        required_until = valid_until.astimezone(timezone.utc)
+        try:
+            created_at = parse_timestamp(
+                row["created_at"], field="backup_evidence.created_at"
+            )
+            expires_at = parse_timestamp(
+                row["expires_at"], field="backup_evidence.expires_at"
+            )
+        except ContractError as exc:
+            raise AuthorizationError(
+                "backup_evidence_changed", "Backup evidence timestamps are invalid"
+            ) from exc
+        if created_at > current:
+            raise AuthorizationError(
+                "backup_evidence_changed", "Backup evidence creation time changed"
+            )
+        if expires_at <= current or expires_at < required_until:
+            raise AuthorizationError(
+                "backup_evidence_expired", "Backup evidence does not cover the authorization window"
+            )
 
 
 class AuthorizationManager:
@@ -943,6 +1609,11 @@ class AuthorizationManager:
         max_pending_flows: int = 100,
         restart_addon_allowlist: frozenset[str] = frozenset(),
         proposal_ttl_seconds: int = 600,
+        policy_epoch: int = DEFAULT_POLICY_EPOCH,
+        policy_hash: str = DEFAULT_POLICY_HASH,
+        adapter_version: str = DEFAULT_ADAPTER_VERSION,
+        adapter_schema_version: int = DEFAULT_ADAPTER_SCHEMA_VERSION,
+        baseline_provider: Callable[[str], str] | None = None,
         clock: Callable[[], datetime] = utc_now,
     ):
         if enrollment_token and len(enrollment_token) < 32:
@@ -955,6 +1626,18 @@ class AuthorizationManager:
             raise AuthorizationError("limit_invalid", "Authorization limits are invalid")
         if not 60 <= proposal_ttl_seconds <= 1800:
             raise AuthorizationError("proposal_ttl_invalid", "Proposal TTL is invalid")
+        if not isinstance(policy_epoch, int) or isinstance(policy_epoch, bool) or policy_epoch < 1:
+            raise AuthorizationError("policy_invalid", "Policy epoch is invalid")
+        if not isinstance(policy_hash, str) or not SHA256_RE.fullmatch(policy_hash):
+            raise AuthorizationError("policy_invalid", "Policy hash is invalid")
+        if not isinstance(adapter_version, str) or not adapter_version:
+            raise AuthorizationError("adapter_invalid", "Adapter version is invalid")
+        if (
+            not isinstance(adapter_schema_version, int)
+            or isinstance(adapter_schema_version, bool)
+            or adapter_schema_version < 1
+        ):
+            raise AuthorizationError("adapter_invalid", "Adapter schema version is invalid")
         self.store = store
         self.passkeys = passkeys
         self.trusted_owner_hashes = trusted_owner_hashes
@@ -964,6 +1647,13 @@ class AuthorizationManager:
         self.max_pending_flows = max_pending_flows
         self.restart_addon_allowlist = restart_addon_allowlist
         self.proposal_ttl_seconds = proposal_ttl_seconds
+        self.policy_epoch = policy_epoch
+        self.policy_hash = policy_hash
+        self.adapter_version = adapter_version
+        self.adapter_schema_version = adapter_schema_version
+        if baseline_provider is None:
+            raise AuthorizationError("baseline_provider_missing", "Baseline provider is required")
+        self.baseline_provider = baseline_provider
         self.clock = clock
         self._flows: dict[str, PendingFlow] = {}
         self._lock = threading.Lock()
@@ -981,12 +1671,33 @@ class AuthorizationManager:
         return self.store.create_request(validated, created_at=self.clock())
 
     def create_proposal(self, intent: Any) -> dict[str, Any]:
+        try:
+            validated = validate_native_intent(
+                intent, restart_addon_allowlist=self.restart_addon_allowlist
+            )
+            existing = self.store.existing_native_proposal(validated, now=self.clock())
+            if existing is not None:
+                return existing
+            baseline_etag = self.baseline_provider(validated["target"])
+        except ContractError as exc:
+            raise AuthorizationError(exc.code, str(exc)) from exc
         return self.store.create_native_proposal(
             intent,
             restart_addon_allowlist=self.restart_addon_allowlist,
+            policy_epoch=self.policy_epoch,
+            policy_hash=self.policy_hash,
+            adapter_version=self.adapter_version,
+            adapter_schema_version=self.adapter_schema_version,
+            baseline_etag=baseline_etag,
             created_at=self.clock(),
             ttl_seconds=self.proposal_ttl_seconds,
         )
+
+    def register_backup_evidence(self, evidence: Any) -> dict[str, Any]:
+        return self.store.register_backup_evidence(evidence, registered_at=self.clock())
+
+    def backup_evidence(self, logical_id: str) -> dict[str, Any]:
+        return self.store.get_backup_evidence(logical_id)
 
     def create_native_request(self, request: Any) -> dict[str, Any]:
         return self.store.create_request_from_native_proposal(

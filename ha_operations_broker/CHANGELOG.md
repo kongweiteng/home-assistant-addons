@@ -1,5 +1,27 @@
 # 变更日志
 
+## [0.5.0] - 2026-08-05
+
+### 新增
+
+- 新增独立 `recovery_api_token`；普通 Broker bearer 固定不能调用 recovery resolution。
+- 新增第三个独立 `backup_evidence_api_token` 和由 SQLite trigger 保护的不可变结构化 evidence registry；普通 Broker bearer、recovery bearer、Ingress 与模型路径不能登记或替换证据。
+- restart proposal 优先绑定精确 `addon` 证据，也允许 baseline 匹配且覆盖授权窗口的 `full` 完整备份证据。
+- Controller 继续提交最小 version 1 intent；Broker 服务端读取目标基线、选择覆盖授权窗口的匹配证据并生成 version 2 提案，proposal/request/receipt/execution 持久绑定 policy、allowlist、adapter、schema、baseline 和 evidence ID。
+- 新增 SQLite singleton/resource lease、instance、epoch、heartbeat 和 expiry；收据消费、execution claim 与两把租约在同一事务完成。
+- 新增可选 Manager Executor 固定私有 client；在收据消费前执行只读 shadow 等价复核，不形成第二个写执行器。
+
+### 安全
+
+- policy、allowlist、adapter、schema、baseline 或 evidence 漂移在收据消费和 Supervisor 写调用前拒绝。
+- 模型和 Controller 不能提交 policy、adapter、baseline 或 backup evidence 绑定字段。
+- 双实例共享同一数据库时，持久租约阻断第二次写入；租约过期或 Broker 重启只进入 `recovery_required`，不自动接管或重放。
+- 默认 `execution_enabled=false`、动作和白名单为空；唯一正式 action 仍为 `restart_addon`。
+
+### 兼容
+
+- SQLite schema 升级到 `user_version=6`；v4 历史 proposal/receipt/execution/recovery 不重算 hash、不改写状态或审计字段，新增 evidence registry 初始为空。
+
 ## [0.4.0] - 2026-08-04
 
 ### 新增

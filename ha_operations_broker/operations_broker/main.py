@@ -6,15 +6,18 @@ import os
 
 from .api import create_server
 from .authorization import AuthorizationManager, AuthorizationStore
-from .contract import parse_owner_hashes, utc_now
+from .contract import ContractError, addon_baseline_etag, parse_owner_hashes, utc_now
 from .execution import ExecutionManager
+from .manager_executor import ManagerExecutorClient
 from .passkeys import Fido2PasskeyBackend, validate_webauthn_configuration
 from .service import preflight
-from .supervisor import SupervisorClient
+from .supervisor import SupervisorClient, SupervisorError
 
 
 def main() -> None:
     api_token = os.environ["BROKER_API_TOKEN"]
+    recovery_api_token = os.environ["BROKER_RECOVERY_API_TOKEN"]
+    backup_evidence_api_token = os.environ["BROKER_BACKUP_EVIDENCE_API_TOKEN"]
     owner_hashes = parse_owner_hashes(os.environ["BROKER_OWNER_HASHES"])
     max_request_bytes = int(os.environ.get("BROKER_MAX_REQUEST_BYTES", "32768"))
     timeout_seconds = int(os.environ.get("BROKER_SUPERVISOR_TIMEOUT_SECONDS", "5"))
@@ -43,12 +46,30 @@ def main() -> None:
         if item.strip()
     )
     proposal_ttl_seconds = int(os.environ.get("BROKER_PROPOSAL_TTL_SECONDS", "600"))
+    policy_epoch = int(os.environ.get("BROKER_POLICY_EPOCH", "1"))
+    policy_hash = os.environ["BROKER_POLICY_HASH"]
+    adapter_version = os.environ.get("BROKER_ADAPTER_VERSION", "manager-restart-v1")
+    adapter_schema_version = int(os.environ.get("BROKER_ADAPTER_SCHEMA_VERSION", "1"))
+    lease_ttl_seconds = int(os.environ.get("BROKER_LEASE_TTL_SECONDS", "30"))
+    manager_shadow_enabled = os.environ.get("BROKER_MANAGER_SHADOW_ENABLED", "false") == "true"
     store = AuthorizationStore(
         os.environ.get(
             "BROKER_AUTHORIZATION_DATABASE",
             "/data/authorization/passkeys.sqlite3",
         )
     )
+    supervisor = SupervisorClient(
+        os.environ["BROKER_SUPERVISOR_TOKEN"],
+        base_url=os.environ.get("BROKER_SUPERVISOR_BASE_URL", "http://supervisor"),
+        timeout_seconds=timeout_seconds,
+    )
+
+    def baseline_provider(target: str) -> str:
+        try:
+            return addon_baseline_etag(supervisor.addon_info(target))
+        except SupervisorError as exc:
+            raise ContractError(exc.code, str(exc)) from exc
+
     passkeys = Fido2PasskeyBackend(
         rp_id=rp_id,
         allowed_origins=tuple(allowed_origins),
@@ -63,19 +84,32 @@ def main() -> None:
         max_pending_flows=max_pending_flows,
         restart_addon_allowlist=restart_addon_allowlist,
         proposal_ttl_seconds=proposal_ttl_seconds,
+        policy_epoch=policy_epoch,
+        policy_hash=policy_hash,
+        adapter_version=adapter_version,
+        adapter_schema_version=adapter_schema_version,
+        baseline_provider=baseline_provider,
         clock=utc_now,
     )
-    supervisor = SupervisorClient(
-        os.environ["BROKER_SUPERVISOR_TOKEN"],
-        base_url=os.environ.get("BROKER_SUPERVISOR_BASE_URL", "http://supervisor"),
-        timeout_seconds=timeout_seconds,
-    )
+    manager_shadow = None
+    if manager_shadow_enabled:
+        manager_shadow = ManagerExecutorClient(
+            os.environ["BROKER_MANAGER_EXECUTOR_BASE_URL"],
+            os.environ.pop("BROKER_MANAGER_EXECUTOR_API_TOKEN"),
+            timeout_seconds=timeout_seconds,
+        )
     execution = ExecutionManager(
         store=store,
         supervisor=supervisor,
         execution_enabled=execution_enabled,
         enabled_actions=enabled_actions,
         restart_addon_allowlist=restart_addon_allowlist,
+        policy_epoch=policy_epoch,
+        policy_hash=policy_hash,
+        adapter_version=adapter_version,
+        adapter_schema_version=adapter_schema_version,
+        manager_shadow=manager_shadow,
+        lease_ttl_seconds=lease_ttl_seconds,
         clock=utc_now,
     )
 
@@ -91,6 +125,8 @@ def main() -> None:
         "0.0.0.0",
         8098,
         api_token=api_token,
+        recovery_api_token=recovery_api_token,
+        backup_evidence_api_token=backup_evidence_api_token,
         max_request_bytes=max_request_bytes,
         preflight_handler=handler,
         authorization_manager=authorization,

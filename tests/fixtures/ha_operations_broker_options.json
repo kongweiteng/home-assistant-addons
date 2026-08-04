@@ -1,5 +1,7 @@
 {
   "broker_api_token": "test-broker-api-token-0000000000000000",
+  "recovery_api_token": "test-recovery-api-token-000000000000000",
+  "backup_evidence_api_token": "test-backup-evidence-token-000000000000",
   "trusted_owner_identity_hashes": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ],

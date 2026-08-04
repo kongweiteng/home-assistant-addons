@@ -1,0 +1,33 @@
+name: HA Manager Executor
+version: "0.1.0"
+slug: ha_manager_executor
+description: "只读 shadow 模式的独立 Home Assistant Add-on manager 权限域执行器。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ha_manager_executor"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+stage: experimental
+hassio_api: true
+hassio_role: manager
+ports:
+  8099/tcp: null
+ports_description:
+  8099/tcp: "仅供 Add-on 内部认证 shadow API 使用，不映射宿主端口"
+watchdog: "http://[HOST]:[PORT:8099]/healthz"
+options:
+  manager_api_token: ""
+  restart_addon_allowlist: []
+  max_request_bytes: 32768
+  supervisor_timeout_seconds: 5
+schema:
+  manager_api_token: password
+  restart_addon_allowlist:
+    - "match(^[a-z0-9][a-z0-9_]{0,63}$)"
+  max_request_bytes: "int(4096,65536)"
+  supervisor_timeout_seconds: "int(1,30)"
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base-debian:bookworm
+  aarch64: ghcr.io/home-assistant/aarch64-base-debian:bookworm

@@ -37,13 +37,23 @@ ACTION_RISKS = {
     "cleanup_allowlisted_cache": "L3",
 }
 
+DEFAULT_POLICY_EPOCH = 1
+DEFAULT_POLICY_HASH = "sha256:c408de9e17185d22a780c6e5bca8cb3ad7cb092f46cdfe9a35fe1ecd6a3719b8"
+DEFAULT_ADAPTER_VERSION = "manager-restart-v1"
+DEFAULT_ADAPTER_SCHEMA_VERSION = 1
+
 ACTION_ID_RE = re.compile(r"^OPS-[0-9]{8}-[A-F0-9]{12}$")
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$")
 PARAMETER_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
 IDENTITY_HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 SHA256_RE = re.compile(r"^sha256:([a-f0-9]{64})$")
 NATIVE_INTENT_FIELDS = frozenset(
-    {"version", "action_type", "target", "idempotency_key"}
+    {
+        "version",
+        "action_type",
+        "target",
+        "idempotency_key",
+    }
 )
 NATIVE_AUTHORIZATION_REQUEST_FIELDS = frozenset({"version", "action_id"})
 EXECUTION_REQUEST_FIELDS = frozenset(
@@ -53,6 +63,23 @@ RECOVERY_RESOLUTION_FIELDS = frozenset(
     {"version", "resolution", "evidence_hash"}
 )
 RECOVERY_RESOLUTIONS = frozenset({"confirmed_healthy", "compensated"})
+BACKUP_EVIDENCE_FIELDS = frozenset(
+    {
+        "version",
+        "scope",
+        "logical_id",
+        "completed",
+        "created_at",
+        "size",
+        "sha256",
+        "off_device_sha256",
+        "readable",
+        "baseline",
+        "expires_at",
+    }
+)
+BACKUP_EVIDENCE_SCOPES = frozenset({"full", "addon", "dashboard", "recorder"})
+BACKUP_EVIDENCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 
 SENSITIVE_KEY_PARTS = (
@@ -90,6 +117,28 @@ PROPOSAL_HASH_FIELDS = (
 PROPOSAL_ALLOWED_FIELDS = frozenset(
     (*PROPOSAL_HASH_FIELDS, "parameter_summary_hash", "proposal_hash")
 )
+NATIVE_PROPOSAL_HASH_FIELDS = (
+    "version",
+    "action_id",
+    "action_type",
+    "target",
+    "parameter_summary",
+    "risk_level",
+    "requires_backup",
+    "expected_change",
+    "validation_plan",
+    "rollback_plan",
+    "policy_epoch",
+    "policy_hash",
+    "allowlist_hash",
+    "adapter_version",
+    "adapter_schema_version",
+    "baseline_etag",
+    "backup_evidence_id",
+    "created_at",
+    "expires_at",
+    "state",
+)
 APPROVAL_REQUIRED_FIELDS = frozenset(
     {
         "version",
@@ -119,6 +168,30 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def allowlist_fingerprint(values: frozenset[str]) -> str:
+    return "sha256:" + sha256_text(canonical_json(sorted(values)))
+
+
+def addon_baseline_etag(observation: Any) -> str:
+    if not isinstance(observation, dict):
+        raise ContractError("baseline_invalid", "Add-on baseline observation is invalid")
+    selected = {
+        field: observation.get(field)
+        for field in ("slug", "state", "version", "installed")
+    }
+    if (
+        not isinstance(selected["slug"], str)
+        or not selected["slug"]
+        or not isinstance(selected["state"], str)
+        or not selected["state"]
+        or not isinstance(selected["version"], str)
+        or not selected["version"]
+        or not isinstance(selected["installed"], bool)
+    ):
+        raise ContractError("baseline_invalid", "Add-on baseline fields are incomplete")
+    return "sha256:" + sha256_text(canonical_json(selected))
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -140,6 +213,57 @@ def parse_owner_hashes(raw: str) -> frozenset[str]:
     if any(not IDENTITY_HASH_RE.fullmatch(item) for item in owners):
         raise ContractError("invalid_owner_config", "Trusted owner hash configuration is invalid")
     return owners
+
+
+def validate_backup_evidence(value: Any, *, now: datetime) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != BACKUP_EVIDENCE_FIELDS:
+        raise ContractError("backup_evidence_fields_invalid", "Backup evidence fields are invalid")
+    if value.get("version") != 1:
+        raise ContractError("backup_evidence_version_invalid", "Backup evidence version is invalid")
+    scope = value.get("scope")
+    if scope not in BACKUP_EVIDENCE_SCOPES:
+        raise ContractError("backup_evidence_scope_invalid", "Backup evidence scope is invalid")
+    logical_id = value.get("logical_id")
+    if (
+        not isinstance(logical_id, str)
+        or not BACKUP_EVIDENCE_ID_RE.fullmatch(logical_id)
+        or SENSITIVE_VALUE_RE.search(logical_id)
+    ):
+        raise ContractError("backup_evidence_id_invalid", "Backup evidence logical ID is invalid")
+    if value.get("completed") is not True:
+        raise ContractError("backup_evidence_incomplete", "Backup evidence is not completed")
+    if value.get("readable") is not True:
+        raise ContractError("backup_evidence_unreadable", "Backup evidence is not readable")
+    size = value.get("size")
+    if (
+        not isinstance(size, int)
+        or isinstance(size, bool)
+        or not 1 <= size <= 9_223_372_036_854_775_807
+    ):
+        raise ContractError("backup_evidence_size_invalid", "Backup evidence size is invalid")
+    for field in ("sha256", "off_device_sha256", "baseline"):
+        if not isinstance(value.get(field), str) or not SHA256_RE.fullmatch(value[field]):
+            raise ContractError("backup_evidence_hash_invalid", f"Backup evidence {field} is invalid")
+    created_at = parse_timestamp(value.get("created_at"), field="backup_evidence.created_at")
+    expires_at = parse_timestamp(value.get("expires_at"), field="backup_evidence.expires_at")
+    current = now.astimezone(timezone.utc)
+    if created_at > current:
+        raise ContractError("backup_evidence_created_in_future", "Backup evidence creation time is in the future")
+    if expires_at <= current or expires_at <= created_at:
+        raise ContractError("backup_evidence_expired", "Backup evidence is expired")
+    return {
+        "version": 1,
+        "scope": scope,
+        "logical_id": logical_id,
+        "completed": True,
+        "created_at": created_at.replace(microsecond=0).isoformat(),
+        "size": size,
+        "sha256": value["sha256"],
+        "off_device_sha256": value["off_device_sha256"],
+        "readable": True,
+        "baseline": value["baseline"],
+        "expires_at": expires_at.replace(microsecond=0).isoformat(),
+    }
 
 
 def _safe_text(value: Any, *, field: str, maximum: int = 300) -> str:
@@ -217,9 +341,11 @@ def _proposal_hash(proposal: dict[str, Any]) -> tuple[str, str]:
 
 
 def validate_native_intent(
-    intent: Any, *, restart_addon_allowlist: frozenset[str]
-) -> dict[str, str]:
-    """Validate the only executable intent without accepting arbitrary parameters."""
+    intent: Any,
+    *,
+    restart_addon_allowlist: frozenset[str],
+) -> dict[str, Any]:
+    """Validate the model-facing minimal intent without accepting policy fields."""
     if not isinstance(intent, dict) or set(intent) != NATIVE_INTENT_FIELDS:
         raise ContractError("invalid_intent", "Operation intent fields are invalid")
     if intent["version"] != 1:

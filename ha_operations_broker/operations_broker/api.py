@@ -20,6 +20,7 @@ EXECUTION_STATUS_RE = re.compile(r"^/v1/executions/([^/]+)$")
 RECOVERY_RESOLUTION_RE = re.compile(
     r"^/v1/executions/([^/]+)/recovery-resolution$"
 )
+BACKUP_EVIDENCE_RE = re.compile(r"^/v1/backup-evidence/([^/]+)$")
 
 
 def create_server(
@@ -27,6 +28,8 @@ def create_server(
     port: int,
     *,
     api_token: str,
+    recovery_api_token: str,
+    backup_evidence_api_token: str,
     max_request_bytes: int,
     preflight_handler: Callable[[Any], dict[str, Any]],
     authorization_manager: AuthorizationManager | None = None,
@@ -37,8 +40,17 @@ def create_server(
     enabled_actions: frozenset[str] = frozenset(),
     allowed_ingress_origins: frozenset[str] = frozenset(),
 ) -> ThreadingHTTPServer:
+    tokens = (api_token, recovery_api_token, backup_evidence_api_token)
+    if any(len(token) < 32 for token in tokens) or any(
+        hmac.compare_digest(tokens[left], tokens[right])
+        for left, right in ((0, 1), (0, 2), (1, 2))
+    ):
+        raise ValueError(
+            "Broker, recovery and backup evidence API tokens must be distinct and at least 32 characters"
+        )
+
     class Handler(BaseHTTPRequestHandler):
-        server_version = "HAOperationsBroker/0.4.0"
+        server_version = "HAOperationsBroker/0.5.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -51,7 +63,7 @@ def create_server(
                     HTTPStatus.OK,
                     {
                         "status": "ok",
-                        "version": 4,
+                        "version": 6,
                         "execution_enabled": execution_enabled,
                         "enabled_actions": sorted(enabled_actions),
                     },
@@ -102,6 +114,16 @@ def create_server(
                 action_id = unquote(execution_match.group(1))
                 self._authorization_call(lambda: execution_status_handler(action_id))
                 return
+            evidence_match = BACKUP_EVIDENCE_RE.fullmatch(path)
+            if evidence_match:
+                if not self._backup_evidence_bearer_authorized():
+                    return
+                manager = self._manager()
+                if manager is None:
+                    return
+                logical_id = unquote(evidence_match.group(1))
+                self._authorization_call(lambda: manager.backup_evidence(logical_id))
+                return
             self._not_found()
 
         def do_POST(self) -> None:  # noqa: N802
@@ -124,6 +146,17 @@ def create_server(
                 if payload is None:
                     return
                 self._authorization_call(lambda: manager.create_proposal(payload))
+                return
+            if path == "/v1/backup-evidence":
+                if not self._backup_evidence_bearer_authorized():
+                    return
+                manager = self._manager()
+                if manager is None:
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                self._authorization_call(lambda: manager.register_backup_evidence(payload))
                 return
             if path == "/v1/authorization/requests":
                 if not self._bearer_authorized():
@@ -149,7 +182,7 @@ def create_server(
                 return
             recovery_match = RECOVERY_RESOLUTION_RE.fullmatch(path)
             if recovery_match:
-                if not self._bearer_authorized():
+                if not self._recovery_bearer_authorized():
                     return
                 if recovery_resolution_handler is None:
                     self._not_found()
@@ -231,6 +264,28 @@ def create_server(
                 return False
             return True
 
+        def _recovery_bearer_authorized(self) -> bool:
+            authorization = self.headers.get("Authorization", "")
+            expected = f"Bearer {recovery_api_token}"
+            if not hmac.compare_digest(authorization, expected):
+                self._json(
+                    HTTPStatus.UNAUTHORIZED,
+                    {"error": {"code": "recovery_not_authorized"}},
+                )
+                return False
+            return True
+
+        def _backup_evidence_bearer_authorized(self) -> bool:
+            authorization = self.headers.get("Authorization", "")
+            expected = f"Bearer {backup_evidence_api_token}"
+            if not hmac.compare_digest(authorization, expected):
+                self._json(
+                    HTTPStatus.UNAUTHORIZED,
+                    {"error": {"code": "backup_evidence_not_authorized"}},
+                )
+                return False
+            return True
+
         def _ingress_user(self, *, require_origin: bool = False) -> str | None:
             user_id = self.headers.get("X-Remote-User-Id", "")
             if not user_id:
@@ -297,6 +352,7 @@ def create_server(
                     "execution_conflict": HTTPStatus.CONFLICT,
                     "execution_state_conflict": HTTPStatus.CONFLICT,
                     "unresolved_recovery": HTTPStatus.CONFLICT,
+                    "lease_recovery_required": HTTPStatus.CONFLICT,
                     "recovery_not_required": HTTPStatus.CONFLICT,
                     "recovery_already_resolved": HTTPStatus.CONFLICT,
                     "receipt_consumed": HTTPStatus.CONFLICT,
@@ -310,9 +366,12 @@ def create_server(
                     "ingress_user_required": HTTPStatus.UNAUTHORIZED,
                     "proposal_not_found": HTTPStatus.NOT_FOUND,
                     "receipt_not_found": HTTPStatus.NOT_FOUND,
+                    "backup_evidence_not_found": HTTPStatus.NOT_FOUND,
                     "execution_not_found": HTTPStatus.NOT_FOUND,
                     "proposal_expired": HTTPStatus.GONE,
                     "receipt_expired": HTTPStatus.GONE,
+                    "backup_evidence_expired": HTTPStatus.GONE,
+                    "backup_evidence_conflict": HTTPStatus.CONFLICT,
                 }.get(exc.code, HTTPStatus.BAD_REQUEST)
                 self._json(
                     status,

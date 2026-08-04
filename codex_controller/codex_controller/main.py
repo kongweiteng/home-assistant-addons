@@ -17,7 +17,7 @@ from .app_server import AppServerClient
 from .media_input import TurnMediaManager
 from .service import ControllerService
 from .store import ControllerStore
-from .tool_proxy import ToolProxyServer, ToolRouter
+from .tool_proxy import NATURAL_QUERY_READ_ONLY_TOOLS, ToolProxyServer, ToolRouter
 
 
 def read_api_key_from_fd() -> str:
@@ -162,7 +162,11 @@ def write_codex_config(
         "env = { "
         f"CONTROLLER_MCP_SOCKET = {json.dumps(str(socket_path), ensure_ascii=False)}, "
         f"PYTHONPATH = {json.dumps(mcp_pythonpath, ensure_ascii=False)}"
-        " }\n"
+        " }\n\n"
+        + "\n".join(
+            f"[mcp_servers.home_assistant_tools.tools.{name}]\napproval_mode = \"approve\"\n"
+            for name in sorted(NATURAL_QUERY_READ_ONLY_TOOLS)
+        )
     )
     if config.exists() and config.is_symlink():
         raise RuntimeError("CODEX_HOME config.toml 不能是符号链接")

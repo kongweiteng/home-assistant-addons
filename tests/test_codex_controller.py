@@ -287,6 +287,9 @@ class AppServerClientTests(unittest.TestCase):
         self.assertIn("普通问答", instructions)
         self.assertIn("当前会话已配置 Renovation Hub", instructions)
         self.assertIn("必须先调用 renovation_dashboard", instructions)
+        self.assertIn("无副作用的只读工具", instructions)
+        self.assertIn("不需要 Passkey、写入确认或额外征求授权", instructions)
+        self.assertIn("不得转入 Home Assistant Operations 授权流程", instructions)
         self.assertIn("不得回复‘未连接账本’", instructions)
         self.assertIn("不得沿用历史对话中的旧 Mac 代理", instructions)
         self.assertIn("不得使用 Shell", instructions)
@@ -564,6 +567,19 @@ class ControllerApiBaseUrlTests(unittest.TestCase):
             self.assertEqual(mcp_config["command"], sys.executable)
             self.assertEqual(mcp_config["env"]["CONTROLLER_MCP_SOCKET"], str(socket_path))
             self.assertEqual(mcp_config["env"]["PYTHONPATH"], str(mcp_pythonpath))
+            self.assertEqual(
+                mcp_config["tools"],
+                {
+                    "ledger_query": {"approval_mode": "approve"},
+                    "ledger_show": {"approval_mode": "approve"},
+                    "ledger_summary": {"approval_mode": "approve"},
+                    "renovation_area_list": {"approval_mode": "approve"},
+                    "renovation_dashboard": {"approval_mode": "approve"},
+                    "renovation_project_list": {"approval_mode": "approve"},
+                    "renovation_stage_list": {"approval_mode": "approve"},
+                    "renovation_timeline": {"approval_mode": "approve"},
+                },
+            )
             self.assertNotIn("fixture-api-key-value", content)
             self.assertEqual(list(codex_home.glob(".config.toml.*")), [])
             write_codex_config(
@@ -617,7 +633,30 @@ class ControllerApiBaseUrlTests(unittest.TestCase):
                 initialized, catalog = [json.loads(line) for line in output.splitlines()]
                 self.assertEqual(initialized["result"]["serverInfo"]["name"], "ha-controller-tools")
                 self.assertEqual(len(catalog["result"]["tools"]), 26)
-                self.assertIn("renovation_dashboard", {tool["name"] for tool in catalog["result"]["tools"]})
+                by_name = {tool["name"]: tool for tool in catalog["result"]["tools"]}
+                self.assertIn("renovation_dashboard", by_name)
+                for name in (
+                    "ledger_query",
+                    "ledger_show",
+                    "ledger_summary",
+                    "renovation_area_list",
+                    "renovation_dashboard",
+                    "renovation_project_list",
+                    "renovation_stage_list",
+                    "renovation_timeline",
+                ):
+                    self.assertIn("只读", by_name[name]["description"])
+                    self.assertIn("不会", by_name[name]["description"])
+                    self.assertEqual(
+                        by_name[name]["annotations"],
+                        {
+                            "readOnlyHint": True,
+                            "destructiveHint": False,
+                            "idempotentHint": True,
+                            "openWorldHint": False,
+                        },
+                    )
+                self.assertNotIn("annotations", by_name["ledger_add_payment"])
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -1057,6 +1096,57 @@ class ToolRouterTests(unittest.TestCase):
         with self.assertRaises(ToolProxyError) as context:
             router.call("execute_shell", {})
         self.assertEqual(context.exception.code, "unknown_tool")
+
+    def test_natural_query_tools_are_read_only_without_job_context(self) -> None:
+        observed: list[tuple[str, str, dict | None]] = []
+
+        def fake_request(method: str, url: str, _token: str, payload: dict | None) -> dict:
+            observed.append((method, url, payload))
+            return {"version": 1, "result": {"ok": True}}
+
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            request_json=fake_request,
+        )
+        for name, arguments in (
+            ("ledger_query", {"limit": 5}),
+            ("ledger_summary", {}),
+            ("renovation_dashboard", {}),
+        ):
+            with self.subTest(name=name):
+                router.call(name, arguments)
+                self.assertEqual(observed[-1][0:2], ("POST", "http://renovation-hub:8101/internal/v1/tools/call"))
+                assert observed[-1][2] is not None
+                self.assertEqual(observed[-1][2]["name"], name)
+                self.assertNotIn("idempotency_key", observed[-1][2]["arguments"])
+
+        for name, arguments in (
+            ("ledger_add_payment", {"amount": "1.00"}),
+            ("renovation_event_create", {"title": "fixture"}),
+        ):
+            with self.subTest(name=name), self.assertRaises(ToolProxyError) as context:
+                router.call(name, arguments)
+            self.assertEqual(context.exception.code, "tool_context_unavailable")
+
+    def test_mcp_catalog_distinguishes_core_read_only_queries_from_writes(self) -> None:
+        catalog = {tool["name"]: tool for tool in tool_catalog()}
+        for name in (
+            "ledger_query",
+            "ledger_show",
+            "ledger_summary",
+            "renovation_area_list",
+            "renovation_dashboard",
+            "renovation_project_list",
+            "renovation_stage_list",
+            "renovation_timeline",
+        ):
+            self.assertIn("只读", catalog[name]["description"])
+            self.assertIn("无需 Passkey", catalog[name]["description"])
+            self.assertTrue(catalog[name]["annotations"]["readOnlyHint"])
+            self.assertFalse(catalog[name]["annotations"]["destructiveHint"])
+        self.assertIn("写操作", catalog["ledger_add_payment"]["description"])
+        self.assertNotIn("annotations", catalog["ledger_add_payment"])
 
     def test_operations_routes_are_closed_and_proposal_idempotency_is_controller_derived(self) -> None:
         observed: list[tuple[str, str, dict | None]] = []

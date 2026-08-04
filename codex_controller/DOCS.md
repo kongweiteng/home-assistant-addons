@@ -11,7 +11,7 @@
 - 微信 owner 发送无附件且文本精确为“打开新会话”或 `/new` 时，Controller 会在既有队列与幂等门禁内创建新 Thread，并返回确定性确认。近似文本或带附件消息不会触发重置；旧 Thread 不删除，下一条普通消息才进入新 Thread。
 - 新 Thread 在当前 app-server 进程中已经处于加载状态，下一条消息不会重复调用 `thread/resume`；Controller/app-server 重启后进程内状态清空，持久 Thread 才会重新执行一次安全恢复。
 - Ingress 详情显示当前工具总数，以及装修/运维工具是否已配置。该状态只反映启动时脱敏目录，不显示 URL 或 bearer；正式可用仍需实际只读工具调用验证。
-- Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
+- Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；用户自然语言提出查询、查看、核验、汇总或明细请求，即授权本次无副作用只读调用，不需要 Passkey、写入确认或额外征求授权。不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
 
 ## 配置
 
@@ -74,6 +74,8 @@ Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Co
 ## 工具代理
 
 app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把固定工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Ledger 或 Broker。
+
+账本汇总、明细、单条流水以及装修项目/阶段/空间/时间线/驾驶舱查询在 MCP 目录中带有明确的只读、非破坏、幂等和封闭世界标注，并在私有 `config.toml` 中使用单工具 `approval_mode="approve"`。该预批准只适用于已核实无副作用的查询，不适用于新增付款、退款、修改、撤销、附件消费、媒体归档、导入或 Home Assistant 操作。
 
 app-server 本身继续运行在不继承宿主 `PYTHONPATH` 的净化环境中；MCP 配置仅为固定的本地代理进程注入 `/opt/codex-controller`，避免外部 Python 路径进入模型进程，同时保证官方 app-server 的真实 `tools/list` 能装载工具目录。
 

@@ -8,6 +8,60 @@ import socket
 import sys
 from typing import Any
 
+from .tool_proxy import NATURAL_QUERY_READ_ONLY_TOOLS
+
+
+READ_ONLY_DESCRIPTIONS = {
+    "ledger_show": (
+        "只读查看 Renovation Hub 装修账本的一条既有流水及附件元数据；不会创建、修改、消费或删除数据，"
+        "用户要求查看指定流水时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "ledger_query": (
+        "只读查询 Renovation Hub 装修账本明细和筛选结果；不会创建、修改或删除数据，"
+        "用户要求查询或查看明细时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "ledger_summary": (
+        "只读汇总 Renovation Hub 装修账本的净支出、交易数量和分类统计；不会创建、修改或删除数据，"
+        "用户要求查询或汇总时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "renovation_dashboard": (
+        "只读返回 Renovation Hub 装修驾驶舱、进度和统计数据；不会修改项目或账本，"
+        "用户要求查看装修概况时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "renovation_project_list": (
+        "只读列出 Renovation Hub 装修项目；不会创建、修改或删除数据，"
+        "用户要求查看项目时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "renovation_stage_list": (
+        "只读列出 Renovation Hub 装修阶段；不会创建、修改或删除数据，"
+        "用户要求查看阶段时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "renovation_area_list": (
+        "只读列出 Renovation Hub 装修空间；不会创建、修改或删除数据，"
+        "用户要求查看空间时可直接调用，无需 Passkey 或额外确认。"
+    ),
+    "renovation_timeline": (
+        "只读查询 Renovation Hub 装修时间线；不会创建、修改或删除数据，"
+        "用户要求查看进度或事件记录时可直接调用，无需 Passkey 或额外确认。"
+    ),
+}
+
+
+def _catalog_tool(name: str, description: str) -> dict[str, Any]:
+    tool: dict[str, Any] = {
+        "name": name,
+        "description": description,
+        "inputSchema": {"type": "object", "additionalProperties": True},
+    }
+    if name in NATURAL_QUERY_READ_ONLY_TOOLS:
+        tool["annotations"] = {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        }
+    return tool
+
 
 def tool_catalog(enabled_names: list[str] | None = None) -> list[dict[str, Any]]:
     ledger_names = [
@@ -42,19 +96,23 @@ def tool_catalog(enabled_names: list[str] | None = None) -> list[dict[str, Any]]
         "renovation_media_ingest",
     ]
     tools: list[dict[str, Any]] = [
-        {
-            "name": name,
-            "description": "调用 Renovation Hub 的 Ledger v1 兼容工具；写操作必须携带稳定 idempotency_key。",
-            "inputSchema": {"type": "object", "additionalProperties": True},
-        }
+        _catalog_tool(
+            name,
+            READ_ONLY_DESCRIPTIONS.get(
+                name,
+                "调用 Renovation Hub 的 Ledger v1 兼容工具；写操作会由 Controller 强制生成稳定幂等键并受服务端写入边界约束。",
+            ),
+        )
         for name in ledger_names
     ]
     tools.extend(
-        {
-            "name": name,
-            "description": "调用 Renovation Hub 的项目、阶段、空间、时间线或统计工具。",
-            "inputSchema": {"type": "object", "additionalProperties": True},
-        }
+        _catalog_tool(
+            name,
+            READ_ONLY_DESCRIPTIONS.get(
+                name,
+                "调用 Renovation Hub 的项目、阶段、空间或时间线工具；创建和更新操作受 Controller 与 Hub 写入边界约束。",
+            ),
+        )
         for name in renovation_names
     )
     tools.extend(

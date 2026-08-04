@@ -7,6 +7,8 @@
 - 加载状态以锁串行保护并在 Controller/app-server 启停时清空，不改变 SQLite Thread 映射、单活动 Turn、队列、MCP 工具、认证或写入边界。
 - 修复 app-server 的净化环境未向 MCP 子进程提供受控 Python 模块路径、导致页面显示已配置工具但真实 Thread 工具目录为空的问题；MCP 配置只注入固定 `/opt/codex-controller`，不会恢复对外部 `PYTHONPATH` 的继承。
 - 新增净化环境下真实启动 MCP、执行 `initialize` 与 `tools/list` 的回归测试，确保装修工具不是只存在于 Controller 本地清单。
+- 修复自然语言账本查询被误判为需要额外授权的问题：明确只读工具的无副作用描述和 MCP annotations，并仅为账本/装修的确定性查询工具配置单工具预批准。
+- developer instructions 明确用户提出查询、查看、核验、汇总或明细即授权本次只读调用；写账、退款、修改、撤销、附件/媒体和 Operations 仍保留原有服务端门禁。
 
 ## 0.1.8
 

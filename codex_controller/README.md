@@ -25,6 +25,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.1.8` 支持精确微信控制命令“打开新会话”和 `/new`：Controller 确定性创建新 Thread 并原子替换当前映射，不让旧 Thread 或模型伪装成已经切换；下一条消息使用当前工具目录。
 - `0.1.9` 修复同一 app-server 进程内新建 Thread 被下一条消息重复 `thread/resume` 的问题；当前进程已加载的 Thread 直接进入 `turn/start`，Controller/app-server 重启后才按持久映射恢复。
 - `0.1.9` 同时修复净化后的 app-server 环境无法导入本地 MCP 代理的问题；MCP 子进程只获得固定模块路径和无秘密 Unix Socket，真实 `tools/list` 必须能返回当前装修/运维工具目录。
+- `0.1.9` 将账本汇总、明细、单条流水以及装修项目/阶段/空间/时间线/驾驶舱查询明确标记为无副作用只读工具，并在 Codex MCP 配置中只预批准这些查询工具。用户自然语言提出查询或汇总即授权本次只读调用，不需要 Passkey 或额外确认；写账、退款、修改、撤销、归档和 Operations 权限不放宽。
 - 默认仍不启用正式微信任务入口。
 - 旧 Hermes iLink 身份已经失效；正式装修 writer 已迁移到 Renovation Hub，Hermes 已停止，微信恢复不能依赖恢复旧 Hermes 进程，也不得形成双 poller 或双 writer。
 
@@ -36,6 +37,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - Ledger 与 Operations Broker bearer 只保留在 Controller 主进程，不进入 app-server 环境、模型提示或日志。
 - Gateway 附件 bearer 也只保留在 Controller 主进程；模型仅能提交短期 `attachment_ref`。图片预览文件固定写入私有 `/data/turn-media`，权限为 `0600`，不使用微信文件名构造路径。
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
+- MCP 工具审批只对已核实的无副作用装修查询使用单工具 `approve`；其他工具继续沿用 Codex 默认判断及 Controller/Hub/Broker 服务端强制门禁，不能用只读标注绕过写入控制。
 - Controller 重启后，状态不确定的运行中作业进入 `recovery_required`，不会自动重放写操作。
 - 写工具只在当前活动 Turn 的上下文中可调用；Turn 结束后上下文立即清除，同一微信消息的同语义调用复用相同幂等键，不同消息生成不同幂等键。
 

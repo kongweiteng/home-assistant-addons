@@ -86,6 +86,10 @@ class AppServerClient:
             instructions += (
                 " 当前会话已配置 Renovation Hub 装修账本和装修档案工具。用户询问账本是否连接、是否可用、当前支出、汇总或明细时，"
                 "必须先调用 renovation_dashboard、ledger_summary、ledger_query 或其他合适的只读工具核验；"
+                "其中 ledger_summary、ledger_query 和 renovation_dashboard 是无副作用的只读工具。"
+                "用户自然语言提出查询、查看、核验、汇总或明细请求，就已经授权本次只读调用，应直接执行，"
+                "不需要 Passkey、写入确认或额外征求授权，也不得转入 Home Assistant Operations 授权流程；"
+                "只有工具实际返回权限错误时才能说明权限不足。"
                 "只要工具调用可用，就不得回复‘未连接账本’，也不得要求用户重新发送现有账目。写账、退款、修改和撤销必须调用对应结构化工具。"
             )
         else:

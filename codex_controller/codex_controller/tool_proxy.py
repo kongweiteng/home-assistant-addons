@@ -77,6 +77,18 @@ RENOVATION_WRITE_TOOLS = {
     "renovation_event_update",
     "renovation_media_ingest",
 }
+NATURAL_QUERY_READ_ONLY_TOOLS = frozenset(
+    {
+        "ledger_query",
+        "ledger_show",
+        "ledger_summary",
+        "renovation_area_list",
+        "renovation_dashboard",
+        "renovation_project_list",
+        "renovation_stage_list",
+        "renovation_timeline",
+    }
+)
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024

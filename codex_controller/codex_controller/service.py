@@ -88,6 +88,7 @@ class ControllerService:
                 "job_capability_profile_v1",
                 "thread_short_v1",
                 "mcp_tool_policy_v1",
+                "job_artifacts_v1",
             ],
         }
 
@@ -179,7 +180,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.2.1",
+            "version": "0.2.2",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -259,7 +260,14 @@ class ControllerService:
                 self.auth_error = None
 
     def _scheduler_loop(self) -> None:
+        next_artifact_cleanup = 0.0
         while not self._stop.wait(0.5):
+            if time.monotonic() >= next_artifact_cleanup:
+                try:
+                    self.store.cleanup_artifacts()
+                except (StoreError, OSError):
+                    pass
+                next_artifact_cleanup = time.monotonic() + 60
             if not self.intake_enabled or self.start_error is not None:
                 continue
             job = self.store.claim_next()

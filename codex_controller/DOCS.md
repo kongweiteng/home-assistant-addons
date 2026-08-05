@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.2.1`。
+当前版本：`0.2.2`。
 
 ## 通用微信会话
 
@@ -101,6 +101,15 @@ MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 UR
 
 当前 `localImage` 只接受 JPEG、PNG 和 WebP。其他附件仍以受控引用元数据进入 Turn，正文只允许由已配置的确定性工具读取；不把 bearer、内部 URL 或任意宿主路径交给模型。
 
+### 装修统计图 artifact
+
+- `ledger_generate_chart` 只能在活动 Controller 作业上下文中用于自动微信交付。Hub 返回后，Controller 只接受 `summary-<32 hex>.png` 固定引用，并从受认证 `/internal/v1/downloads/chart/<ref>` 读取。
+- Controller 同时核验 HTTP `image/png`、声明长度、20 MiB 上限、PNG 文件签名、Hub `size_bytes` 和 SHA-256。任一不一致都会让工具调用失败，不把未校验图片交给 Gateway。
+- 通过校验的图片原子写入 `/data/job-artifacts`，目录 `0700`、文件 `0600`；默认 TTL 24 小时、总配额 100 MiB、每作业最多 4 个。同一 job + SHA-256 幂等复用，过期与孤立文件自动清理。
+- completed job 新增 `result_summary` 和 `artifacts[]`。DTO 不含 Hub 引用、bearer 或 Controller 路径；Gateway 内部读取使用既有 Controller bearer，失败下载使用 `/downloads/artifacts/<opaque-token>`。
+- opaque token 由 Controller 私有 HMAC 密钥和 artifact/到期时间派生，SQLite 只保存 token SHA-256。该路径只应经 HA Ingress 暴露；不新增宿主端口、匿名对象存储或 NPM 路由。
+- 模型工具结果不含 `fallback_path`，developer instructions 明确禁止输出 `download_ref`、内部 URL、路径、Bearer 或 Base64。图片、摘要和失败链接的最终顺序由 Gateway 决定。
+
 `ledger_attach` 保留 Legacy Ledger v1 桥接：模型只能提交 Gateway 生成的 `attachment_ref`。Controller 主进程使用独立 bearer 一次性读取附件，校验文件名、MIME、大小和 SHA-256，再转换为旧账本需要的 Base64 内容；第一版 Legacy 单附件限制为 20 MiB。
 
 `renovation_media_ingest` 用于新图片/视频档案。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时再从 Gateway 以二进制流读取正文，并直接转发到 Renovation Hub。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
@@ -123,3 +132,5 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 使用自定义 URL 回滚时，同时清空 `openai_base_url` 和 `openai_api_key` 或恢复升级前备份；不要把旧 Key 复制到普通文件。
 
 当前旧 Hermes iLink 身份已经失效，不能作为微信恢复目标。回滚 Controller 时应关闭 intake、保留队列和新 Gateway 身份；微信恢复必须修复当前 Gateway 或重新扫码并重新绑定。
+
+从 `0.2.2` 回退到 `0.2.1` 时，旧版本会忽略 additive `result_summary`、`job_artifacts` 表和私有 artifact 文件。应先回退 Controller，使新作业不再产生 artifact，再按需要回退 Gateway；不要删除 `/data/job-artifacts`，待确认没有未发送或仍需下载的图片后再单独清理。

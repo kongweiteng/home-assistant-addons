@@ -79,6 +79,36 @@ def controller_request(
         thread.join(timeout=3)
 
 
+def controller_binary_request(
+    service: object,
+    path: str,
+    *,
+    authorized: bool = False,
+) -> tuple[int, dict[str, str], bytes]:
+    token = "t" * 32
+    server = create_server(
+        "127.0.0.1",
+        0,
+        service=service,  # type: ignore[arg-type]
+        api_token=token,
+        max_request_bytes=1024 * 1024,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+    headers = {"Authorization": f"Bearer {token}"} if authorized else {}
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        body = response.read()
+        return response.status, dict(response.getheaders()), body
+    finally:
+        connection.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+
+
 FAKE_APP_SERVER = r'''
 import json, sys
 thread_id = "thread-fixture"
@@ -173,6 +203,104 @@ class ControllerStoreTests(unittest.TestCase):
         recovered = self.store.get_job(running["job_id"])
         self.assertEqual(recovered["state"], "recovery_required")
         self.assertEqual(recovered["error_code"], "turn_state_unknown")
+
+    def test_chart_artifact_is_private_persistent_and_only_exposed_after_completion(self) -> None:
+        self.store.create_job(fixture_job())
+        running = self.store.claim_next()
+        assert running is not None
+        content = b"\x89PNG\r\n\x1a\nfixture-chart"
+        chart = {
+            "download_ref": "summary-" + "a" * 32 + ".png",
+            "width": 1280,
+            "height": 960,
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "summary": {"transaction_count": 107, "net_amount": "179067.86"},
+        }
+        captured = self.store.capture_chart_artifact(running["job_id"], chart, content)
+        self.assertRegex(captured["artifact_id"], r"^AR-[A-Z2-7]{26}$")
+        self.assertNotIn("download_ref", captured)
+        self.assertEqual(self.store.get_public_job(running["job_id"])["artifacts"], [])
+        self.store.assign_turn(running["job_id"], "turn-chart")
+        self.store.complete_turn("turn-chart", "completed")
+        public = self.store.get_public_job(running["job_id"])
+        self.assertEqual(public["result_summary"], "已生成装修账单统计图：共 107 笔记录，净支出 ¥179067.86。")
+        self.assertEqual(public["artifacts"][0]["sha256"], f"sha256:{hashlib.sha256(content).hexdigest()}")
+        metadata, loaded = self.store.read_job_artifact(running["job_id"], captured["artifact_id"])
+        self.assertEqual(loaded, content)
+        token = metadata["fallback_path"].rsplit("/", 1)[-1]
+        self.assertEqual(self.store.read_download_artifact(token)[1], content)
+        artifact_files = list((self.root / "job-artifacts").glob("*.png"))
+        self.assertEqual(len(artifact_files), 1)
+        self.assertEqual(artifact_files[0].stat().st_mode & 0o777, 0o600)
+        restarted = ControllerStore(self.root / "controller.sqlite3")
+        self.assertEqual(restarted.get_public_job(running["job_id"])["artifacts"], public["artifacts"])
+
+    def test_chart_artifact_rejects_invalid_reference_size_digest_and_quota(self) -> None:
+        store = ControllerStore(
+            self.root / "limited.sqlite3",
+            artifact_dir=self.root / "limited-artifacts",
+            max_artifact_bytes=1024,
+            artifact_quota_bytes=1024,
+        )
+        store.create_job(fixture_job("artifact-invalid"))
+        running = store.claim_next()
+        assert running is not None
+        content = b"\x89PNG\r\n\x1a\nvalid"
+        base = {
+            "download_ref": "summary-" + "b" * 32 + ".png",
+            "width": 1280,
+            "height": 960,
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "summary": {"transaction_count": 1, "net_amount": "1.00"},
+        }
+        for field, value, code in (
+            ("download_ref", "../chart.png", "artifact_reference_invalid"),
+            ("size_bytes", len(content) + 1, "artifact_size_invalid"),
+            ("sha256", "0" * 64, "artifact_digest_invalid"),
+        ):
+            with self.subTest(field=field), self.assertRaises(StoreError) as context:
+                store.capture_chart_artifact(running["job_id"], {**base, field: value}, content)
+            self.assertEqual(context.exception.code, code)
+        oversized = b"\x89PNG\r\n\x1a\n" + b"x" * 1100
+        with self.assertRaises(StoreError) as context:
+            store.capture_chart_artifact(
+                running["job_id"],
+                {
+                    **base,
+                    "size_bytes": len(oversized),
+                    "sha256": hashlib.sha256(oversized).hexdigest(),
+                },
+                oversized,
+            )
+        self.assertEqual(context.exception.code, "artifact_size_invalid")
+
+    def test_chart_artifact_rejects_tampered_download_token_hash(self) -> None:
+        self.store.create_job(fixture_job("artifact-token-tamper"))
+        running = self.store.claim_next()
+        assert running is not None
+        content = b"\x89PNG\r\n\x1a\ntoken-tamper"
+        artifact = self.store.capture_chart_artifact(
+            running["job_id"],
+            {
+                "download_ref": "summary-" + "e" * 32 + ".png",
+                "width": 1280,
+                "height": 960,
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "summary": {"transaction_count": 1, "net_amount": "2.00"},
+            },
+            content,
+        )
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE job_artifacts SET download_token_hash=? WHERE artifact_id=?",
+                ("0" * 64, artifact["artifact_id"]),
+            )
+        with self.assertRaises(StoreError) as context:
+            self.store.read_job_artifact(running["job_id"], artifact["artifact_id"])
+        self.assertEqual(context.exception.code, "artifact_token_invalid")
 
     def test_recovery_required_blocks_queue_until_explicit_audited_resolution(self) -> None:
         self.store.create_job(fixture_job("fixture-message-1"))
@@ -650,6 +778,8 @@ class AppServerClientTests(unittest.TestCase):
         )
         self.assertIn("图表、导出、记账、退款、更正", instructions)
         self.assertIn("该请求本身就是本次匹配结构化工具调用的授权", instructions)
+        self.assertIn("图表由 Controller 私有固化并由 Weixin Gateway 自动投递", instructions)
+        self.assertIn("不得输出 download_ref", instructions)
         self.assertIn("不得再询问是否确认、是否授权或要求 Codex 弹窗审批", instructions)
         self.assertIn("只有缺少工具必填字段", instructions)
         self.assertIn("讨论、假设、举例、方案比较", instructions)
@@ -1137,7 +1267,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.2.1"
+        expected = "0.2.2"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1405,14 +1535,120 @@ class ControllerToolApiTests(unittest.TestCase):
                 )
                 self.assertEqual(capability_status, 200)
                 self.assertIn("job_capability_profile_v1", capabilities["result"]["capabilities"])
+                self.assertIn("job_artifacts_v1", capabilities["result"]["capabilities"])
                 self.assertNotIn("owner_legacy", json.dumps(capabilities))
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
 
+    def test_artifact_internal_api_requires_bearer_and_fallback_uses_opaque_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ControllerStore(root / "controller.sqlite3")
+            store.create_job(fixture_job("artifact-api-job"))
+            running = store.claim_next()
+            assert running is not None
+            content = b"\x89PNG\r\n\x1a\napi-chart"
+            artifact = store.capture_chart_artifact(
+                running["job_id"],
+                {
+                    "download_ref": "summary-" + "c" * 32 + ".png",
+                    "width": 1280,
+                    "height": 960,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "summary": {"transaction_count": 2, "net_amount": "3.00"},
+                },
+                content,
+            )
+            store.assign_turn(running["job_id"], "artifact-api-turn")
+            store.complete_turn("artifact-api-turn", "completed")
+            service = ControllerService(
+                store,
+                self.App(),  # type: ignore[arg-type]
+                intake_enabled=True,
+                auth_mode="api_key",
+                api_key="fixture-api-key-value",
+            )
+            internal_path = f"/internal/v1/jobs/{running['job_id']}/artifacts/{artifact['artifact_id']}"
+            unauthorized_status, _headers, _body = controller_binary_request(service, internal_path)
+            self.assertEqual(unauthorized_status, 401)
+            status, headers, body = controller_binary_request(service, internal_path, authorized=True)
+            self.assertEqual(status, 200)
+            self.assertEqual(headers["Content-Type"], "image/png")
+            self.assertEqual(headers["X-Content-SHA256"], artifact["sha256"])
+            self.assertEqual(body, content)
+            fallback_status, fallback_headers, fallback_body = controller_binary_request(
+                service, artifact["fallback_path"]
+            )
+            self.assertEqual(fallback_status, 200)
+            self.assertEqual(fallback_headers["Content-Type"], "image/png")
+            self.assertEqual(fallback_body, content)
+
 
 class ToolRouterTests(unittest.TestCase):
+    def test_chart_tool_requires_active_job_before_hub_call(self) -> None:
+        calls: list[str] = []
+
+        def request_json(_method: str, url: str, _token: str, _payload: dict) -> dict:
+            calls.append(url)
+            return {}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            router = ToolRouter(
+                ledger_base_url="http://renovation-hub:8101",
+                ledger_token="l" * 32,
+                request_json=request_json,
+                store=ControllerStore(Path(temporary) / "controller.sqlite3"),
+            )
+            with self.assertRaises(ToolProxyError) as context:
+                router.call("ledger_generate_chart", {})
+        self.assertEqual(context.exception.code, "tool_context_unavailable")
+        self.assertEqual(calls, [])
+
+    def test_chart_tool_captures_trusted_png_and_hides_hub_reference_from_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ControllerStore(root / "controller.sqlite3")
+            store.create_job(fixture_job("chart-router-job"))
+            running = store.claim_next()
+            assert running is not None
+            content = b"\x89PNG\r\n\x1a\nrouter-chart"
+            observed_urls: list[str] = []
+
+            def request_json(_method: str, _url: str, _token: str, _payload: dict) -> dict:
+                return {
+                    "download_ref": "summary-" + "d" * 32 + ".png",
+                    "width": 1280,
+                    "height": 960,
+                    "size_bytes": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "summary": {"transaction_count": 5, "net_amount": "88.00"},
+                }
+
+            def request_artifact(_method: str, url: str, _token: str, _limit: int) -> tuple[dict, bytes]:
+                observed_urls.append(url)
+                return {"mime_type": "image/png", "size_bytes": len(content)}, content
+
+            router = ToolRouter(
+                ledger_base_url="http://renovation-hub:8101",
+                ledger_token="l" * 32,
+                request_json=request_json,
+                request_artifact=request_artifact,
+                store=store,
+            )
+            router.begin_job(running["job_id"], "chart-router-message", "owner")
+            result = router.call("ledger_generate_chart", {})
+            self.assertEqual(result["delivery"], "weixin_gateway_automatic")
+            self.assertNotIn("download_ref", json.dumps(result))
+            self.assertNotIn("fallback_path", json.dumps(result))
+            self.assertRegex(result["artifact"]["artifact_id"], r"^AR-[A-Z2-7]{26}$")
+            self.assertEqual(
+                observed_urls,
+                ["http://renovation-hub:8101/internal/v1/downloads/chart/summary-" + "d" * 32 + ".png"],
+            )
+
     def test_tool_metadata_is_complete_unique_and_member_allowlist_is_exact(self) -> None:
         self.assertEqual(len(ALL_TOOL_NAMES), 32)
         self.assertEqual(set(TOOL_BY_NAME), set(ALL_TOOL_NAMES))

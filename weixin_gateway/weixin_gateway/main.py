@@ -55,6 +55,7 @@ async def async_main() -> None:
         owner_pairing_enabled=os.environ.get("WEIXIN_OWNER_PAIRING_ENABLED", "false").lower() == "true",
         activation_confirmation=os.environ.get("WEIXIN_ACTIVATION_CONFIRMATION", ""),
         max_media_bytes=int(os.environ.get("WEIXIN_MAX_MEDIA_BYTES", str(20 * 1024 * 1024))),
+        controller_ingress_base_url=os.environ.get("WEIXIN_CONTROLLER_INGRESS_BASE_URL", ""),
         remote_work_enabled=os.environ.get("WEIXIN_REMOTE_WORK_ENABLED", "false").lower() == "true",
         remote_work_ttl_seconds=int(os.environ.get("WEIXIN_REMOTE_WORK_TTL_SECONDS", "1800")),
     )

@@ -10,6 +10,7 @@
 | `activation_confirmation` | 真实切换时必须精确填写 `HERMES_POLLER_STOPPED` |
 | `controller_base_url` | Codex Controller 固定内部服务根地址 |
 | `controller_api_token` | Gateway 提交和查询作业使用的独立 bearer |
+| `controller_ingress_base_url` | 仅用于图片失败链接的 Controller HTTPS Ingress 基址；作为私有 password option 填写，成功发图时不会使用或发送 |
 | `account_id`、`ilink_token` | 仅用于首次私有引导；推荐正式迁移使用加密身份包 |
 | `allowed_user_ids` | 仅用于首次引导和旧版本回退的唯一 owner 镜像；不要在这里添加 member |
 | `max_media_bytes` | 单个解密媒体上限 |
@@ -102,6 +103,11 @@
 - Controller 可通过同一 bearer 调用 `/internal/v1/attachments/<ref>/preview` 非消费读取正文，用于官方 Codex `localImage`；预览后原引用仍可由账本或媒体归档工具消费。
 - `/internal/v1/attachments/<ref>` 保持一次性消费语义。预览与消费都核验文件路径、大小和 SHA-256；引用已消费或过期后，两种接口都返回不可用。
 - 出站文本按最多 4000 字符分块，并使用确定性 client ID，重试不会生成新发送键。
+- Controller completed job 含 `artifacts[]` 时，Gateway 先用内部 bearer 预取图片，并再次核验 `image/png`、Content-Length、响应 SHA-256、DTO 大小/摘要和 PNG 正文；临时文件写入私有 outbound spool，权限 `0600`，发送或抑制后立即删除。
+- 预取完成后在同一“出站锁 -> 授权锁”临界区重新核对用户，再发送一条 `result_summary` 中文摘要，随后调用 iLink 原生图片上传/发送。文本、图片和失败链接分别使用持久确定性 client ID；成功图片不附下载链接。
+- 图片预取、上传或发送明确失败时，发送“图片发送失败”短期链接；最终 send 请求超时或传输结果未知时记录 `delivery_state_unknown`，不盲目重发图片，改发“状态暂无法确认”链接。链接只允许由私有 `controller_ingress_base_url` 与 Controller 固定 `/downloads/artifacts/<opaque-token>` 拼接。
+- `controller_ingress_base_url` 必须为无 userinfo/query/fragment 的 HTTPS 地址，生产发布前必须在 Add-on options 直接填写真实 Controller Ingress 基址，不得写入 Git、聊天或普通日志。为空时图片失败回退会保持未完成并返回 `artifact_fallback_unconfigured`。
+- suspended/revoked、owner 变化或权限画像不匹配时，摘要、图片和链接全部抑制；session expired 时停止所有出站，不把失败链接当作第二条绕过路径。
 - 任一微信发送或长轮询返回 iLink 会话过期时，Gateway 立即进入 `session_expired`，停止所有微信出站；不会先清除 `context_token` 再尝试第二次发送。Controller 已完成结果保持 `controller_submitted`，等待身份修复后恢复。
 
 ## MQTT 主动通知
@@ -158,3 +164,5 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 真实凭据导入、停止 Hermes、启动新 poller 和微信端到端测试均属于独立 L3 人工闸门。
 
 回退到 `0.2.0` 时，Remote Work additive 表会被旧版本忽略，普通 Controller/通知/多用户链路继续运行；必须先保持 `remote_work_enabled=false`，并确认没有仍可能被 Mac Agent 接收的未过期 request。回退不会删除 task/worktree，状态未知任务保持人工核对。
+
+从 `0.2.2` 回退图片 artifact 链路时，先回退 Controller 到不再产生 `artifacts[]` 的版本，再回退 Gateway 到 `0.2.1`；additive `outbound_artifacts` 表会被旧版本忽略。回退前核对没有待发图片或待发 fallback，保留 Gateway/Controller 私有数据，禁止用旧 Hermes 身份恢复。

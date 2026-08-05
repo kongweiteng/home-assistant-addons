@@ -17,6 +17,9 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from weixin_gateway.protocol import (
+    EP_GET_UPLOAD_URL,
+    EP_SEND_MESSAGE,
+    IlinkClient,
     ProtocolError,
     SESSION_EXPIRED_ERRCODE,
     aes128_ecb_decrypt,
@@ -26,7 +29,13 @@ from weixin_gateway.protocol import (
     parse_aes_key,
 )
 from weixin_gateway.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
-from weixin_gateway.service import ControllerClient, GatewayService, split_text, with_thread_short
+from weixin_gateway.service import (
+    ControllerClient,
+    GatewayService,
+    split_text,
+    validate_controller_ingress_base_url,
+    with_thread_short,
+)
 from weixin_gateway.store import (
     GatewayStore,
     IdentityStore,
@@ -105,11 +114,14 @@ class StubIlinkClient:
         self.media = media
         self.closed = False
         self.sent: list[dict] = []
+        self.sent_media: list[dict] = []
+        self.events: list[str] = []
 
     async def download_media(self, _spec: dict) -> bytes:
         return self.media
 
     async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+        self.events.append("text")
         self.sent.append(
             {
                 "to_user_id": to_user_id,
@@ -119,6 +131,24 @@ class StubIlinkClient:
             }
         )
         return {"ret": 0}
+
+    async def send_media(
+        self,
+        to_user_id: str,
+        path: Path,
+        context_token: str | None,
+        client_id: str,
+    ) -> str:
+        self.events.append("media")
+        self.sent_media.append(
+            {
+                "to_user_id": to_user_id,
+                "content": path.read_bytes(),
+                "context_token": context_token,
+                "client_id": client_id,
+            }
+        )
+        return client_id
 
     async def close(self) -> None:
         self.closed = True
@@ -162,7 +192,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.2.1"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.2.2"', api_source)
 
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
@@ -188,6 +218,63 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(assert_cdn_url(message["media"][0]["full_url"]), message["media"][0]["full_url"])
         with self.assertRaises(ProtocolError):
             assert_cdn_url("https://example.invalid/file")
+
+    def test_send_media_auto_starts_and_uses_the_supplied_deterministic_client_id(self) -> None:
+        class UploadResponse:
+            status = 200
+            headers = {"x-encrypted-param": "fixture-encrypted-param"}
+
+            async def __aenter__(self) -> "UploadResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def read(self) -> bytes:
+                return b""
+
+        class UploadSession:
+            closed = False
+
+            def post(self, _url: str, **_kwargs: object) -> UploadResponse:
+                return UploadResponse()
+
+        class MediaClient(IlinkClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    base_url="https://ilinkai.weixin.qq.com",
+                    cdn_base_url="https://novac2c.cdn.weixin.qq.com/c2c",
+                    token="fixture-token",
+                    max_media_bytes=1024 * 1024,
+                )
+                self.start_calls = 0
+                self.api_calls: list[tuple[str, dict]] = []
+
+            async def start(self) -> None:
+                self.start_calls += 1
+                self.session = UploadSession()  # type: ignore[assignment]
+
+            async def api_post(self, endpoint: str, payload: dict) -> dict:
+                self.api_calls.append((endpoint, payload))
+                if endpoint == EP_GET_UPLOAD_URL:
+                    return {
+                        "upload_full_url": "https://novac2c.cdn.weixin.qq.com/c2c/upload"
+                    }
+                if endpoint == EP_SEND_MESSAGE:
+                    return {"ret": 0}
+                raise AssertionError(endpoint)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "chart.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\nmedia")
+            client = MediaClient()
+            client_id = "codex-weixin-" + "a" * 32
+            result = asyncio.run(client.send_media("fixture-owner", path, "fixture-context", client_id))
+        self.assertEqual(result, client_id)
+        self.assertEqual(client.start_calls, 1)
+        sent_message = client.api_calls[-1][1]["msg"]
+        self.assertEqual(sent_message["client_id"], client_id)
+        self.assertEqual(sent_message["context_token"], "fixture-context")
 
     def test_dashboard_exposes_admin_pairing_without_unsafe_html_rendering(self) -> None:
         self.assertIn("api/owner-pairing/start", DASHBOARD_JS)
@@ -640,6 +727,27 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(message["state"], "failed")
         self.assertEqual(message["error_code"], "identity_replaced")
 
+    def test_outbound_artifact_state_and_client_ids_survive_restart(self) -> None:
+        artifact = {
+            "artifact_id": "AR-" + "A" * 26,
+            "mime_type": "image/png",
+            "size_bytes": 16,
+            "sha256": "sha256:" + "b" * 64,
+        }
+        first = self.store.prepare_artifact("fixture-job", artifact)
+        self.assertRegex(first["client_id"], r"^codex-weixin-[a-f0-9]{32}$")
+        self.store.mark_artifact("fixture-job", artifact["artifact_id"], success=False, error_code="delivery_state_unknown")
+        self.store.mark_artifact_fallback("fixture-job", artifact["artifact_id"], success=True)
+        reopened = GatewayStore(self.store.database_path, data_dir=self.root / "data")
+        recovered = reopened.prepare_artifact("fixture-job", artifact)
+        self.assertEqual(recovered["client_id"], first["client_id"])
+        self.assertEqual(recovered["state"], "failed")
+        self.assertEqual(recovered["error_code"], "delivery_state_unknown")
+        self.assertEqual(recovered["fallback_state"], "sent")
+        with self.assertRaises(StoreError) as conflict:
+            reopened.prepare_artifact("fixture-job", {**artifact, "size_bytes": 17})
+        self.assertEqual(conflict.exception.code, "artifact_idempotency_conflict")
+
 
 class ServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -668,6 +776,7 @@ class ServiceTests(unittest.TestCase):
         poller_enabled: bool = False,
         owner_pairing_enabled: bool = False,
         confirmation: str = "",
+        controller_ingress_base_url: str = "",
     ) -> GatewayService:
         service = GatewayService(
             identity_store=self.identity_store,
@@ -678,6 +787,7 @@ class ServiceTests(unittest.TestCase):
             owner_pairing_enabled=owner_pairing_enabled,
             activation_confirmation=confirmation,
             max_media_bytes=1024 * 1024,
+            controller_ingress_base_url=controller_ingress_base_url,
         )
         service.client = StubIlinkClient()  # type: ignore[assignment]
         return service
@@ -883,6 +993,331 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(service.client.sent[0]["context_token"], "fixture-context")  # type: ignore[union-attr]
         self.assertEqual(self.identity_store.context(service.identity, "fixture-owner"), "fixture-context")
 
+    def test_completed_artifact_sends_summary_then_native_image_without_link_and_replays_once(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nwechat-chart"
+
+        class ArtifactController(StubController):
+            configured = True
+
+            async def artifact(self, _job_id: str, _artifact: dict, *, max_bytes: int) -> bytes:
+                self.assert_limit = max_bytes
+                return content
+
+        service = self.service(controller_ingress_base_url="https://ha.example/api/hassio_ingress/controller")
+        service.controller = ArtifactController()  # type: ignore[assignment]
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        message = {
+            "controller_job_id": "11111111-1111-1111-1111-111111111111",
+            "sender_id": "fixture-owner",
+            "user_hash": owner["user_hash"],
+            "capability_profile": "owner",
+            "thread_short": "TH-ABCDEFGHIJ",
+        }
+        artifact = {
+            "artifact_id": "AR-" + "B" * 26,
+            "type": "image",
+            "mime_type": "image/png",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "width": 1280,
+            "height": 960,
+            "fallback_path": "/downloads/artifacts/" + "a" * 43,
+        }
+        job = {
+            "state": "completed",
+            "result": "模型完成文本",
+            "result_summary": "已生成装修账单统计图：共 5 笔记录，净支出 ¥88.00。",
+            "artifacts": [artifact],
+        }
+
+        async def exercise() -> None:
+            self.assertIsNone(await service._send_completed_job(message, job))
+            self.assertIsNone(await service._send_completed_job(message, job))
+
+        self.run_async(exercise())
+        client = service.client
+        assert isinstance(client, StubIlinkClient)
+        self.assertEqual(client.events, ["text", "media"])
+        self.assertEqual(client.sent_media[0]["content"], content)
+        self.assertRegex(client.sent_media[0]["client_id"], r"^codex-weixin-[a-f0-9]{32}$")
+        self.assertNotIn("http", client.sent[0]["text"])
+        self.assertIn("共 5 笔记录", client.sent[0]["text"])
+        state = self.store.prepare_artifact(message["controller_job_id"], artifact)
+        self.assertEqual(state["state"], "sent")
+        self.assertEqual(state["fallback_state"], "pending")
+
+    def test_known_and_unknown_media_failures_send_one_fallback_link(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nfailed-chart"
+
+        class ArtifactController(StubController):
+            configured = True
+
+            async def artifact(self, _job_id: str, _artifact: dict, *, max_bytes: int) -> bytes:
+                return content
+
+        for unknown in (False, True):
+            with self.subTest(unknown=unknown):
+                temporary = tempfile.TemporaryDirectory()
+                try:
+                    root = Path(temporary.name)
+                    identity_store = IdentityStore(root / "data")
+                    identity_store.save_identity(fixture_identity())
+                    store = GatewayStore(root / "data" / "gateway.sqlite3", data_dir=root / "data")
+                    service = GatewayService(
+                        identity_store=identity_store,
+                        store=store,
+                        controller=ArtifactController(),  # type: ignore[arg-type]
+                        bootstrap_identity={},
+                        poller_enabled=False,
+                        owner_pairing_enabled=False,
+                        activation_confirmation="",
+                        max_media_bytes=1024 * 1024,
+                        controller_ingress_base_url="https://ha.example/api/hassio_ingress/controller",
+                    )
+
+                    class FailedMediaClient(StubIlinkClient):
+                        async def send_media(
+                            self,
+                            to_user_id: str,
+                            path: Path,
+                            context_token: str | None,
+                            client_id: str,
+                        ) -> str:
+                            self.events.append("media")
+                            raise ProtocolError(
+                                "media_upload_failed",
+                                "fixture",
+                                delivery_unknown=unknown,
+                            )
+
+                    service.client = FailedMediaClient()  # type: ignore[assignment]
+                    owner = store.user_by_private_id("fixture-owner")
+                    assert owner is not None
+                    job_id = "22222222-2222-2222-2222-" + ("2" * 12 if not unknown else "3" * 12)
+                    artifact = {
+                        "artifact_id": "AR-" + ("C" if not unknown else "D") * 26,
+                        "type": "image",
+                        "mime_type": "image/png",
+                        "size_bytes": len(content),
+                        "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+                        "width": 1280,
+                        "height": 960,
+                        "fallback_path": "/downloads/artifacts/" + ("b" if not unknown else "c") * 43,
+                    }
+                    message = {
+                        "controller_job_id": job_id,
+                        "sender_id": "fixture-owner",
+                        "user_hash": owner["user_hash"],
+                        "capability_profile": "owner",
+                    }
+                    job = {
+                        "state": "completed",
+                        "result_summary": "已生成装修账单统计图：共 1 笔记录，净支出 ¥10.00。",
+                        "artifacts": [artifact],
+                    }
+
+                    async def exercise() -> None:
+                        self.assertIsNone(await service._send_completed_job(message, job))
+                        self.assertIsNone(await service._send_completed_job(message, job))
+
+                    self.run_async(exercise())
+                    client = service.client
+                    assert isinstance(client, FailedMediaClient)
+                    self.assertEqual(client.events, ["text", "media", "text"])
+                    self.assertIn("https://ha.example/api/hassio_ingress/controller/downloads/artifacts/", client.sent[-1]["text"])
+                    self.assertIn("状态暂无法确认" if unknown else "发送失败", client.sent[-1]["text"])
+                    state = store.prepare_artifact(job_id, artifact)
+                    self.assertEqual(state["state"], "failed")
+                    self.assertEqual(
+                        state["error_code"],
+                        "delivery_state_unknown" if unknown else "media_upload_failed",
+                    )
+                    self.assertEqual(state["fallback_state"], "sent")
+                finally:
+                    temporary.cleanup()
+
+    def test_media_failure_without_fallback_configuration_fails_closed_without_repeating_media(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nno-fallback"
+
+        class ArtifactController(StubController):
+            configured = True
+
+            async def artifact(self, _job_id: str, _artifact: dict, *, max_bytes: int) -> bytes:
+                return content
+
+        class FailedMediaClient(StubIlinkClient):
+            async def send_media(
+                self,
+                to_user_id: str,
+                path: Path,
+                context_token: str | None,
+                client_id: str,
+            ) -> str:
+                self.events.append("media")
+                raise ProtocolError("media_upload_failed", "fixture")
+
+        service = self.service()
+        service.controller = ArtifactController()  # type: ignore[assignment]
+        service.client = FailedMediaClient()  # type: ignore[assignment]
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        job_id = "55555555-5555-5555-5555-555555555555"
+        artifact = {
+            "artifact_id": "AR-" + "G" * 26,
+            "type": "image",
+            "mime_type": "image/png",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "width": 1280,
+            "height": 960,
+            "fallback_path": "/downloads/artifacts/" + "e" * 43,
+        }
+        message = {
+            "controller_job_id": job_id,
+            "sender_id": "fixture-owner",
+            "user_hash": owner["user_hash"],
+            "capability_profile": "owner",
+        }
+        job = {
+            "state": "completed",
+            "result_summary": "已生成装修账单统计图：共 1 笔记录，净支出 ¥10.00。",
+            "artifacts": [artifact],
+        }
+
+        async def exercise() -> None:
+            self.assertEqual(
+                await service._send_completed_job(message, job),
+                "artifact_fallback_unconfigured",
+            )
+            self.assertEqual(
+                await service._send_completed_job(message, job),
+                "artifact_fallback_unconfigured",
+            )
+
+        self.run_async(exercise())
+        client = service.client
+        assert isinstance(client, FailedMediaClient)
+        self.assertEqual(client.events, ["text", "media"])
+        state = self.store.prepare_artifact(job_id, artifact)
+        self.assertEqual(state["state"], "failed")
+        self.assertEqual(state["fallback_state"], "failed")
+        self.assertEqual(state["fallback_error_code"], "artifact_fallback_unconfigured")
+
+    def test_media_session_expiry_stops_before_fallback_and_keeps_delivery_pending(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nsession-expired"
+
+        class ArtifactController(StubController):
+            configured = True
+
+            async def artifact(self, _job_id: str, _artifact: dict, *, max_bytes: int) -> bytes:
+                return content
+
+        class ExpiredMediaClient(StubIlinkClient):
+            async def send_media(
+                self,
+                to_user_id: str,
+                path: Path,
+                context_token: str | None,
+                client_id: str,
+            ) -> str:
+                self.events.append("media")
+                raise ProtocolError("session_expired", "fixture")
+
+        service = self.service(
+            controller_ingress_base_url="https://ha.example/api/hassio_ingress/controller"
+        )
+        service.controller = ArtifactController()  # type: ignore[assignment]
+        service.client = ExpiredMediaClient()  # type: ignore[assignment]
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        job_id = "66666666-6666-6666-6666-666666666666"
+        artifact = {
+            "artifact_id": "AR-" + "H" * 26,
+            "type": "image",
+            "mime_type": "image/png",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "width": 1280,
+            "height": 960,
+            "fallback_path": "/downloads/artifacts/" + "f" * 43,
+        }
+        message = {
+            "controller_job_id": job_id,
+            "sender_id": "fixture-owner",
+            "user_hash": owner["user_hash"],
+            "capability_profile": "owner",
+        }
+        job = {
+            "state": "completed",
+            "result_summary": "已生成装修账单统计图：共 1 笔记录，净支出 ¥10.00。",
+            "artifacts": [artifact],
+        }
+        with self.assertRaises(StoreError) as context:
+            self.run_async(service._send_completed_job(message, job))
+        self.assertEqual(context.exception.code, "session_expired")
+        self.assertEqual(service.poller_state, "session_expired")
+        client = service.client
+        assert isinstance(client, ExpiredMediaClient)
+        self.assertEqual(client.events, ["text", "media"])
+        state = self.store.prepare_artifact(job_id, artifact)
+        self.assertEqual(state["state"], "pending")
+        self.assertEqual(state["fallback_state"], "pending")
+
+    def test_artifact_reply_is_suppressed_if_original_user_is_no_longer_authorized(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nsuppressed-chart"
+
+        class ArtifactController(StubController):
+            configured = True
+
+            async def artifact(self, _job_id: str, _artifact: dict, *, max_bytes: int) -> bytes:
+                return content
+
+        service = self.service(controller_ingress_base_url="https://ha.example/controller")
+        service.controller = ArtifactController()  # type: ignore[assignment]
+        artifact = {
+            "artifact_id": "AR-" + "E" * 26,
+            "type": "image",
+            "mime_type": "image/png",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "width": 1280,
+            "height": 960,
+            "fallback_path": "/downloads/artifacts/" + "d" * 43,
+        }
+        result = self.run_async(
+            service._send_completed_job(
+                {
+                    "controller_job_id": "33333333-3333-3333-3333-333333333333",
+                    "sender_id": "fixture-owner",
+                    "user_hash": "0" * 64,
+                    "capability_profile": "owner",
+                },
+                {
+                    "state": "completed",
+                    "result_summary": "已生成装修账单统计图：共 1 笔记录，净支出 ¥10.00。",
+                    "artifacts": [artifact],
+                },
+            )
+        )
+        self.assertEqual(result, "reply_suppressed_user_inactive")
+        client = service.client
+        assert isinstance(client, StubIlinkClient)
+        self.assertEqual(client.events, [])
+
+    def test_controller_ingress_base_url_requires_https_without_query_or_credentials(self) -> None:
+        self.assertEqual(
+            validate_controller_ingress_base_url("https://ha.example/api/hassio_ingress/token/"),
+            "https://ha.example/api/hassio_ingress/token",
+        )
+        for value in (
+            "http://ha.example/api/hassio_ingress/token",
+            "https://user:pass@ha.example/path",
+            "https://ha.example/path?token=secret",
+        ):
+            with self.subTest(value=value), self.assertRaises(StoreError):
+                validate_controller_ingress_base_url(value)
+
     def test_controller_client_submits_and_recovers_job_asynchronously(self) -> None:
         session = StubHttpSession()
         token = "c" * 32
@@ -897,6 +1332,90 @@ class ServiceTests(unittest.TestCase):
         self.run_async(exercise())
         self.assertEqual([call["method"] for call in session.calls], ["POST", "GET"])
         self.assertTrue(all(call["headers"]["Authorization"] == f"Bearer {token}" for call in session.calls))
+
+    def test_controller_client_downloads_artifact_in_bounded_chunks_and_rejects_extra_bytes(self) -> None:
+        content = b"\x89PNG\r\n\x1a\n" + b"x" * (150 * 1024)
+        artifact = {
+            "artifact_id": "AR-" + "F" * 26,
+            "type": "image",
+            "mime_type": "image/png",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+        }
+
+        class ChunkedContent:
+            def __init__(self, body: bytes):
+                self.body = body
+                self.offset = 0
+                self.read_limits: list[int] = []
+
+            async def read(self, limit: int) -> bytes:
+                self.read_limits.append(limit)
+                if self.offset >= len(self.body):
+                    return b""
+                size = min(limit, 8192, len(self.body) - self.offset)
+                chunk = self.body[self.offset : self.offset + size]
+                self.offset += size
+                return chunk
+
+        class ArtifactResponse:
+            status = 200
+            content_type = "image/png"
+
+            def __init__(self, body: bytes):
+                self.headers = {
+                    "Content-Length": str(len(content)),
+                    "X-Content-SHA256": artifact["sha256"],
+                }
+                self.content = ChunkedContent(body)
+
+            async def __aenter__(self) -> "ArtifactResponse":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+        class ArtifactSession:
+            closed = False
+
+            def __init__(self, body: bytes):
+                self.response = ArtifactResponse(body)
+
+            def get(self, _url: str, **_kwargs: object) -> ArtifactResponse:
+                return self.response
+
+        session = ArtifactSession(content)
+        client = ControllerClient(
+            "http://codex-controller:8102",
+            "c" * 32,
+            session=session,  # type: ignore[arg-type]
+        )
+        loaded = self.run_async(
+            client.artifact(
+                "44444444-4444-4444-4444-444444444444",
+                artifact,
+                max_bytes=200 * 1024,
+            )
+        )
+        self.assertEqual(loaded, content)
+        self.assertGreater(len(session.response.content.read_limits), 2)
+        self.assertLessEqual(max(session.response.content.read_limits), 64 * 1024)
+
+        overflow = ArtifactSession(content + b"unexpected")
+        overflow_client = ControllerClient(
+            "http://codex-controller:8102",
+            "c" * 32,
+            session=overflow,  # type: ignore[arg-type]
+        )
+        with self.assertRaises(StoreError) as context:
+            self.run_async(
+                overflow_client.artifact(
+                    "44444444-4444-4444-4444-444444444444",
+                    artifact,
+                    max_bytes=200 * 1024,
+                )
+            )
+        self.assertEqual(context.exception.code, "artifact_invalid")
 
     def test_member_invitation_claim_keeps_owner_mirror_and_creates_read_only_message(self) -> None:
         service = self.service()

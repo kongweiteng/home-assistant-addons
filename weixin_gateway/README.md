@@ -12,6 +12,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.1.4` 内置可选的 MQTT v1 主动通知适配器，直接使用唯一 owner 的当前 iLink 上下文发送固定文本，完全绕过 Codex、模型和 Controller。
 - `0.2.0` 在保持一套 iLink 身份和一个 Poller 的前提下增加唯一 owner、多 member、一次性成员邀请码、独立会话/Thread 短标识和管理员 Ingress 用户控制面。
 - `0.2.1` 新增默认关闭的 `/work` Remote Work v1：只有精确 active owner 命令进入专用 MQTT，普通聊天仍进入 Controller，member、近似前缀、附件和 `/work deploy` 均失败关闭。
+- `0.2.2` 支持 Controller completed job 的安全图片 artifact：先预取并复核 MIME、大小和 SHA-256，再发送一条中文统计摘要和微信原生图片；成功时不发送链接，图片明确失败或状态未知时才发送 HA Ingress 短期下载链接。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。
 - 当前新 Gateway 是唯一真实 poller；旧 Hermes iLink 身份已失效，不能作为微信回滚目标。
 
@@ -29,6 +30,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - 主动通知默认关闭，只允许 `owner` audience；通知正文只存在于 MQTT payload 和进程内存，不写 SQLite、身份文件或日志。
 - Remote Work 默认关闭并使用独立 MQTT 账户；请求只包含项目别名、最小任务说明和脱敏 owner hash，不接受 path、Shell、model、sandbox、Git ref、remote 或 reply topic。
 - Remote Work SQLite 只保存 task、outbox、状态序号和结果摘要；不保存源码、完整 diff、Codex JSONL、reasoning、系统提示、秘密或完整日志。
+- 出站 artifact 使用 additive SQLite 状态和确定性 iLink client ID；重启、重放或发送结果落库前崩溃都复用同一发送键。状态未知不盲目生成新 key 重发图片，只发送一次独立确定性 fallback 链接。
 
 ## 主动通知
 

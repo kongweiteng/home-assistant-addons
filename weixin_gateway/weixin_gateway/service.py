@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
+import re
 import threading
 import time
 from typing import Any
@@ -54,6 +55,26 @@ def validate_controller_url(value: str) -> str:
     return f"http://{host}{port}"
 
 
+def validate_controller_ingress_base_url(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) > 2048:
+        raise StoreError("controller_ingress_url_invalid", "Controller Ingress 地址过长")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise StoreError("controller_ingress_url_invalid", "Controller Ingress 必须是固定 HTTPS 地址")
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path.rstrip("/")
+    return f"https://{parsed.hostname.lower()}{port}{path}"
+
+
 class ControllerClient:
     def __init__(self, base_url: str, token: str, *, session: aiohttp.ClientSession | None = None):
         self.base_url = validate_controller_url(base_url)
@@ -81,6 +102,68 @@ class ControllerClient:
 
     async def job(self, job_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/internal/v1/jobs/{job_id}", None)
+
+    async def artifact(self, job_id: str, artifact: dict[str, Any], *, max_bytes: int) -> bytes:
+        artifact_id = artifact.get("artifact_id")
+        expected_size = artifact.get("size_bytes")
+        expected_digest = artifact.get("sha256")
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", job_id):
+            raise StoreError("artifact_invalid", "Controller artifact job_id 无效", status=502)
+        if not isinstance(artifact_id, str) or not re.fullmatch(r"AR-[A-Z2-7]{26}", artifact_id):
+            raise StoreError("artifact_invalid", "Controller artifact_id 无效", status=502)
+        if artifact.get("type") != "image" or artifact.get("mime_type") != "image/png":
+            raise StoreError("artifact_invalid", "Controller artifact 类型无效", status=502)
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or not 1 <= expected_size <= max_bytes
+            or not isinstance(expected_digest, str)
+            or not re.fullmatch(r"sha256:[a-f0-9]{64}", expected_digest)
+        ):
+            raise StoreError("artifact_invalid", "Controller artifact 元数据无效", status=502)
+        if not self.configured:
+            raise StoreError("controller_unavailable", "Codex Controller 未配置", status=503)
+        if self.session is None:
+            await self.start()
+        assert self.session is not None
+        try:
+            async with self.session.get(
+                f"{self.base_url}/internal/v1/jobs/{job_id}/artifacts/{artifact_id}",
+                headers={"Authorization": f"Bearer {self.token}", "Accept": "image/png"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status < 200 or response.status >= 300:
+                    await response.content.read(64 * 1024)
+                    raise StoreError("artifact_unavailable", "Controller artifact 暂不可用", status=response.status)
+                length_header = response.headers.get("Content-Length")
+                digest_header = response.headers.get("X-Content-SHA256")
+                if response.content_type != "image/png" or not length_header:
+                    raise StoreError("artifact_invalid", "Controller artifact 响应头无效", status=502)
+                try:
+                    declared_size = int(length_header)
+                except ValueError as exc:
+                    raise StoreError("artifact_invalid", "Controller artifact 长度无效", status=502) from exc
+                if declared_size != expected_size or digest_header != expected_digest:
+                    raise StoreError("artifact_invalid", "Controller artifact 响应元数据不一致", status=502)
+                content_buffer = bytearray()
+                while len(content_buffer) <= expected_size:
+                    remaining = expected_size + 1 - len(content_buffer)
+                    chunk = await response.content.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    content_buffer.extend(chunk)
+                    if len(content_buffer) > expected_size or len(content_buffer) > max_bytes:
+                        raise StoreError("artifact_invalid", "Controller artifact 实际大小超限", status=502)
+                content = bytes(content_buffer)
+        except StoreError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise StoreError("artifact_unavailable", "Controller artifact 下载失败", status=503) from exc
+        if len(content) != expected_size or len(content) > max_bytes:
+            raise StoreError("artifact_invalid", "Controller artifact 实际大小不一致", status=502)
+        if hashlib.sha256(content).hexdigest() != expected_digest.removeprefix("sha256:"):
+            raise StoreError("artifact_invalid", "Controller artifact 摘要不一致", status=502)
+        return content
 
     async def supports_capability(self, capability: str) -> bool:
         if self._capabilities is not None and time.monotonic() - self._capabilities_checked_at < 60:
@@ -150,6 +233,7 @@ class GatewayService:
         owner_pairing_enabled: bool,
         activation_confirmation: str,
         max_media_bytes: int,
+        controller_ingress_base_url: str = "",
         remote_work_enabled: bool = False,
         remote_work_ttl_seconds: int = 1800,
     ):
@@ -166,6 +250,9 @@ class GatewayService:
         self.owner_pairing_enabled = owner_pairing_enabled
         self.activation_confirmation = activation_confirmation
         self.max_media_bytes = max_media_bytes
+        self.controller_ingress_base_url = validate_controller_ingress_base_url(
+            controller_ingress_base_url
+        )
         self.remote_work_enabled = remote_work_enabled
         self.remote_work_ttl_seconds = remote_work_ttl_seconds
         self.remote_work_runtime: GatewayRemoteWorkRuntime | None = None
@@ -596,9 +683,7 @@ class GatewayService:
                             )
                             outbound = dict(message)
                             outbound["thread_short"] = job.get("thread_short")
-                            suppression = await self._send_result(
-                                outbound, str(job.get("result") or "任务已完成。")
-                            )
+                            suppression = await self._send_completed_job(outbound, job)
                             if suppression:
                                 self.store.mark_finished(
                                     message["message_id"],
@@ -679,49 +764,241 @@ class GatewayService:
         direct["controller_job_id"] = f"gateway-{error_code}-{message['message_id']}"
         return await self._send_result(direct, text)
 
+    async def _send_completed_job(self, message: dict[str, Any], job: dict[str, Any]) -> str | None:
+        artifacts = job.get("artifacts")
+        if artifacts is None or artifacts == []:
+            return await self._send_result(message, str(job.get("result") or "任务已完成。"))
+        if not isinstance(artifacts, list) or not 1 <= len(artifacts) <= 4:
+            raise StoreError("artifact_invalid", "Controller artifacts 响应无效", status=502)
+        summary = job.get("result_summary")
+        if (
+            not isinstance(summary, str)
+            or not 1 <= len(summary) <= 500
+            or "\n" in summary
+            or "\r" in summary
+        ):
+            raise StoreError("artifact_summary_invalid", "Controller 统计摘要无效", status=502)
+        prepared: list[dict[str, Any]] = []
+        temporary_paths: list[Path] = []
+        try:
+            for artifact in artifacts:
+                if not isinstance(artifact, dict):
+                    raise StoreError("artifact_invalid", "Controller artifact 条目无效", status=502)
+                state = self.store.prepare_artifact(message["controller_job_id"], artifact)
+                item = {"artifact": artifact, "state": state, "path": None}
+                if state["state"] == "pending":
+                    try:
+                        content = await self.controller.artifact(
+                            message["controller_job_id"],
+                            artifact,
+                            max_bytes=self.max_media_bytes,
+                        )
+                        item["path"] = self.store.stage_outbound_artifact(artifact, content)
+                        temporary_paths.append(item["path"])
+                    except StoreError as exc:
+                        self.store.mark_artifact(
+                            message["controller_job_id"],
+                            artifact["artifact_id"],
+                            success=False,
+                            error_code=exc.code,
+                        )
+                        item["state"] = self.store.prepare_artifact(
+                            message["controller_job_id"], artifact
+                        )
+                prepared.append(item)
+            return await self._send_artifact_result_locked(message, summary, prepared)
+        finally:
+            for path in temporary_paths:
+                if path.is_file() and not path.is_symlink():
+                    path.unlink()
+
+    async def _send_artifact_result_locked(
+        self,
+        message: dict[str, Any],
+        summary: str,
+        prepared: list[dict[str, Any]],
+    ) -> str | None:
+        if self.poller_state == "session_expired":
+            raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+        if self.identity is None or self.client is None:
+            raise StoreError("credential_missing", "无法回传微信消息", status=503)
+        async with self._outbound_lock:
+            async with self._authorization_lock:
+                suppression = self._authorization_suppression(message)
+                if suppression:
+                    return suppression
+                await self._send_text_locked(message, summary)
+                for item in prepared:
+                    artifact = item["artifact"]
+                    state = item["state"]
+                    if state["state"] == "sent":
+                        continue
+                    if state["state"] == "pending":
+                        path = item.get("path")
+                        if not isinstance(path, Path):
+                            self.store.mark_artifact(
+                                message["controller_job_id"],
+                                artifact["artifact_id"],
+                                success=False,
+                                error_code="artifact_prefetch_missing",
+                            )
+                            state = self.store.prepare_artifact(message["controller_job_id"], artifact)
+                        else:
+                            context = self.identity_store.context(self.identity, message["sender_id"])
+                            try:
+                                await self.client.send_media(
+                                    message["sender_id"],
+                                    path,
+                                    context,
+                                    state["client_id"],
+                                )
+                            except ProtocolError as exc:
+                                if exc.code == "session_expired":
+                                    self.poller_state = "session_expired"
+                                    self.last_error = "session_expired"
+                                    raise StoreError(
+                                        "session_expired",
+                                        "iLink 会话已过期，停止微信出站",
+                                        status=503,
+                                    ) from exc
+                                error_code = "delivery_state_unknown" if exc.delivery_unknown else exc.code
+                                self.store.mark_artifact(
+                                    message["controller_job_id"],
+                                    artifact["artifact_id"],
+                                    success=False,
+                                    error_code=error_code,
+                                )
+                                state = self.store.prepare_artifact(
+                                    message["controller_job_id"], artifact
+                                )
+                            else:
+                                self.store.mark_artifact(
+                                    message["controller_job_id"],
+                                    artifact["artifact_id"],
+                                    success=True,
+                                )
+                                continue
+                    fallback_error = await self._send_artifact_fallback_locked(
+                        message,
+                        artifact,
+                        state,
+                    )
+                    if fallback_error:
+                        return fallback_error
+        return None
+
+    async def _send_artifact_fallback_locked(
+        self,
+        message: dict[str, Any],
+        artifact: dict[str, Any],
+        state: dict[str, Any],
+    ) -> str | None:
+        if state["fallback_state"] == "sent":
+            return None
+        try:
+            fallback_url = self._artifact_fallback_url(artifact)
+        except StoreError as exc:
+            self.store.mark_artifact_fallback(
+                message["controller_job_id"],
+                artifact["artifact_id"],
+                success=False,
+                error_code=exc.code,
+            )
+            return exc.code
+        prefix = (
+            "图片发送状态暂无法确认，可在 24 小时内下载："
+            if state.get("error_code") == "delivery_state_unknown"
+            else "图片发送失败，可在 24 小时内下载："
+        )
+        context = self.identity_store.context(self.identity, message["sender_id"])
+        response = await self.client.send_text(
+            message["sender_id"],
+            f"{prefix}{fallback_url}",
+            context,
+            state["fallback_client_id"],
+        )
+        ret = response.get("ret", 0)
+        errcode = response.get("errcode", 0)
+        if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
+            self.poller_state = "session_expired"
+            self.last_error = "session_expired"
+            raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+        if ret not in {0, None} or errcode not in {0, None}:
+            code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
+            self.store.mark_artifact_fallback(
+                message["controller_job_id"],
+                artifact["artifact_id"],
+                success=False,
+                error_code=code,
+            )
+            raise ProtocolError(code, "微信下载链接发送失败", retryable=code == "send_rate_limited")
+        self.store.mark_artifact_fallback(
+            message["controller_job_id"],
+            artifact["artifact_id"],
+            success=True,
+        )
+        return None
+
+    def _artifact_fallback_url(self, artifact: dict[str, Any]) -> str:
+        path = artifact.get("fallback_path")
+        if not self.controller_ingress_base_url:
+            raise StoreError("artifact_fallback_unconfigured", "Controller Ingress 下载地址未配置", status=503)
+        if not isinstance(path, str) or not re.fullmatch(r"/downloads/artifacts/[A-Za-z0-9_-]{43}", path):
+            raise StoreError("artifact_fallback_invalid", "Controller artifact 下载路径无效", status=502)
+        return f"{self.controller_ingress_base_url}{path}"
+
     async def _send_result(self, message: dict[str, Any], text: str) -> str | None:
         if self.poller_state == "session_expired":
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         if self.identity is None or self.client is None:
             raise StoreError("credential_missing", "无法回传微信消息", status=503)
-        text = with_thread_short(text, message.get("thread_short"))
-        chunks = split_text(text, 4000)
         async with self._outbound_lock:
             async with self._authorization_lock:
-                authorization = self.store.authorize_stored_message(
-                    message.get("user_hash"),
-                    str(message.get("capability_profile") or "owner_legacy"),
-                )
-                if not authorization["allowed"]:
-                    return (
-                        "reply_suppressed_user_inactive"
-                        if authorization["error_code"] == "message_user_inactive"
-                        else "reply_suppressed_authorization_invalid"
-                    )
-                if message.get("required_role") == "owner" and authorization.get("capability_profile") != "owner":
-                    return "reply_suppressed_owner_changed"
-                for index, chunk in enumerate(chunks):
-                    if self.poller_state == "session_expired":
-                        raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-                    client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
-                    if already_sent:
-                        continue
-                    context = self.identity_store.context(self.identity, message["sender_id"])
-                    response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
-                    ret = response.get("ret", 0)
-                    errcode = response.get("errcode", 0)
-                    if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
-                        self.poller_state = "session_expired"
-                        self.last_error = "session_expired"
-                        raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-                    if ret not in {0, None} or errcode not in {0, None}:
-                        code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
-                        self.store.mark_chunk(message["controller_job_id"], index, success=False, error_code=code)
-                        raise ProtocolError(code, "微信发送失败", retryable=code == "send_rate_limited")
-                    self.store.mark_chunk(message["controller_job_id"], index, success=True)
-                    if index + 1 < len(chunks):
-                        await asyncio.sleep(0.5)
+                suppression = self._authorization_suppression(message)
+                if suppression:
+                    return suppression
+                await self._send_text_locked(message, text)
         return None
+
+    def _authorization_suppression(self, message: dict[str, Any]) -> str | None:
+        authorization = self.store.authorize_stored_message(
+            message.get("user_hash"),
+            str(message.get("capability_profile") or "owner_legacy"),
+        )
+        if not authorization["allowed"]:
+            return (
+                "reply_suppressed_user_inactive"
+                if authorization["error_code"] == "message_user_inactive"
+                else "reply_suppressed_authorization_invalid"
+            )
+        if message.get("required_role") == "owner" and authorization.get("capability_profile") != "owner":
+            return "reply_suppressed_owner_changed"
+        return None
+
+    async def _send_text_locked(self, message: dict[str, Any], text: str) -> None:
+        text = with_thread_short(text, message.get("thread_short"))
+        chunks = split_text(text, 4000)
+        for index, chunk in enumerate(chunks):
+            if self.poller_state == "session_expired":
+                raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+            client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
+            if already_sent:
+                continue
+            context = self.identity_store.context(self.identity, message["sender_id"])
+            response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
+            ret = response.get("ret", 0)
+            errcode = response.get("errcode", 0)
+            if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
+                self.poller_state = "session_expired"
+                self.last_error = "session_expired"
+                raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+            if ret not in {0, None} or errcode not in {0, None}:
+                code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
+                self.store.mark_chunk(message["controller_job_id"], index, success=False, error_code=code)
+                raise ProtocolError(code, "微信发送失败", retryable=code == "send_rate_limited")
+            self.store.mark_chunk(message["controller_job_id"], index, success=True)
+            if index + 1 < len(chunks):
+                await asyncio.sleep(0.5)
 
     async def send_notification(self, message_id: str, text: str) -> None:
         """Send one deterministic notification to the single bound owner."""
@@ -764,6 +1041,7 @@ class GatewayService:
         while not self._stop.is_set():
             try:
                 self.store.cleanup_spool()
+                self.store.cleanup_outbound_artifacts()
                 self.store.expire_remote_work_tasks()
                 await asyncio.sleep(300)
             except asyncio.CancelledError:
@@ -961,7 +1239,7 @@ class GatewayService:
         users = self.users()
         active_users = sum(1 for user in users["users"] if user["status"] == "active")
         return {
-            "version": "0.2.1",
+            "version": "0.2.2",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,

@@ -8,11 +8,11 @@ import hashlib
 import json
 import mimetypes
 from pathlib import Path
+import re
 import secrets
 import struct
 from typing import Any
 from urllib.parse import quote, urlsplit
-import uuid
 
 import aiohttp
 from cryptography.hazmat.backends import default_backend
@@ -59,10 +59,18 @@ WEIXIN_CDN_ALLOWLIST = {
 
 
 class ProtocolError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        delivery_unknown: bool = False,
+    ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        self.delivery_unknown = delivery_unknown
 
 
 def canonical_json(value: Any) -> str:
@@ -372,7 +380,17 @@ class IlinkClient:
             raise ProtocolError("media_too_large", "解密媒体超过大小上限")
         return raw
 
-    async def send_media(self, to_user_id: str, path: Path, context_token: str | None) -> str:
+    async def send_media(
+        self,
+        to_user_id: str,
+        path: Path,
+        context_token: str | None,
+        client_id: str,
+    ) -> str:
+        if not isinstance(client_id, str) or not re.fullmatch(r"codex-weixin-[a-f0-9]{32}", client_id):
+            raise ProtocolError("client_id_invalid", "媒体 client_id 无效")
+        if self.session is None:
+            await self.start()
         plaintext = path.read_bytes()
         if not plaintext or len(plaintext) > self.max_media_bytes:
             raise ProtocolError("media_too_large", "出站媒体大小无效")
@@ -417,7 +435,6 @@ class IlinkClient:
             item = {"type": ITEM_VIDEO, "video_item": {"media": media, "video_size": len(ciphertext), "video_md5": hashlib.md5(plaintext).hexdigest(), "play_length": 0}}
         else:
             item = {"type": ITEM_FILE, "file_item": {"media": media, "file_name": path.name[:255], "len": str(len(plaintext))}}
-        client_id = f"codex-weixin-{uuid.uuid4().hex}"
         message: dict[str, Any] = {
             "from_user_id": "",
             "to_user_id": to_user_id,
@@ -428,7 +445,17 @@ class IlinkClient:
         }
         if context_token:
             message["context_token"] = context_token
-        result = await self.api_post(EP_SEND_MESSAGE, {"msg": message})
+        try:
+            result = await self.api_post(EP_SEND_MESSAGE, {"msg": message})
+        except ProtocolError as exc:
+            raise ProtocolError(
+                exc.code,
+                str(exc),
+                retryable=exc.retryable,
+                delivery_unknown=True,
+            ) from exc
+        if result.get("ret") == SESSION_EXPIRED_ERRCODE or result.get("errcode") == SESSION_EXPIRED_ERRCODE:
+            raise ProtocolError("session_expired", "iLink 会话已过期")
         if result.get("ret") not in {0, None} or result.get("errcode") not in {0, None}:
             raise ProtocolError("media_send_failed", "iLink 媒体发送失败")
         return client_id

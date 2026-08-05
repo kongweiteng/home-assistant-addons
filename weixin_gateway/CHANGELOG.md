@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.2.2
+
+- completed job 支持安全 `result_summary + artifacts[]`：Gateway 先通过 Controller bearer 预取并复核 PNG MIME、长度、大小和 SHA-256，再发送中文摘要和微信原生图片。
+- `IlinkClient.send_media()` 接受调用方提供的确定性 client ID；新增 additive `outbound_artifacts` 状态，重启和重放复用同一媒体发送键，状态未知不盲目重发图片。
+- 图片成功时不发送下载链接；预取、上传或发送失败时才使用独立确定性发送键发送 Controller HA Ingress 短期链接，最终发送状态未知使用明确中文提示。
+- 新增私有 `controller_ingress_base_url` password option，严格限制为无凭据、query 和 fragment 的 HTTPS 基址；空值不会伪造链接。
+- 摘要、图片和 fallback 统一沿用出站锁、授权锁、用户状态、owner 变化和 session-expired 门禁；新增成功、已知/未知失败、抑制、重启重放与 Hub→Controller→Gateway 合成测试。
+
 ## 0.2.1
 
 - 新增默认关闭的 owner-only `/work` Remote Work v1；精确 start/status/continue/cancel 与普通 Controller 聊天确定性分流，member、近似前缀、附件、未知项目和 deploy 均失败关闭。

@@ -34,6 +34,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.2.0` 为全部 32 个固定内部 MCP 工具写入单工具 `approval_mode="approve"`，保持 Thread/Turn 的 `approvalPolicy=never`，使 owner 的清晰查询、图表、导出、记账、退款、更正和归档请求不再依赖无法在微信中操作的 Codex 审批弹窗。该配置只移除模型层二次审批，不改变 member allowlist、逐工具策略、Hub writer/幂等或 Operations Broker 门禁。
 - `0.2.1` 从 Renovation Hub 的受认证 business manifest 动态加载完整工具 Schema，并保存 last-good；Hub 暂时不可达或返回非法目录时继续使用已验证目录，首次启动则使用内置兼容 bootstrap。
 - Hub manifest revision/digest 变化会更新 Controller catalog revision、发出 `listChanged` 并让 app-server 在不重启的情况下重新 `tools/list`。未来合法的 `ledger_*` / `renovation_*` 工具自动对 owner/owner_legacy 开放；member 永远只保留服务端固定 8 个只读工具。
+- `0.2.2` 在 `ledger_generate_chart` 成功后立即从 Hub 固定下载接口读取 PNG，校验引用、MIME、大小、PNG 签名和 SHA-256，再以 `0700/0600` 权限私有固化到 `/data/job-artifacts`。completed job 只返回确定性中文摘要和安全 artifact DTO，不返回 Hub `download_ref`、bearer、内部 URL 或文件路径。
+- artifact 下载分为 Gateway bearer 内部接口和 HA Ingress 高熵短期 token 接口；默认保留 24 小时，单图 20 MiB、总配额 100 MiB、每 job 最多 4 个，过期和孤立文件自动清理。模型被明确禁止自行构造图片或下载链接。
 - 默认仍不启用正式微信任务入口。
 - 旧 Hermes iLink 身份已经失效；正式装修 writer 已迁移到 Renovation Hub，Hermes 已停止，微信恢复不能依赖恢复旧 Hermes 进程，也不得形成双 poller 或双 writer。
 
@@ -44,6 +46,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - 自定义 API URL 经结构、模式、DNS 和公网地址校验后，只写入权限为 `0600` 的私有 `CODEX_HOME/config.toml`；API Key 继续通过匿名文件描述符和 app-server 账户 RPC 注入，不写入该配置文件。
 - Ledger 与 Operations Broker bearer 只保留在 Controller 主进程，不进入 app-server 环境、模型提示或日志。
 - Gateway 附件 bearer 也只保留在 Controller 主进程；模型仅能提交短期 `attachment_ref`。图片预览文件固定写入私有 `/data/turn-media`，权限为 `0600`，不使用微信文件名构造路径。
+- Hub 图表 bearer 和原始 `download_ref` 只存在于 Controller 主进程；持久 job DTO 只暴露随机 artifact ID、类型、大小、摘要、尺寸和不含内部路径的短期 fallback path。下载 token 由私有 HMAC 密钥确定性派生，SQLite 只保存其 SHA-256。
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
 - 当前动态发布的内部 MCP 工具逐个使用 `approve`，因此微信路径不依赖 Codex UI 审批；这不是权限放宽。manifest 校验、`member_read_only` 固定 allowlist、逐工具策略、当前作业/Turn、稳定幂等键、Hub 单 writer 以及 Broker 的提案、Passkey、一次性收据、allowlist 和 execution gate 继续在服务端强制。
 - Controller 重启后，状态不确定的运行中作业进入 `recovery_required`，不会自动重放写操作。

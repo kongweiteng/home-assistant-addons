@@ -36,10 +36,12 @@ ACTION_ID_RE = re.compile(r"^OPS-[0-9]{8}-[A-F0-9]{12}$")
 RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 SHA256_ID_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+CHART_REF_RE = re.compile(r"^summary-[a-f0-9]{32}\.png$")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MEDIA_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "video/mp4", "video/quicktime", "video/webm"}
 DEFAULT_MAX_GATEWAY_MEDIA_BYTES = 1024 * 1024 * 1024
+MAX_JOB_ARTIFACT_BYTES = 20 * 1024 * 1024
 
 
 class ToolProxyError(RuntimeError):
@@ -81,6 +83,7 @@ class ToolRouter:
         operations_token: str = "",
         request_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
+        request_artifact: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
         stream_media: Callable[..., dict[str, Any]] | None = None,
         max_media_bytes: int = DEFAULT_MAX_GATEWAY_MEDIA_BYTES,
         store: ControllerStore | None = None,
@@ -94,6 +97,7 @@ class ToolRouter:
         self.operations_token = operations_token
         self.request_json = request_json or _request_json
         self.request_bytes = request_bytes or _request_bytes
+        self.request_artifact = request_artifact or _request_hub_chart
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
         self.store = store
@@ -411,7 +415,14 @@ class ToolRouter:
         error_code: str | None = None
         try:
             definition = self._authorize_tool(name)
+            if name == "ledger_generate_chart":
+                with self._context_lock:
+                    context = None if self._active_context is None else dict(self._active_context)
+                if context is None or not context.get("job_id"):
+                    raise ToolProxyError("tool_context_unavailable", "图表只能在活动 Controller 作业中生成")
             result = self._call_authorized(definition, arguments)
+            if name == "ledger_generate_chart":
+                result = self._capture_chart_result(result)
             outcome = "succeeded"
             return result
         except ToolProxyError as exc:
@@ -435,6 +446,40 @@ class ToolRouter:
                     )
                 except (StoreError, sqlite3.DatabaseError, OSError):
                     pass
+
+    def _capture_chart_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        if self.store is None:
+            raise ToolProxyError("artifact_store_unavailable", "Controller artifact 存储不可用")
+        if not isinstance(result, dict):
+            raise ToolProxyError("artifact_metadata_invalid", "Renovation Hub 图表响应无效")
+        chart = result.get("result") if result.get("version") == 1 else result
+        if not isinstance(chart, dict):
+            raise ToolProxyError("artifact_metadata_invalid", "Renovation Hub 图表结果无效")
+        reference = chart.get("download_ref")
+        if not isinstance(reference, str) or not CHART_REF_RE.fullmatch(reference):
+            raise ToolProxyError("artifact_reference_invalid", "Renovation Hub 图表引用无效")
+        with self._context_lock:
+            context = None if self._active_context is None else dict(self._active_context)
+        if context is None or not context.get("job_id"):
+            raise ToolProxyError("tool_context_unavailable", "图表只能在活动 Controller 作业中生成")
+        try:
+            response_meta, content = self.request_artifact(
+                "GET",
+                f"{self.ledger_base_url}/internal/v1/downloads/chart/{quote(reference, safe='')}",
+                self.ledger_token,
+                min(self.store.max_artifact_bytes, MAX_JOB_ARTIFACT_BYTES),
+            )
+            if response_meta.get("mime_type") != "image/png":
+                raise StoreError("artifact_content_type_invalid", "Hub 图表类型不是 PNG", status=502)
+            artifact = self.store.capture_chart_artifact(context["job_id"], chart, content)
+        except StoreError as exc:
+            raise ToolProxyError(exc.code, str(exc)) from exc
+        safe_artifact = {key: value for key, value in artifact.items() if key != "fallback_path"}
+        return {
+            "delivery": "weixin_gateway_automatic",
+            "artifact": safe_artifact,
+            "summary": chart.get("summary"),
+        }
 
     def _authorize_tool(self, name: str) -> ToolDefinition:
         definition = self._tool_definition(name)
@@ -678,6 +723,39 @@ def _request_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[d
         "size_bytes": len(data),
         "sha256": digest_header,
     }, data
+
+
+def _request_hub_chart(method: str, url: str, token: str, max_bytes: int) -> tuple[dict[str, Any], bytes]:
+    request = Request(
+        url,
+        method=method,
+        headers={"Authorization": f"Bearer {token}", "Accept": "image/png"},
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            mime_type = response.headers.get_content_type()
+            length_header = response.headers.get("Content-Length")
+            if mime_type != "image/png":
+                raise ToolProxyError("artifact_content_type_invalid", "Hub 图表类型不是 PNG")
+            if not length_header:
+                raise ToolProxyError("artifact_size_invalid", "Hub 图表缺少长度")
+            try:
+                declared_length = int(length_header)
+            except ValueError as exc:
+                raise ToolProxyError("artifact_size_invalid", "Hub 图表长度无效") from exc
+            if not 1 <= declared_length <= max_bytes:
+                raise ToolProxyError("artifact_too_large", "Hub 图表超过 Controller 上限")
+            data = response.read(max_bytes + 1)
+    except HTTPError as exc:
+        exc.close()
+        raise ToolProxyError("artifact_unavailable", f"Hub 拒绝图表读取：HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ToolProxyError("upstream_unavailable", "Renovation Hub 图表接口不可用") from exc
+    if len(data) != declared_length or len(data) > max_bytes:
+        raise ToolProxyError("artifact_size_invalid", "Hub 图表实际长度不一致")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ToolProxyError("artifact_content_invalid", "Hub 图表不是有效 PNG")
+    return {"mime_type": mime_type, "size_bytes": len(data)}, data
 
 
 def _stream_gateway_to_hub(

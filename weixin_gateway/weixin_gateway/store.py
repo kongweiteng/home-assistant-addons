@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import sqlite3
 import tempfile
@@ -421,7 +422,9 @@ class GatewayStore:
         self.database_path = Path(database_path)
         self.data_dir = Path(data_dir)
         self.spool_dir = self.data_dir / "spool" / "inbound"
+        self.outbound_dir = self.data_dir / "spool" / "outbound"
         self.spool_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.outbound_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.spool_ttl_seconds = spool_ttl_seconds
         self.display_secret_path = self.data_dir / "display-secret.bin"
@@ -495,6 +498,22 @@ class GatewayStore:
                     sent_at TEXT,
                     error_code TEXT,
                     PRIMARY KEY(job_id,chunk_index)
+                );
+                CREATE TABLE IF NOT EXISTS outbound_artifacts (
+                    job_id TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    client_id TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL CHECK(state IN ('pending','sent','failed')),
+                    sent_at TEXT,
+                    error_code TEXT,
+                    fallback_client_id TEXT NOT NULL UNIQUE,
+                    fallback_state TEXT NOT NULL CHECK(fallback_state IN ('pending','sent','failed')),
+                    fallback_sent_at TEXT,
+                    fallback_error_code TEXT,
+                    PRIMARY KEY(job_id,artifact_id)
                 );
                 CREATE TABLE IF NOT EXISTS gateway_meta (
                     id INTEGER PRIMARY KEY CHECK(id=1),
@@ -1709,6 +1728,103 @@ class GatewayStore:
                 "UPDATE outbound_chunks SET state=?,sent_at=?,error_code=? WHERE job_id=? AND chunk_index=?",
                 ("sent" if success else "failed", utc_now() if success else None, error_code, job_id, chunk_index),
             )
+
+    def prepare_artifact(self, job_id: str, artifact: dict[str, Any]) -> dict[str, Any]:
+        artifact_id = artifact.get("artifact_id")
+        digest = artifact.get("sha256")
+        mime_type = artifact.get("mime_type")
+        size_bytes = artifact.get("size_bytes")
+        if not isinstance(job_id, str) or not job_id:
+            raise StoreError("artifact_invalid", "artifact job_id 无效")
+        if not isinstance(artifact_id, str) or not re.fullmatch(r"AR-[A-Z2-7]{26}", artifact_id):
+            raise StoreError("artifact_invalid", "artifact_id 无效")
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise StoreError("artifact_invalid", "artifact sha256 无效")
+        if mime_type != "image/png":
+            raise StoreError("artifact_invalid", "artifact MIME 无效")
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 1:
+            raise StoreError("artifact_invalid", "artifact 大小无效")
+        client_id = "codex-weixin-" + hashlib.sha256(
+            f"media:{job_id}:{artifact_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        fallback_client_id = "codex-weixin-" + hashlib.sha256(
+            f"fallback:{job_id}:{artifact_id}".encode("utf-8")
+        ).hexdigest()[:32]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT OR IGNORE INTO outbound_artifacts(job_id,artifact_id,sha256,mime_type,size_bytes,client_id,state,fallback_client_id,fallback_state) "
+                "VALUES (?,?,?,?,?,?,'pending',?,'pending')",
+                (job_id, artifact_id, digest, mime_type, size_bytes, client_id, fallback_client_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM outbound_artifacts WHERE job_id=? AND artifact_id=?",
+                (job_id, artifact_id),
+            ).fetchone()
+            if row is None:
+                raise StoreError("artifact_state_invalid", "artifact 状态不可用", status=500)
+            if row["sha256"] != digest or row["mime_type"] != mime_type or row["size_bytes"] != size_bytes:
+                raise StoreError("artifact_idempotency_conflict", "同一 artifact_id 的元数据发生变化", status=409)
+            return dict(row)
+
+    def mark_artifact(self, job_id: str, artifact_id: str, *, success: bool, error_code: str | None = None) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE outbound_artifacts SET state=?,sent_at=?,error_code=? WHERE job_id=? AND artifact_id=?",
+                ("sent" if success else "failed", utc_now() if success else None, error_code, job_id, artifact_id),
+            )
+
+    def mark_artifact_fallback(
+        self,
+        job_id: str,
+        artifact_id: str,
+        *,
+        success: bool,
+        error_code: str | None = None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE outbound_artifacts SET fallback_state=?,fallback_sent_at=?,fallback_error_code=? "
+                "WHERE job_id=? AND artifact_id=?",
+                (
+                    "sent" if success else "failed",
+                    utc_now() if success else None,
+                    error_code,
+                    job_id,
+                    artifact_id,
+                ),
+            )
+
+    def stage_outbound_artifact(self, artifact: dict[str, Any], content: bytes) -> Path:
+        if artifact.get("mime_type") != "image/png" or not content.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise StoreError("artifact_content_invalid", "出站 artifact 不是有效 PNG", status=502)
+        if len(content) != artifact.get("size_bytes"):
+            raise StoreError("artifact_size_invalid", "出站 artifact 大小不一致", status=502)
+        digest = hashlib.sha256(content).hexdigest()
+        if artifact.get("sha256") != f"sha256:{digest}":
+            raise StoreError("artifact_digest_invalid", "出站 artifact 摘要不一致", status=502)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact.", suffix=".png", dir=self.outbound_dir)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            return temporary
+        except Exception:
+            if temporary.exists():
+                temporary.unlink()
+            raise
+
+    def cleanup_outbound_artifacts(self, *, older_than_seconds: int = 3600) -> int:
+        threshold = datetime.now(timezone.utc).timestamp() - max(300, int(older_than_seconds))
+        removed = 0
+        for path in self.outbound_dir.iterdir():
+            if path.is_file() and not path.is_symlink() and path.stat().st_mtime <= threshold:
+                path.unlink()
+                removed += 1
+        return removed
 
     def preview_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
         """Read and verify an attachment without consuming its one-time reference."""

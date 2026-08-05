@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import tempfile
 from typing import Any
 import uuid
 
@@ -32,6 +33,13 @@ RECOVERY_RESOLUTIONS = {
     "confirmed_failed": ("failed", "recovery_review_failed"),
     "cancelled": ("cancelled", "recovery_review_cancelled"),
 }
+ARTIFACT_ID_RE = re.compile(r"^AR-[A-Z2-7]{26}$")
+DOWNLOAD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+DEFAULT_ARTIFACT_TTL_SECONDS = 86400
+DEFAULT_MAX_ARTIFACT_BYTES = 20 * 1024 * 1024
+DEFAULT_ARTIFACT_QUOTA_BYTES = 100 * 1024 * 1024
+DEFAULT_MAX_ARTIFACTS_PER_JOB = 4
 
 
 def utc_now() -> str:
@@ -54,11 +62,31 @@ class StoreError(RuntimeError):
 class ControllerStore:
     """SQLite source of truth for jobs, idempotency and Thread mappings."""
 
-    def __init__(self, database_path: str | Path, *, max_queue: int = 200, max_result_chars: int = 12000):
+    def __init__(
+        self,
+        database_path: str | Path,
+        *,
+        max_queue: int = 200,
+        max_result_chars: int = 12000,
+        artifact_dir: str | Path | None = None,
+        artifact_ttl_seconds: int = DEFAULT_ARTIFACT_TTL_SECONDS,
+        max_artifact_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
+        artifact_quota_bytes: int = DEFAULT_ARTIFACT_QUOTA_BYTES,
+        max_artifacts_per_job: int = DEFAULT_MAX_ARTIFACTS_PER_JOB,
+    ):
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.max_queue = max_queue
         self.max_result_chars = max_result_chars
+        self.artifact_dir = Path(artifact_dir) if artifact_dir is not None else self.database_path.parent / "job-artifacts"
+        self.artifact_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if self.artifact_dir.is_symlink() or not self.artifact_dir.is_dir():
+            raise StoreError("artifact_storage_invalid", "Controller artifact 目录无效", status=500)
+        os.chmod(self.artifact_dir, 0o700)
+        self.artifact_ttl_seconds = max(300, int(artifact_ttl_seconds))
+        self.max_artifact_bytes = max(1024, int(max_artifact_bytes))
+        self.artifact_quota_bytes = max(self.max_artifact_bytes, int(artifact_quota_bytes))
+        self.max_artifacts_per_job = max(1, int(max_artifacts_per_job))
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -98,6 +126,7 @@ class ControllerStore:
                     input_digest TEXT NOT NULL,
                     input_json TEXT NOT NULL,
                     result_text TEXT,
+                    result_summary TEXT,
                     error_code TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0,
                     capability_profile TEXT NOT NULL DEFAULT 'owner_legacy'
@@ -118,6 +147,25 @@ class ControllerStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id)
                 );
+                CREATE TABLE IF NOT EXISTS job_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL CHECK(artifact_type IN ('image')),
+                    mime_type TEXT NOT NULL CHECK(mime_type IN ('image/png')),
+                    storage_name TEXT NOT NULL UNIQUE,
+                    size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
+                    sha256 TEXT NOT NULL,
+                    width INTEGER NOT NULL CHECK(width > 0),
+                    height INTEGER NOT NULL CHECK(height > 0),
+                    summary_json TEXT NOT NULL,
+                    download_token_hash TEXT NOT NULL UNIQUE,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(job_id,sha256),
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS job_artifacts_job_idx ON job_artifacts(job_id,created_at);
+                CREATE INDEX IF NOT EXISTS job_artifacts_expiry_idx ON job_artifacts(expires_at);
                 CREATE TABLE IF NOT EXISTS controller_meta (
                     id INTEGER PRIMARY KEY CHECK(id=1),
                     display_secret BLOB NOT NULL,
@@ -181,6 +229,8 @@ class ControllerStore:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN capability_profile TEXT NOT NULL DEFAULT 'owner_legacy'"
                 )
+            if "result_summary" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN result_summary TEXT")
             now = utc_now()
             if "controller_meta" not in existing_tables:
                 connection.execute(
@@ -422,6 +472,175 @@ class ControllerStore:
             self._event(connection, row["job_id"], state, error_code=error_code)
             return True
 
+    def capture_chart_artifact(
+        self,
+        job_id: str,
+        chart: dict[str, Any],
+        content: bytes,
+    ) -> dict[str, Any]:
+        """Validate and atomically persist one trusted Hub PNG for a running job."""
+        if not isinstance(job_id, str) or not job_id:
+            raise StoreError("artifact_context_invalid", "artifact 作业上下文无效", status=409)
+        if not isinstance(chart, dict):
+            raise StoreError("artifact_metadata_invalid", "图表元数据无效", status=502)
+        download_ref = chart.get("download_ref")
+        size_bytes = chart.get("size_bytes")
+        expected_digest = chart.get("sha256")
+        width = chart.get("width")
+        height = chart.get("height")
+        summary = chart.get("summary")
+        if not isinstance(download_ref, str) or not re.fullmatch(r"summary-[a-f0-9]{32}\.png", download_ref):
+            raise StoreError("artifact_reference_invalid", "图表引用无效", status=502)
+        if not isinstance(content, bytes) or not content.startswith(PNG_MAGIC):
+            raise StoreError("artifact_content_invalid", "图表不是有效 PNG", status=502)
+        if not isinstance(size_bytes, int) or size_bytes != len(content) or not 1 <= size_bytes <= self.max_artifact_bytes:
+            raise StoreError("artifact_size_invalid", "图表大小不一致或越界", status=502)
+        if not isinstance(expected_digest, str):
+            raise StoreError("artifact_digest_invalid", "图表摘要缺失", status=502)
+        expected_digest = expected_digest.removeprefix("sha256:")
+        actual_digest = hashlib.sha256(content).hexdigest()
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_digest) or not hmac.compare_digest(expected_digest, actual_digest):
+            raise StoreError("artifact_digest_invalid", "图表摘要不一致", status=502)
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or not 1 <= width <= 8192
+            or not 1 <= height <= 8192
+        ):
+            raise StoreError("artifact_dimensions_invalid", "图表尺寸无效", status=502)
+        if not isinstance(summary, dict):
+            raise StoreError("artifact_summary_invalid", "图表汇总无效", status=502)
+        summary_json = canonical_json(summary)
+        if len(summary_json.encode("utf-8")) > 1024 * 1024:
+            raise StoreError("artifact_summary_invalid", "图表汇总过大", status=502)
+        result_summary = self._chart_result_summary(summary)
+        self.cleanup_artifacts()
+        now = utc_now()
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=self.artifact_ttl_seconds)).isoformat()
+        artifact_id = self._new_artifact_id()
+        storage_name = f"{uuid.uuid4().hex}.png"
+        token = self._download_token(artifact_id, expires_at)
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact.", dir=self.artifact_dir)
+        temporary = Path(temporary_name)
+        target = self.artifact_dir / storage_name
+        target_created = False
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                job = connection.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+                if job is None or job["state"] != "running":
+                    raise StoreError("artifact_context_invalid", "图表只能绑定到运行中的作业", status=409)
+                existing = connection.execute(
+                    "SELECT * FROM job_artifacts WHERE job_id=? AND sha256=?",
+                    (job_id, actual_digest),
+                ).fetchone()
+                if existing is not None:
+                    connection.execute("UPDATE jobs SET result_summary=? WHERE job_id=?", (result_summary, job_id))
+                    return self._artifact_public_document(connection, existing)
+                artifact_count = connection.execute(
+                    "SELECT COUNT(*) FROM job_artifacts WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()[0]
+                if artifact_count >= self.max_artifacts_per_job:
+                    raise StoreError("artifact_job_limit", "单个作业的 artifact 数量超过上限", status=409)
+                used_bytes = connection.execute(
+                    "SELECT COALESCE(SUM(size_bytes),0) FROM job_artifacts WHERE expires_at>?",
+                    (now,),
+                ).fetchone()[0]
+                if used_bytes + size_bytes > self.artifact_quota_bytes:
+                    raise StoreError("artifact_quota_exceeded", "Controller artifact 配额不足", status=507)
+                os.replace(temporary, target)
+                target_created = True
+                connection.execute(
+                    "INSERT INTO job_artifacts(artifact_id,job_id,artifact_type,mime_type,storage_name,size_bytes,sha256,width,height,summary_json,download_token_hash,expires_at,created_at) "
+                    "VALUES (?,?, 'image','image/png',?,?,?,?,?,?,?,?,?)",
+                    (
+                        artifact_id,
+                        job_id,
+                        storage_name,
+                        size_bytes,
+                        actual_digest,
+                        width,
+                        height,
+                        summary_json,
+                        token_hash,
+                        expires_at,
+                        now,
+                    ),
+                )
+                connection.execute("UPDATE jobs SET result_summary=? WHERE job_id=?", (result_summary, job_id))
+                row = connection.execute("SELECT * FROM job_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+                self._event(connection, job_id, "artifact_captured", item_type="image", content_length=size_bytes)
+                return self._artifact_public_document(connection, row)
+        except Exception:
+            if target_created and target.is_file() and not target.is_symlink():
+                target.unlink()
+            raise
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    def read_job_artifact(self, job_id: str, artifact_id: str) -> tuple[dict[str, Any], bytes]:
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", job_id):
+            raise StoreError("artifact_not_found", "artifact 不存在", status=404)
+        if not isinstance(artifact_id, str) or not ARTIFACT_ID_RE.fullmatch(artifact_id):
+            raise StoreError("artifact_not_found", "artifact 不存在", status=404)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM job_artifacts WHERE job_id=? AND artifact_id=? AND expires_at>?",
+                (job_id, artifact_id, utc_now()),
+            ).fetchone()
+            if row is None:
+                raise StoreError("artifact_not_found", "artifact 不存在或已过期", status=404)
+            return self._read_artifact_row(connection, row)
+
+    def read_download_artifact(self, token: str) -> tuple[dict[str, Any], bytes]:
+        if not isinstance(token, str) or not DOWNLOAD_TOKEN_RE.fullmatch(token):
+            raise StoreError("artifact_not_found", "下载链接无效", status=404)
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM job_artifacts WHERE download_token_hash=? AND expires_at>?",
+                (token_hash, utc_now()),
+            ).fetchone()
+            if row is None:
+                raise StoreError("artifact_not_found", "下载链接不存在或已过期", status=404)
+            return self._read_artifact_row(connection, row)
+
+    def cleanup_artifacts(self) -> int:
+        """Remove expired records/files and untracked regular files inside the private directory."""
+        removed = 0
+        tracked: set[str] = set()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            expired = connection.execute(
+                "SELECT artifact_id,storage_name FROM job_artifacts WHERE expires_at<=?",
+                (utc_now(),),
+            ).fetchall()
+            for row in expired:
+                connection.execute("DELETE FROM job_artifacts WHERE artifact_id=?", (row["artifact_id"],))
+                path = self.artifact_dir / row["storage_name"]
+                if path.is_file() and not path.is_symlink():
+                    path.unlink()
+                    removed += 1
+            tracked = {
+                row["storage_name"]
+                for row in connection.execute("SELECT storage_name FROM job_artifacts")
+            }
+        for path in self.artifact_dir.iterdir():
+            if path.name not in tracked and path.is_file() and not path.is_symlink():
+                path.unlink()
+                removed += 1
+        return removed
+
     def fail_claimed(self, job_id: str, error_code: str, *, uncertain: bool) -> None:
         state = "recovery_required" if uncertain else "failed"
         with self._connect() as connection:
@@ -537,6 +756,7 @@ class ControllerStore:
                 active.close()
 
     def public_job(self, document: dict[str, Any]) -> dict[str, Any]:
+        completed = document.get("state") == "completed"
         return {
             "job_id": document["job_id"],
             "job_short": self.short_id("JB", document.get("job_id")),
@@ -546,6 +766,8 @@ class ControllerStore:
             "state": document["state"],
             "queue_position": document.get("queue_position"),
             "result": document.get("result"),
+            "result_summary": document.get("result_summary") if completed else None,
+            "artifacts": self._public_artifacts(str(document.get("job_id") or "")) if completed else [],
             "error_code": document.get("error_code"),
             "attempt": document.get("attempt"),
             "created_at": document.get("created_at"),
@@ -955,6 +1177,7 @@ class ControllerStore:
             "state": row["state"],
             "queue_position": queue_position,
             "result": row["result_text"],
+            "result_summary": row["result_summary"],
             "error_code": row["error_code"],
             "attempt": row["attempt"],
             "capability_profile": row["capability_profile"],
@@ -965,6 +1188,99 @@ class ControllerStore:
         if include_input:
             document["input"] = json.loads(row["input_json"])
         return document
+
+    def _public_artifacts(self, job_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM job_artifacts WHERE job_id=? AND expires_at>? ORDER BY created_at,artifact_id",
+                (job_id, utc_now()),
+            ).fetchall()
+            return [self._artifact_public_document(connection, row) for row in rows]
+
+    def _artifact_public_document(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+        token = self._download_token(row["artifact_id"], row["expires_at"], connection=connection)
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        stored_token_hash = row["download_token_hash"]
+        if (
+            not isinstance(stored_token_hash, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", stored_token_hash)
+            or not hmac.compare_digest(token_hash, stored_token_hash)
+        ):
+            raise StoreError("artifact_token_invalid", "artifact 下载令牌校验失败", status=409)
+        return {
+            "artifact_id": row["artifact_id"],
+            "type": row["artifact_type"],
+            "mime_type": row["mime_type"],
+            "size_bytes": row["size_bytes"],
+            "sha256": f"sha256:{row['sha256']}",
+            "width": row["width"],
+            "height": row["height"],
+            "fallback_path": f"/downloads/artifacts/{token}",
+        }
+
+    def _read_artifact_row(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> tuple[dict[str, Any], bytes]:
+        try:
+            path = (self.artifact_dir / row["storage_name"]).resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise StoreError("artifact_not_found", "artifact 文件缺失", status=404) from exc
+        if path.parent != self.artifact_dir.resolve() or not path.is_file() or path.is_symlink():
+            raise StoreError("artifact_storage_invalid", "artifact 存储越界", status=409)
+        content = path.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        if (
+            row["mime_type"] != "image/png"
+            or not content.startswith(PNG_MAGIC)
+            or len(content) != row["size_bytes"]
+            or not hmac.compare_digest(digest, row["sha256"])
+        ):
+            raise StoreError("artifact_content_invalid", "artifact 内容校验失败", status=409)
+        return self._artifact_public_document(connection, row), content
+
+    @staticmethod
+    def _new_artifact_id() -> str:
+        value = base64.b32encode(os.urandom(16)).decode("ascii").rstrip("=")
+        return f"AR-{value}"
+
+    def _download_token(
+        self,
+        artifact_id: str,
+        expires_at: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
+        owns_connection = connection is None
+        active = self._connect() if connection is None else connection
+        try:
+            row = active.execute("SELECT display_secret FROM controller_meta WHERE id=1").fetchone()
+            if row is None or not isinstance(row["display_secret"], bytes) or len(row["display_secret"]) != 32:
+                raise StoreError("display_secret_invalid", "Controller 下载密钥不可用", status=503)
+            digest = hmac.new(
+                row["display_secret"],
+                f"artifact-download\n{artifact_id}\n{expires_at}".encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+            return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        finally:
+            if owns_connection:
+                active.close()
+
+    @staticmethod
+    def _chart_result_summary(summary: dict[str, Any]) -> str:
+        count = summary.get("transaction_count")
+        amount = summary.get("net_amount")
+        if (
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or not 0 <= count <= 1000
+            or not isinstance(amount, str)
+            or not re.fullmatch(r"-?\d{1,12}\.\d{2}", amount)
+        ):
+            raise StoreError("artifact_summary_invalid", "图表汇总字段无效", status=502)
+        return f"已生成装修账单统计图：共 {count} 笔记录，净支出 ¥{amount}。"
 
     @staticmethod
     def _event(

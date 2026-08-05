@@ -19,6 +19,8 @@ from .store import StoreError
 
 
 JOB_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})$")
+ARTIFACT_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/artifacts/(AR-[A-Z2-7]{26})$")
+DOWNLOAD_PATH_RE = re.compile(r"^/downloads/artifacts/([A-Za-z0-9_-]{43})$")
 RECOVERY_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/recovery-resolution$")
 TOOL_PATH_RE = re.compile(r"^/api/tools/([a-z0-9_]{1,96})$")
 
@@ -46,7 +48,7 @@ def create_server(
             }
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.2.1"
+        server_version = "CodexController/0.2.2"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -77,6 +79,20 @@ def create_server(
                 if not self._authorized():
                     return
                 self._call(service.capabilities)
+                return
+            download_match = DOWNLOAD_PATH_RE.fullmatch(path)
+            if download_match:
+                self._artifact(lambda: service.store.read_download_artifact(download_match.group(1)))
+                return
+            artifact_match = ARTIFACT_PATH_RE.fullmatch(path)
+            if artifact_match:
+                if not self._authorized():
+                    return
+                self._artifact(
+                    lambda: service.store.read_job_artifact(
+                        artifact_match.group(1), artifact_match.group(2)
+                    )
+                )
                 return
             match = JOB_PATH_RE.fullmatch(path)
             if match:
@@ -209,6 +225,18 @@ def create_server(
         def _asset(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
             self.send_response(status)
             self._headers(content_type, len(body))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _artifact(self, callback: Any) -> None:
+            try:
+                metadata, body = callback()
+            except StoreError as exc:
+                self._json(HTTPStatus(exc.status), {"error": {"code": exc.code, "message": str(exc)}})
+                return
+            self.send_response(HTTPStatus.OK)
+            self._headers(str(metadata["mime_type"]), len(body))
+            self.send_header("X-Content-SHA256", str(metadata["sha256"]))
             self.end_headers()
             self.wfile.write(body)
 

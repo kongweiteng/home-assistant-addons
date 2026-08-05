@@ -137,6 +137,11 @@ class AppServerClient:
             instructions += " 当前会话未配置 Renovation Hub 工具时，才可以明确说明装修账本工具目录不可用。"
         if hub_write_tools:
             instructions += f" 当前可用的装修写入工具是：{', '.join(hub_write_tools)}；写账、退款、修改、撤销或归档必须调用匹配的结构化工具并遵守服务端门禁。"
+        if "ledger_generate_chart" in enabled:
+            instructions += (
+                " 调用 ledger_generate_chart 成功后，图表由 Controller 私有固化并由 Weixin Gateway 自动投递。"
+                "最终回复只需简短说明统计已生成；不得输出 download_ref、内部 URL、文件路径、Bearer、Base64 或自行拼接图片下载链接。"
+            )
         operation_tools = sorted(
             name
             for name in enabled
@@ -213,7 +218,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.1"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.2"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")

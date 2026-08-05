@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.2.2
+
+- `ledger_generate_chart` 成功后由 Controller 从 Hub 固定 bearer 接口立即读取 PNG，并校验引用格式、MIME、长度、PNG 签名、大小和 SHA-256；模型不再收到 Hub `download_ref`。
+- 新增 additive `result_summary` 与 `job_artifacts` SQLite 数据、`/data/job-artifacts` 私有原子存储、24 小时 TTL、20 MiB 单图上限、100 MiB 总配额、每 job 4 个上限和孤立文件清理。
+- completed job 返回安全 `artifacts[]`，Gateway bearer 接口提供原始字节和摘要响应头；失败下载使用 HMAC 派生高熵 token 的 HA Ingress 路径，SQLite 只保存 token 摘要。
+- developer instructions 明确图表由 Gateway 自动投递，禁止模型输出引用、内部 URL、路径、Bearer、Base64 或自行拼接下载链接。
+- 新增捕获、重启持久化、权限、引用/大小/摘要拒绝、内部/Ingress 下载和 Hub→Controller→Gateway 合成测试；不部署、不重启、不读取正式账本、不发送真实微信。
+
 ## 0.2.1
 
 - Renovation Hub 工具目录改为读取受认证 business manifest；完整 Schema、中文元数据、风险、transport 和 annotations 不再依赖 Controller 静态复制。

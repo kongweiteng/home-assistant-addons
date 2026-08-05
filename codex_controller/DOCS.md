@@ -1,17 +1,21 @@
 # Codex Controller 使用说明
 
-当前版本：`0.1.9`。
+当前版本：`0.2.0`。
 
 ## 通用微信会话
 
 - 微信入口默认是通用 Codex 助手，可处理普通问答、讨论、分析、写作、规划和其他不需要外部执行的任务。
 - 不会把所有消息默认解释为装修事项，也不会因为消息来自现有 Hermes/iLink 身份就自动调用账本。
-- 只有用户意图确实需要装修账本或 Home Assistant 操作时，才允许调用对应的结构化 MCP 工具；工具权限、审批和写入边界仍按各组件配置执行。
+- 只有用户意图确实需要装修账本或 Home Assistant 操作时，才调用对应的结构化 MCP 工具；Codex UI 不再二次审批固定内部工具，但角色权限、逐工具策略、幂等、writer 和 Operations 执行边界仍由各组件服务端强制。
 - 每次新建或恢复持久 Thread 都会重新注入当前 developer instructions、只读 sandbox 和 `approvalPolicy=never`。即使历史会话曾讨论 Mac 代理、Hermes 或旧迁移状态，当前能力也必须以本轮 MCP 工具目录和实际调用结果为准。
 - 微信 owner 发送无附件且文本精确为“打开新会话”或 `/new` 时，Controller 会在既有队列与幂等门禁内创建新 Thread，并返回确定性确认。近似文本或带附件消息不会触发重置；旧 Thread 不删除，下一条普通消息才进入新 Thread。
 - 新 Thread 在当前 app-server 进程中已经处于加载状态，下一条消息不会重复调用 `thread/resume`；Controller/app-server 重启后进程内状态清空，持久 Thread 才会重新执行一次安全恢复。
-- Ingress 详情显示当前工具总数，以及装修/运维工具是否已配置。该状态只反映启动时脱敏目录，不显示 URL 或 bearer；正式可用仍需实际只读工具调用验证。
+- Ingress 的 MCP 工具控制台显示全部 32 个已知工具，并分别展示内部服务配置、管理员策略、MCP 进程真实 `tools/list` 发布状态和当前可调用状态；不会显示 URL、bearer、完整 Thread 或会话标识。
+- 工具旁的自然语言意图只是能力示例，不是固定关键词。Codex 根据整句话语义和本轮目录决定是否调用；普通讨论仍可直接回答。
+- 管理员可逐工具开启或关闭。页面写请求必须同时携带短期 CSRF token、JSON、当前 catalog revision 和随机 request ID；并发旧 revision 会被拒绝，相同 request ID 的相同正文幂等返回原结果。
+- `/new` 确认和内部作业状态会返回稳定 `TH-*` 短标识，便于排查旧 Thread；完整 Thread、Turn 和 conversation key 不进入页面 DTO。
 - Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；用户自然语言提出查询、查看、核验、汇总或明细请求，即授权本次无副作用只读调用，不需要 Passkey、写入确认或额外征求授权。不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
+- 对 owner，清晰的图表、导出、记账、退款、更正、撤销、导入检查和装修媒体/事件归档请求也视为本次匹配工具调用授权，不再询问“是否确认/授权”。只有缺少必填字段或语义确有多种合理解释时才澄清；讨论、假设、举例和方案比较不能推断为写入命令。
 
 ## 配置
 
@@ -75,7 +79,17 @@ Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Co
 
 app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把固定工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Ledger 或 Broker。
 
-账本汇总、明细、单条流水以及装修项目/阶段/空间/时间线/驾驶舱查询在 MCP 目录中带有明确的只读、非破坏、幂等和封闭世界标注，并在私有 `config.toml` 中使用单工具 `approval_mode="approve"`。该预批准只适用于已核实无副作用的查询，不适用于新增付款、退款、修改、撤销、附件消费、媒体归档、导入或 Home Assistant 操作。
+工具元数据只有一份事实源，统一定义 MCP Schema、中文名称、服务、风险类型和意图示例。SQLite 保存全局 catalog revision、逐工具开关、管理幂等、真实 MCP 目录心跳和最多 1000 条脱敏调用审计；审计只记录工具名、结果类型、错误码、耗时和时间，不保存参数、返回正文或凭据。
+
+MCP `tools/list` 只返回“内部服务已配置且策略开启”的交集，并把本次实际发布目录回报给主进程。策略 revision 变化后 MCP 发出标准 `notifications/tools/list_changed`；在 app-server 刷新目录前页面显示“等待 MCP 刷新”。无论目录是否刷新，`tools/call` 都会重新读取当前策略，关闭工具立即返回 `tool_disabled`。
+
+已加载 Thread 只在 developer instructions 指纹未变化时复用。角色或有效工具上下文变化时，Controller 会替换当前 conversation 的 Thread：刚由 `/new` 或首次接入创建、尚未发生 Turn 的空 Thread 在官方 Codex `0.146.0` 中没有可 fork 的 rollout，因此重新执行 `thread/start`；已经发生 Turn 并持久化的 Thread 才执行官方 `thread/fork` 保留既有历史。两条路径都会生成新的 `TH-*`，避免旧角色或旧工具提示继续影响下一轮。
+
+Gateway 作业缺少 `capability_profile` 时按旧版唯一 owner 兼容为 `owner_legacy`；新版 owner 使用 `owner`。`member_read_only` 只允许 `ledger_show`、`ledger_query`、`ledger_summary`、`renovation_dashboard`、`renovation_project_list`、`renovation_stage_list`、`renovation_area_list` 和 `renovation_timeline`，其他账本写入、导出、媒体和 Operations 在 Controller 服务端返回 `tool_not_allowed_for_profile`。
+
+私有 `config.toml` 为 Controller 定义的全部 32 个固定内部 MCP 工具写入单工具 `approval_mode="approve"`，同时 Thread/Turn 保持 `approvalPolicy=never`。这只消除微信无法响应的 Codex UI 审批步骤：`ledger_generate_chart`、`ledger_add_refund` 以及 Operations 工具都可进入真实服务端门禁，但不会因此获得额外业务权限。
+
+账本只读工具仍带明确的只读、非破坏、幂等和封闭世界 annotations。写工具只允许当前 active owner 作业/Turn，Controller 生成稳定幂等键，Renovation Hub 继续执行字段校验、单 writer、审计和业务约束；member 即使看见同一 app-server 配置，也只能调用 8 个 allowlist 查询。
 
 app-server 本身继续运行在不继承宿主 `PYTHONPATH` 的净化环境中；MCP 配置仅为固定的本地代理进程注入 `/opt/codex-controller`，避免外部 Python 路径进入模型进程，同时保证官方 app-server 的真实 `tools/list` 能装载工具目录。
 
@@ -89,7 +103,7 @@ MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 UR
 
 `renovation_media_ingest` 用于新图片/视频档案。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时再从 Gateway 以二进制流读取正文，并直接转发到 Renovation Hub。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
 
-Broker 工具固定为重启提案、Passkey 授权请求/状态、执行和执行状态查询。是否允许真正执行仍由 Broker 的固定 allowlist、一次性收据、状态机和默认关闭的 `execution_enabled` 决定；Controller 不能绕过这些门禁或提交任意 Supervisor 动作。
+Broker 工具固定为重启提案、Passkey 授权请求/状态、执行和执行状态查询。它们不依赖 Codex UI 审批，但是否允许真正执行仍由 Broker 的不可变提案、Passkey、固定 allowlist、一次性收据、状态机和默认关闭的 `execution_enabled` 决定；Controller 不能绕过这些门禁或提交任意 Supervisor 动作。
 
 ## 更新
 

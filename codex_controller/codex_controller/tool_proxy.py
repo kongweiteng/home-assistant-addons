@@ -9,86 +9,30 @@ import json
 from pathlib import Path
 import re
 import socketserver
+import sqlite3
 import threading
+import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from .store import ControllerStore, StoreError
+from .tool_catalog import (
+    ALL_TOOL_NAMES,
+    LEDGER_TOOLS,
+    LEDGER_WRITE_TOOLS,
+    MEMBER_READ_ONLY_TOOL_NAMES,
+    OPERATIONS_TOOLS,
+    RENOVATION_TOOLS,
+    RENOVATION_WRITE_TOOLS,
+)
 
 HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,251}[a-z0-9])?$")
 ADDON_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 ACTION_ID_RE = re.compile(r"^OPS-[0-9]{8}-[A-F0-9]{12}$")
 RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 SHA256_ID_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
-LEDGER_TOOLS = {
-    "ledger_add_payment",
-    "ledger_add_refund",
-    "ledger_correct_payment",
-    "ledger_undo",
-    "ledger_attach",
-    "ledger_show",
-    "ledger_query",
-    "ledger_summary",
-    "ledger_generate_chart",
-    "ledger_export",
-    "ledger_verify_export",
-    "ledger_import_inspect",
-    "ledger_import_shadow",
-}
-RENOVATION_TOOLS = {
-    "renovation_project_create",
-    "renovation_project_update",
-    "renovation_project_list",
-    "renovation_stage_create",
-    "renovation_stage_update",
-    "renovation_stage_list",
-    "renovation_area_create",
-    "renovation_area_update",
-    "renovation_area_list",
-    "renovation_event_create",
-    "renovation_event_update",
-    "renovation_timeline",
-    "renovation_dashboard",
-    "renovation_media_ingest",
-}
-OPERATIONS_TOOLS = {
-    "ha_operations_propose_restart",
-    "ha_operations_authorization_request",
-    "ha_operations_authorization_status",
-    "ha_operations_execute_restart",
-    "ha_operations_execution_status",
-}
-LEDGER_WRITE_TOOLS = {
-    "ledger_add_payment",
-    "ledger_add_refund",
-    "ledger_correct_payment",
-    "ledger_undo",
-    "ledger_attach",
-}
-RENOVATION_WRITE_TOOLS = {
-    "renovation_project_create",
-    "renovation_project_update",
-    "renovation_stage_create",
-    "renovation_stage_update",
-    "renovation_area_create",
-    "renovation_area_update",
-    "renovation_event_create",
-    "renovation_event_update",
-    "renovation_media_ingest",
-}
-NATURAL_QUERY_READ_ONLY_TOOLS = frozenset(
-    {
-        "ledger_query",
-        "ledger_show",
-        "ledger_summary",
-        "renovation_area_list",
-        "renovation_dashboard",
-        "renovation_project_list",
-        "renovation_stage_list",
-        "renovation_timeline",
-    }
-)
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -137,6 +81,7 @@ class ToolRouter:
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
         stream_media: Callable[..., dict[str, Any]] | None = None,
         max_media_bytes: int = DEFAULT_MAX_GATEWAY_MEDIA_BYTES,
+        store: ControllerStore | None = None,
     ):
         self.ledger_base_url = validate_base_url(ledger_base_url)
         self.ledger_token = ledger_token
@@ -148,16 +93,24 @@ class ToolRouter:
         self.request_bytes = request_bytes or _request_bytes
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
+        self.store = store
         self._context_lock = threading.Lock()
         self._active_context: dict[str, str] | None = None
 
-    def begin_job(self, job_id: str, message_id: str) -> None:
+    def begin_job(self, job_id: str, message_id: str, capability_profile: str = "owner_legacy") -> None:
         if not job_id or not message_id:
             raise ToolProxyError("tool_context_invalid", "工具调用上下文无效")
+        if capability_profile not in {"owner_legacy", "owner", "member_read_only"}:
+            raise ToolProxyError("tool_context_invalid", "工具能力画像无效")
         with self._context_lock:
             if self._active_context is not None:
                 raise ToolProxyError("tool_context_busy", "已有活动工具调用上下文")
-            self._active_context = {"job_id": job_id, "message_id": message_id, "turn_id": ""}
+            self._active_context = {
+                "job_id": job_id,
+                "message_id": message_id,
+                "turn_id": "",
+                "capability_profile": capability_profile,
+            }
 
     def bind_turn(self, job_id: str, turn_id: str) -> None:
         with self._context_lock:
@@ -175,17 +128,73 @@ class ToolRouter:
             if self._active_context is not None and self._active_context["job_id"] == job_id:
                 self._active_context = None
 
-    def available_tools(self) -> list[str]:
-        tools: list[str] = []
+    def configured_tools(self) -> frozenset[str]:
+        tools: set[str] = set()
         if self.ledger_base_url and len(self.ledger_token) >= 32:
             ledger_tools = set(LEDGER_TOOLS)
-            if not self.gateway_base_url or len(self.gateway_token) < 32:
+            renovation_tools = set(RENOVATION_TOOLS)
+            gateway_configured = bool(self.gateway_base_url and len(self.gateway_token) >= 32)
+            if not gateway_configured:
                 ledger_tools.discard("ledger_attach")
-            tools.extend(sorted(ledger_tools))
-            tools.extend(sorted(RENOVATION_TOOLS))
+            tools.update(ledger_tools)
+            tools.update(renovation_tools)
         if self.operations_base_url and len(self.operations_token) >= 32:
-            tools.extend(sorted(OPERATIONS_TOOLS))
-        return tools
+            tools.update(OPERATIONS_TOOLS)
+        return frozenset(tools)
+
+    def route_ready_tools(self) -> frozenset[str]:
+        tools = set(self.configured_tools())
+        if not self.gateway_base_url or len(self.gateway_token) < 32:
+            tools.discard("renovation_media_ingest")
+        return frozenset(tools)
+
+    def available_tools(self, capability_profile: str | None = None) -> list[str]:
+        configured = set(self.configured_tools())
+        if self.store is not None:
+            try:
+                configured &= set(self.store.tool_policy_snapshot()["enabled"])
+            except StoreError:
+                return []
+        if capability_profile == "member_read_only":
+            configured &= set(MEMBER_READ_ONLY_TOOL_NAMES)
+        elif capability_profile not in {None, "owner_legacy", "owner"}:
+            return []
+        return sorted(configured)
+
+    def catalog_payload(self) -> dict[str, Any]:
+        if self.store is None:
+            return {"tools": self.available_tools(), "revision": 1, "policy_error": None}
+        try:
+            snapshot = self.store.tool_policy_snapshot()
+        except StoreError as exc:
+            return {"tools": [], "revision": None, "policy_error": exc.code}
+        enabled = set(snapshot["enabled"]) & set(self.configured_tools())
+        return {"tools": sorted(enabled), "revision": snapshot["revision"], "policy_error": None}
+
+    def catalog_revision(self) -> dict[str, Any]:
+        if self.store is None:
+            return {"revision": 1}
+        try:
+            return {"revision": self.store.tool_catalog_revision()}
+        except StoreError as exc:
+            raise ToolProxyError(exc.code, "工具策略不可用") from exc
+
+    def observe_catalog(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.store is None:
+            return {"observed": True}
+        revision = arguments.get("revision")
+        tools = arguments.get("tools")
+        if revision is not None and not isinstance(revision, int):
+            raise ToolProxyError("invalid_catalog_observation", "MCP 目录版本无效")
+        if not isinstance(tools, list) or any(not isinstance(name, str) for name in tools):
+            raise ToolProxyError("invalid_catalog_observation", "MCP 目录工具无效")
+        expected = self.catalog_payload()
+        if revision != expected["revision"] or sorted(set(tools)) != expected["tools"]:
+            raise ToolProxyError("catalog_observation_stale", "MCP 目录回报已过期")
+        try:
+            return self.store.record_mcp_catalog(revision, tools)
+        except StoreError as exc:
+            raise ToolProxyError(exc.code, str(exc)) from exc
 
     def preview_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
         """Fetch a verified, non-consuming attachment preview for Codex input."""
@@ -201,6 +210,54 @@ class ToolRouter:
         )
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        started = time.monotonic()
+        outcome = "failed"
+        error_code: str | None = None
+        try:
+            self._authorize_tool(name)
+            result = self._call_authorized(name, arguments)
+            outcome = "succeeded"
+            return result
+        except ToolProxyError as exc:
+            error_code = exc.code
+            outcome = "rejected" if exc.code in {
+                "unknown_tool",
+                "tool_unconfigured",
+                "tool_disabled",
+                "tool_policy_invalid",
+                "tool_not_allowed_for_profile",
+            } else "failed"
+            raise
+        finally:
+            if self.store is not None and name in ALL_TOOL_NAMES:
+                try:
+                    self.store.record_tool_invocation(
+                        name,
+                        outcome=outcome,
+                        error_code=error_code,
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
+                except (StoreError, sqlite3.DatabaseError, OSError):
+                    pass
+
+    def _authorize_tool(self, name: str) -> None:
+        if name not in ALL_TOOL_NAMES:
+            raise ToolProxyError("unknown_tool", "工具不在允许清单")
+        with self._context_lock:
+            profile = None if self._active_context is None else self._active_context.get("capability_profile")
+        if profile == "member_read_only" and name not in MEMBER_READ_ONLY_TOOL_NAMES:
+            raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
+        if name not in self.configured_tools():
+            raise ToolProxyError("tool_unconfigured", "工具所属内部服务未配置")
+        if self.store is not None:
+            try:
+                enabled = self.store.tool_policy_snapshot()["enabled"]
+            except StoreError as exc:
+                raise ToolProxyError("tool_policy_invalid", "工具策略不可用") from exc
+            if name not in enabled:
+                raise ToolProxyError("tool_disabled", "工具已由管理员关闭")
+
+    def _call_authorized(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")
         if name == "renovation_media_ingest":
@@ -555,11 +612,14 @@ class ToolProxyServer:
                     arguments = request.get("arguments", {})
                     if not isinstance(name, str):
                         raise ToolProxyError("invalid_request", "缺少工具名")
-                    result = (
-                        {"tools": router.available_tools()}
-                        if name == "__catalog__"
-                        else router.call(name, arguments)
-                    )
+                    if name == "__catalog__":
+                        result = router.catalog_payload()
+                    elif name == "__catalog_revision__":
+                        result = router.catalog_revision()
+                    elif name == "__catalog_observed__":
+                        result = router.observe_catalog(arguments)
+                    else:
+                        result = router.call(name, arguments)
                     response = {"ok": True, "result": result}
                 except ToolProxyError as exc:
                     response = {"ok": False, "error": {"code": exc.code, "message": str(exc)}}

@@ -24,6 +24,10 @@ from .protocol import canonical_json, validate_cdn_base_url, validate_ilink_base
 IDENTITY_FORMAT = "weixin-ilink-identity@1"
 OWNER_PAIRING_FORMAT = "weixin-owner-pairing@1"
 OWNER_PAIRING_TTL_SECONDS = 15 * 60
+MEMBER_INVITATION_TTL_SECONDS = 15 * 60
+MAX_WEIXIN_USERS = 32
+USER_ROLES = frozenset({"owner", "member"})
+USER_STATES = frozenset({"active", "suspended", "revoked"})
 
 
 def utc_now() -> str:
@@ -59,6 +63,20 @@ def atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
 
 def account_hash(account_id: str) -> str:
     return hashlib.sha256(f"weixin-account:{account_id}".encode("utf-8")).hexdigest()
+
+
+def user_hash(user_id: str) -> str:
+    return hashlib.sha256(f"weixin-user:{user_id}".encode("utf-8")).hexdigest()
+
+
+def conversation_key(user_id: str) -> str:
+    return "sha256:" + hashlib.sha256(f"weixin:{user_id}".encode("utf-8")).hexdigest()
+
+
+def re_fullmatch_short(prefix: str, value: str) -> bool:
+    expected_prefix = f"{prefix}-"
+    suffix = value[len(expected_prefix) :] if value.startswith(expected_prefix) else ""
+    return len(suffix) == 10 and all(character in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for character in suffix)
 
 
 class IdentityStore:
@@ -181,6 +199,14 @@ class IdentityStore:
         updated["context_tokens"] = contexts
         self.save_identity(updated)
         identity["context_tokens"] = contexts
+
+    def mirror_owner(self, identity: dict[str, Any], user_id: str) -> None:
+        """Keep the legacy allowlist as a one-owner compatibility mirror."""
+        updated = dict(identity)
+        updated["allowed_user_ids"] = [user_id]
+        self.save_identity(updated)
+        identity.clear()
+        identity.update(updated)
 
     def clear_owner_pairing(self) -> None:
         if self.owner_pairing_path.is_file() and not self.owner_pairing_path.is_symlink():
@@ -398,7 +424,30 @@ class GatewayStore:
         self.spool_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.spool_ttl_seconds = spool_ttl_seconds
+        self.display_secret_path = self.data_dir / "display-secret.bin"
+        self.display_secret = self._load_display_secret()
         self._initialize()
+
+    def _load_display_secret(self) -> bytes:
+        if self.display_secret_path.is_file() and not self.display_secret_path.is_symlink():
+            secret = self.display_secret_path.read_bytes()
+            if len(secret) == 32:
+                return secret
+            raise StoreError("display_secret_invalid", "短标识密钥无效", status=500)
+        secret = secrets.token_bytes(32)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".display-secret.", dir=self.data_dir)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(secret)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.display_secret_path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return secret
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=10)
@@ -447,8 +496,715 @@ class GatewayStore:
                     error_code TEXT,
                     PRIMARY KEY(job_id,chunk_index)
                 );
+                CREATE TABLE IF NOT EXISTS gateway_meta (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    users_revision INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS weixin_users (
+                    user_hash TEXT PRIMARY KEY,
+                    private_user_id TEXT NOT NULL UNIQUE,
+                    conversation_key TEXT NOT NULL UNIQUE,
+                    alias TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('owner','member')),
+                    status TEXT NOT NULL CHECK(status IN ('active','suspended','revoked')),
+                    revision INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    last_seen_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS weixin_single_owner_idx
+                    ON weixin_users(role) WHERE role='owner';
+                CREATE INDEX IF NOT EXISTS weixin_users_status_idx
+                    ON weixin_users(status, role, updated_at);
+                CREATE TABLE IF NOT EXISTS pairing_invitations (
+                    invite_id TEXT PRIMARY KEY,
+                    code_salt TEXT NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('waiting','claimed','expired','cancelled')),
+                    expires_at TEXT NOT NULL,
+                    claimed_user_hash TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS pairing_invitations_state_idx
+                    ON pairing_invitations(state, expires_at);
+                CREATE TABLE IF NOT EXISTS conversation_links (
+                    user_hash TEXT PRIMARY KEY,
+                    conversation_short TEXT NOT NULL UNIQUE,
+                    thread_short TEXT,
+                    last_job_short TEXT,
+                    last_seen_at TEXT,
+                    FOREIGN KEY(user_hash) REFERENCES weixin_users(user_hash)
+                );
+                CREATE TABLE IF NOT EXISTS admin_mutations (
+                    request_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
+            connection.execute(
+                "INSERT OR IGNORE INTO gateway_meta(id,users_revision,updated_at) VALUES (1,0,?)",
+                (utc_now(),),
+            )
+            self._ensure_column(connection, "inbound_messages", "user_hash", "TEXT")
+            self._ensure_column(
+                connection,
+                "inbound_messages",
+                "capability_profile",
+                "TEXT NOT NULL DEFAULT 'owner_legacy'",
+            )
+
+    @staticmethod
+    def _ensure_column(connection: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+        columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    def short_id(self, prefix: str, value: str) -> str:
+        digest = hmac.new(self.display_secret, f"{prefix}:{value}".encode("utf-8"), hashlib.sha256).digest()
+        encoded = base64.b32encode(digest).decode("ascii").rstrip("=")[:10]
+        return f"{prefix}-{encoded}"
+
+    def users_revision(self, connection: sqlite3.Connection | None = None) -> int:
+        if connection is not None:
+            return int(connection.execute("SELECT users_revision FROM gateway_meta WHERE id=1").fetchone()[0])
+        with self._connect() as current:
+            return self.users_revision(current)
+
+    def _next_users_revision(self, connection: sqlite3.Connection) -> int:
+        revision = self.users_revision(connection) + 1
+        connection.execute(
+            "UPDATE gateway_meta SET users_revision=?,updated_at=? WHERE id=1",
+            (revision, utc_now()),
+        )
+        return revision
+
+    @staticmethod
+    def _request_digest(scope: str, payload: dict[str, Any]) -> str:
+        return hashlib.sha256(f"{scope}\n{canonical_json(payload)}".encode("utf-8")).hexdigest()
+
+    def _idempotent_response(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        request_id: str,
+        scope: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not isinstance(request_id, str) or not 16 <= len(request_id) <= 128 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in request_id
+        ):
+            raise StoreError("request_id_invalid", "request_id 无效")
+        digest = self._request_digest(scope, payload)
+        row = connection.execute(
+            "SELECT scope,request_digest,response_json FROM admin_mutations WHERE request_id=?",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["scope"] != scope or not hmac.compare_digest(row["request_digest"], digest):
+            raise StoreError("idempotency_conflict", "request_id 已用于不同请求", status=409)
+        return json.loads(row["response_json"])
+
+    def _record_mutation(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        request_id: str,
+        scope: str,
+        payload: dict[str, Any],
+        response: dict[str, Any],
+    ) -> None:
+        connection.execute(
+            "INSERT INTO admin_mutations(request_id,scope,request_digest,response_json,created_at) VALUES (?,?,?,?,?)",
+            (request_id, scope, self._request_digest(scope, payload), canonical_json(response), utc_now()),
+        )
+
+    def _assert_revision(self, connection: sqlite3.Connection, expected_revision: int) -> None:
+        current = self.users_revision(connection)
+        if not isinstance(expected_revision, int) or isinstance(expected_revision, bool) or expected_revision != current:
+            raise StoreError("revision_conflict", "用户目录已变化，请刷新后重试", status=409)
+
+    def migrate_identity_allowlist(self, allowed_user_ids: list[str]) -> dict[str, Any]:
+        """Create the initial owner once while preserving legacy allowlist semantics."""
+        if len(allowed_user_ids) > 1:
+            raise StoreError("owner_migration_ambiguous", "旧 allowlist 包含多个用户，无法确定唯一 owner", status=409)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT * FROM weixin_users WHERE role='owner' ORDER BY created_at"
+            ).fetchall()
+            if len(rows) > 1:
+                raise StoreError("owner_invariant_broken", "用户目录存在多个 owner", status=500)
+            if rows:
+                owner = rows[0]
+                if owner["status"] != "active":
+                    raise StoreError("owner_invariant_broken", "唯一 owner 不是 active", status=500)
+                self._backfill_legacy_owner_messages(connection, owner)
+                return {
+                    "state": "existing",
+                    "owner_private_id": owner["private_user_id"],
+                    "revision": self.users_revision(connection),
+                }
+            count = int(connection.execute("SELECT COUNT(*) FROM weixin_users").fetchone()[0])
+            if count:
+                raise StoreError("owner_invariant_broken", "用户目录有成员但没有 owner", status=500)
+            if not allowed_user_ids:
+                return {"state": "empty", "owner_private_id": None, "revision": self.users_revision(connection)}
+            owner_id = allowed_user_ids[0]
+            now = utc_now()
+            revision = self._next_users_revision(connection)
+            digest = user_hash(owner_id)
+            key = conversation_key(owner_id)
+            connection.execute(
+                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at) VALUES (?,?,?,?,?,'active',?,?,?,NULL)",
+                (digest, owner_id, key, "管理员", "owner", revision, now, now),
+            )
+            connection.execute(
+                "INSERT INTO conversation_links(user_hash,conversation_short) VALUES (?,?)",
+                (digest, self.short_id("CV", key)),
+            )
+            owner = connection.execute(
+                "SELECT * FROM weixin_users WHERE user_hash=?",
+                (digest,),
+            ).fetchone()
+            assert owner is not None
+            self._backfill_legacy_owner_messages(connection, owner)
+            return {"state": "migrated", "owner_private_id": owner_id, "revision": revision}
+
+    @staticmethod
+    def _backfill_legacy_owner_messages(
+        connection: sqlite3.Connection,
+        owner: sqlite3.Row,
+    ) -> None:
+        """Attach pre-0.2.0 messages to the migrated owner for later role revalidation."""
+        connection.execute(
+            """
+            UPDATE inbound_messages
+            SET user_hash=?, capability_profile='owner'
+            WHERE user_hash IS NULL
+              AND sender_id=?
+              AND capability_profile='owner_legacy'
+            """,
+            (owner["user_hash"], owner["private_user_id"]),
+        )
+
+    def register_paired_owner(self, user_id: str) -> dict[str, Any]:
+        migration = self.migrate_identity_allowlist([user_id])
+        return self.user_by_private_id(user_id) or migration
+
+    def user_by_private_id(self, private_user_id: str) -> dict[str, Any] | None:
+        digest = user_hash(private_user_id)
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            return None if row is None else self._private_user_document(row)
+
+    def user_by_short(self, wx_short: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM weixin_users").fetchall()
+            for row in rows:
+                if hmac.compare_digest(self.short_id("WX", row["user_hash"]), wx_short):
+                    return self._private_user_document(row)
+        raise StoreError("user_not_found", "微信用户不存在", status=404)
+
+    def active_owner(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM weixin_users WHERE role='owner' AND status='active'"
+            ).fetchall()
+            if len(rows) != 1:
+                raise StoreError("notification_owner_unavailable", "微信通知要求精确绑定一个 active owner", status=409)
+            return self._private_user_document(rows[0])
+
+    def list_users(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM weixin_users ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at"
+            ).fetchall()
+            return {
+                "revision": self.users_revision(connection),
+                "users": [self._public_user_document(connection, row) for row in rows],
+                "limits": {"max_users": MAX_WEIXIN_USERS},
+            }
+
+    def list_conversations(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT u.user_hash,u.alias,u.role,u.status,l.conversation_short,l.thread_short,l.last_job_short,l.last_seen_at
+                FROM weixin_users u LEFT JOIN conversation_links l ON l.user_hash=u.user_hash
+                ORDER BY CASE u.role WHEN 'owner' THEN 0 ELSE 1 END,u.created_at
+                """
+            ).fetchall()
+            return {
+                "revision": self.users_revision(connection),
+                "conversations": [
+                    {
+                        "wx_short": self.short_id("WX", row["user_hash"]),
+                        "alias": row["alias"],
+                        "role": row["role"],
+                        "status": row["status"],
+                        "conversation_short": row["conversation_short"],
+                        "thread_short": row["thread_short"],
+                        "last_job_short": row["last_job_short"],
+                        "last_seen_at": row["last_seen_at"],
+                    }
+                    for row in rows
+                ],
+            }
+
+    def create_member_invitation(
+        self,
+        *,
+        expected_revision: int,
+        request_id: str,
+        ttl_seconds: int = MEMBER_INVITATION_TTL_SECONDS,
+    ) -> dict[str, Any]:
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or not 60 <= ttl_seconds <= 3600:
+            raise StoreError("invitation_ttl_invalid", "邀请码有效期必须在 60 到 3600 秒之间")
+        scope = "member_invitation_create"
+        payload = {"revision": expected_revision, "ttl_seconds": ttl_seconds}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(
+                connection, request_id=request_id, scope=scope, payload=payload
+            )
+            if replay is not None:
+                return replay
+            self._assert_revision(connection, expected_revision)
+            count = int(connection.execute("SELECT COUNT(*) FROM weixin_users WHERE status!='revoked'").fetchone()[0])
+            if count >= MAX_WEIXIN_USERS:
+                raise StoreError("user_limit_reached", "微信用户数量已达到上限", status=409)
+            now_dt = datetime.now(timezone.utc)
+            now = now_dt.isoformat()
+            connection.execute(
+                "UPDATE pairing_invitations SET state='expired',updated_at=? WHERE state='waiting' AND expires_at<=?",
+                (now, now),
+            )
+            code = "加入-CODEX-" + secrets.token_hex(16).upper()
+            salt = secrets.token_bytes(16)
+            invite_id = secrets.token_urlsafe(24)
+            expires_at = (now_dt + timedelta(seconds=ttl_seconds)).isoformat()
+            connection.execute(
+                "INSERT INTO pairing_invitations(invite_id,code_salt,code_hash,state,expires_at,created_at,updated_at) VALUES (?,?,?,'waiting',?,?,?)",
+                (
+                    invite_id,
+                    base64.urlsafe_b64encode(salt).decode("ascii"),
+                    hashlib.sha256(salt + code.encode("utf-8")).hexdigest(),
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+            revision = self._next_users_revision(connection)
+            replay_response = {
+                "state": "created_code_already_shown",
+                "invite_short": self.short_id("IV", invite_id),
+                "expires_at": expires_at,
+                "revision": revision,
+            }
+            self._record_mutation(
+                connection,
+                request_id=request_id,
+                scope=scope,
+                payload=payload,
+                response=replay_response,
+            )
+            return {**replay_response, "state": "waiting", "code": code}
+
+    def cancel_member_invitation(
+        self,
+        *,
+        invite_short: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        scope = "member_invitation_cancel"
+        payload = {"invite_short": invite_short, "revision": expected_revision}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(connection, request_id=request_id, scope=scope, payload=payload)
+            if replay is not None:
+                return replay
+            self._assert_revision(connection, expected_revision)
+            row = self._invitation_by_short(connection, invite_short)
+            if row["state"] != "waiting":
+                raise StoreError("invitation_not_waiting", "邀请码已不可取消", status=409)
+            now = utc_now()
+            connection.execute(
+                "UPDATE pairing_invitations SET state='cancelled',updated_at=? WHERE invite_id=?",
+                (now, row["invite_id"]),
+            )
+            revision = self._next_users_revision(connection)
+            response = {"state": "cancelled", "invite_short": invite_short, "revision": revision}
+            self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=response)
+            return response
+
+    def claim_member_invitation(self, *, user_id: str, text: str) -> dict[str, Any] | None:
+        if not user_id or not text:
+            return None
+        digest = user_hash(user_id)
+        key = conversation_key(user_id)
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            if existing is not None:
+                return None
+            connection.execute(
+                "UPDATE pairing_invitations SET state='expired',updated_at=? WHERE state='waiting' AND expires_at<=?",
+                (now, now),
+            )
+            rows = connection.execute(
+                "SELECT * FROM pairing_invitations WHERE state='waiting' ORDER BY created_at"
+            ).fetchall()
+            matched = None
+            for row in rows:
+                try:
+                    salt = base64.urlsafe_b64decode(row["code_salt"].encode("ascii"))
+                except Exception:
+                    continue
+                actual = hashlib.sha256(salt + text.encode("utf-8")).hexdigest()
+                if hmac.compare_digest(actual, row["code_hash"]):
+                    matched = row
+                    break
+            if matched is None:
+                return None
+            count = int(connection.execute("SELECT COUNT(*) FROM weixin_users WHERE status!='revoked'").fetchone()[0])
+            if count >= MAX_WEIXIN_USERS:
+                raise StoreError("user_limit_reached", "微信用户数量已达到上限", status=409)
+            revision = self._next_users_revision(connection)
+            alias = f"成员 {count}"
+            connection.execute(
+                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at) VALUES (?,?,?,?,?,'active',?,?,?,?)",
+                (digest, user_id, key, alias, "member", revision, now, now, now),
+            )
+            connection.execute(
+                "INSERT INTO conversation_links(user_hash,conversation_short,last_seen_at) VALUES (?,?,?)",
+                (digest, self.short_id("CV", key), now),
+            )
+            changed = connection.execute(
+                "UPDATE pairing_invitations SET state='claimed',claimed_user_hash=?,updated_at=? WHERE invite_id=? AND state='waiting'",
+                (digest, now, matched["invite_id"]),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("invitation_already_claimed", "邀请码已被领取", status=409)
+            row = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            assert row is not None
+            return self._private_user_document(row)
+
+    def update_alias(
+        self,
+        *,
+        wx_short: str,
+        alias: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        clean_alias = alias.strip()
+        if not 1 <= len(clean_alias) <= 40 or any(ord(character) < 32 for character in clean_alias):
+            raise StoreError("alias_invalid", "别名长度必须为 1 到 40 个可见字符")
+        return self._mutate_user(
+            action="alias",
+            wx_short=wx_short,
+            expected_revision=expected_revision,
+            request_id=request_id,
+            extra={"alias": clean_alias},
+        )
+
+    def change_user_state(
+        self,
+        *,
+        wx_short: str,
+        action: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if action not in {"suspend", "resume", "revoke"}:
+            raise StoreError("user_action_invalid", "用户操作无效")
+        return self._mutate_user(
+            action=action,
+            wx_short=wx_short,
+            expected_revision=expected_revision,
+            request_id=request_id,
+            extra={},
+        )
+
+    def _mutate_user(
+        self,
+        *,
+        action: str,
+        wx_short: str,
+        expected_revision: int,
+        request_id: str,
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        scope = f"user_{action}"
+        payload = {"wx_short": wx_short, "revision": expected_revision, **extra}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(connection, request_id=request_id, scope=scope, payload=payload)
+            if replay is not None:
+                return replay
+            self._assert_revision(connection, expected_revision)
+            row = self._user_row_by_short(connection, wx_short)
+            if action in {"suspend", "revoke"} and row["role"] == "owner":
+                raise StoreError("owner_protected", "唯一 owner 不能暂停或移除", status=409)
+            now = utc_now()
+            if action == "alias":
+                connection.execute(
+                    "UPDATE weixin_users SET alias=?,updated_at=? WHERE user_hash=?",
+                    (extra["alias"], now, row["user_hash"]),
+                )
+            elif action == "suspend":
+                if row["status"] != "active":
+                    raise StoreError("user_state_conflict", "只有 active 成员可以暂停", status=409)
+                connection.execute(
+                    "UPDATE weixin_users SET status='suspended',updated_at=? WHERE user_hash=?",
+                    (now, row["user_hash"]),
+                )
+            elif action == "resume":
+                if row["role"] != "member" or row["status"] != "suspended":
+                    raise StoreError("user_state_conflict", "只有 suspended 成员可以恢复", status=409)
+                connection.execute(
+                    "UPDATE weixin_users SET status='active',updated_at=? WHERE user_hash=?",
+                    (now, row["user_hash"]),
+                )
+            else:
+                if row["status"] == "revoked":
+                    raise StoreError("user_state_conflict", "成员已经移除", status=409)
+                connection.execute(
+                    "UPDATE weixin_users SET status='revoked',revoked_at=?,updated_at=? WHERE user_hash=?",
+                    (now, now, row["user_hash"]),
+                )
+            revision = self._next_users_revision(connection)
+            connection.execute(
+                "UPDATE weixin_users SET revision=? WHERE user_hash=?",
+                (revision, row["user_hash"]),
+            )
+            updated = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (row["user_hash"],)).fetchone()
+            assert updated is not None
+            response = {"revision": revision, "user": self._public_user_document(connection, updated)}
+            self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=response)
+            return response
+
+    def transfer_owner(
+        self,
+        *,
+        target_wx_short: str,
+        expected_revision: int,
+        request_id: str,
+        confirmation: str,
+    ) -> dict[str, Any]:
+        if confirmation != "TRANSFER_OWNER":
+            raise StoreError("owner_transfer_confirmation_required", "Owner 转移确认词无效", status=409)
+        scope = "owner_transfer"
+        payload = {
+            "target_wx_short": target_wx_short,
+            "revision": expected_revision,
+            "confirmation": confirmation,
+        }
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(connection, request_id=request_id, scope=scope, payload=payload)
+            if replay is not None:
+                replay["replayed"] = True
+                return replay
+            self._assert_revision(connection, expected_revision)
+            owners = connection.execute("SELECT * FROM weixin_users WHERE role='owner' AND status='active'").fetchall()
+            if len(owners) != 1:
+                raise StoreError("owner_invariant_broken", "Owner 转移前不满足唯一 active owner", status=500)
+            old_owner = owners[0]
+            target = self._user_row_by_short(connection, target_wx_short)
+            if target["role"] != "member" or target["status"] != "active":
+                raise StoreError("owner_transfer_target_invalid", "目标必须是 active member", status=409)
+            now = utc_now()
+            connection.execute(
+                "UPDATE weixin_users SET role='member',updated_at=? WHERE user_hash=?",
+                (now, old_owner["user_hash"]),
+            )
+            connection.execute(
+                "UPDATE weixin_users SET role='owner',updated_at=? WHERE user_hash=?",
+                (now, target["user_hash"]),
+            )
+            revision = self._next_users_revision(connection)
+            connection.execute(
+                "UPDATE weixin_users SET revision=? WHERE user_hash IN (?,?)",
+                (revision, old_owner["user_hash"], target["user_hash"]),
+            )
+            response = {
+                "revision": revision,
+                "owner": self._public_user_document(
+                    connection,
+                    connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (target["user_hash"],)).fetchone(),
+                ),
+                "previous_owner": self.short_id("WX", old_owner["user_hash"]),
+                "owner_private_id": target["private_user_id"],
+                "previous_owner_private_id": old_owner["private_user_id"],
+            }
+            stored_response = {key: value for key, value in response.items() if not key.endswith("private_id")}
+            self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=stored_response)
+            return response
+
+    def restore_owner_after_mirror_failure(
+        self,
+        previous_owner_private_id: str,
+        target_private_id: str,
+        request_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            previous = user_hash(previous_owner_private_id)
+            target = user_hash(target_private_id)
+            connection.execute("UPDATE weixin_users SET role='member' WHERE user_hash=?", (target,))
+            connection.execute("UPDATE weixin_users SET role='owner' WHERE user_hash=?", (previous,))
+            revision = self._next_users_revision(connection)
+            connection.execute(
+                "UPDATE weixin_users SET revision=?,updated_at=? WHERE user_hash IN (?,?)",
+                (revision, utc_now(), previous, target),
+            )
+            connection.execute("DELETE FROM admin_mutations WHERE request_id=?", (request_id,))
+
+    def touch_user(self, private_user_id: str) -> dict[str, Any] | None:
+        digest = user_hash(private_user_id)
+        now = utc_now()
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE weixin_users SET last_seen_at=?,updated_at=? WHERE user_hash=?",
+                (now, now, digest),
+            )
+            connection.execute(
+                "UPDATE conversation_links SET last_seen_at=? WHERE user_hash=?",
+                (now, digest),
+            )
+            updated = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            assert updated is not None
+            return self._private_user_document(updated)
+
+    def user_is_active(self, digest: str | None) -> bool:
+        if not digest:
+            return False
+        with self._connect() as connection:
+            row = connection.execute("SELECT status FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            return row is not None and row["status"] == "active"
+
+    def authorize_stored_message(self, digest: str | None, capability_profile: str) -> dict[str, Any]:
+        """Revalidate a queued message without ever upgrading its stored authority."""
+        if capability_profile not in {"owner", "owner_legacy", "member_read_only"}:
+            return {"allowed": False, "error_code": "message_capability_invalid", "capability_profile": None}
+        if not digest:
+            return {
+                "allowed": capability_profile == "owner_legacy",
+                "error_code": None if capability_profile == "owner_legacy" else "message_user_missing",
+                "capability_profile": "owner_legacy" if capability_profile == "owner_legacy" else None,
+            }
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT role,status FROM weixin_users WHERE user_hash=?",
+                (digest,),
+            ).fetchone()
+        if row is None or row["status"] != "active":
+            return {"allowed": False, "error_code": "message_user_inactive", "capability_profile": None}
+        current_profile = "owner" if row["role"] == "owner" else "member_read_only"
+        effective_profile = (
+            "member_read_only"
+            if "member_read_only" in {capability_profile, current_profile}
+            else "owner"
+        )
+        return {"allowed": True, "error_code": None, "capability_profile": effective_profile}
+
+    def update_conversation_link(self, digest: str | None, *, thread_short: str | None, job_id: str | None) -> None:
+        if not digest:
+            return
+        if thread_short is not None and not re_fullmatch_short("TH", thread_short):
+            thread_short = None
+        job_short = None if not job_id else self.short_id("JB", job_id)
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE conversation_links SET thread_short=COALESCE(?,thread_short),last_job_short=COALESCE(?,last_job_short),last_seen_at=? WHERE user_hash=?",
+                (thread_short, job_short, utc_now(), digest),
+            )
+
+    def invitation_summary(self) -> dict[str, int]:
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE pairing_invitations SET state='expired',updated_at=? WHERE state='waiting' AND expires_at<=?",
+                (now, now),
+            )
+            counts = {
+                row["state"]: int(row["count"])
+                for row in connection.execute("SELECT state,COUNT(*) AS count FROM pairing_invitations GROUP BY state")
+            }
+            return {state: counts.get(state, 0) for state in ("waiting", "claimed", "expired", "cancelled")}
+
+    def reset_access_directory_for_identity_replacement(self) -> int:
+        """Fail closed and remove principals that belong to a different bot identity."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = utc_now()
+            connection.execute(
+                "UPDATE inbound_messages SET state='failed',error_code='identity_replaced',updated_at=? WHERE state IN ('pending_controller','controller_submitted')",
+                (now,),
+            )
+            connection.execute("DELETE FROM conversation_links")
+            connection.execute("DELETE FROM pairing_invitations")
+            connection.execute("DELETE FROM weixin_users")
+            connection.execute("DELETE FROM admin_mutations")
+            return self._next_users_revision(connection)
+
+    def _user_row_by_short(self, connection: sqlite3.Connection, wx_short: str) -> sqlite3.Row:
+        if not isinstance(wx_short, str) or not re_fullmatch_short("WX", wx_short):
+            raise StoreError("user_not_found", "微信用户不存在", status=404)
+        for row in connection.execute("SELECT * FROM weixin_users"):
+            if hmac.compare_digest(self.short_id("WX", row["user_hash"]), wx_short):
+                return row
+        raise StoreError("user_not_found", "微信用户不存在", status=404)
+
+    def _invitation_by_short(self, connection: sqlite3.Connection, invite_short: str) -> sqlite3.Row:
+        if not isinstance(invite_short, str) or not re_fullmatch_short("IV", invite_short):
+            raise StoreError("invitation_not_found", "邀请码不存在", status=404)
+        for row in connection.execute("SELECT * FROM pairing_invitations"):
+            if hmac.compare_digest(self.short_id("IV", row["invite_id"]), invite_short):
+                return row
+        raise StoreError("invitation_not_found", "邀请码不存在", status=404)
+
+    def _public_user_document(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+        link = connection.execute("SELECT * FROM conversation_links WHERE user_hash=?", (row["user_hash"],)).fetchone()
+        return {
+            "wx_short": self.short_id("WX", row["user_hash"]),
+            "alias": row["alias"],
+            "role": row["role"],
+            "status": row["status"],
+            "revision": row["revision"],
+            "has_context": False,
+            "conversation_short": None if link is None else link["conversation_short"],
+            "thread_short": None if link is None else link["thread_short"],
+            "last_job_short": None if link is None else link["last_job_short"],
+            "last_seen_at": row["last_seen_at"],
+        }
+
+    @staticmethod
+    def _private_user_document(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "user_hash": row["user_hash"],
+            "private_user_id": row["private_user_id"],
+            "conversation_key": row["conversation_key"],
+            "alias": row["alias"],
+            "role": row["role"],
+            "status": row["status"],
+            "revision": row["revision"],
+            "last_seen_at": row["last_seen_at"],
+        }
 
     def message_exists(self, message_id: str) -> bool:
         with self._connect() as connection:
@@ -462,7 +1218,11 @@ class GatewayStore:
         conversation_key: str,
         text: str,
         media: list[tuple[dict[str, Any], bytes]],
+        user_digest: str | None = None,
+        capability_profile: str = "owner_legacy",
     ) -> dict[str, Any]:
+        if capability_profile not in {"owner", "owner_legacy", "member_read_only"}:
+            raise StoreError("capability_profile_invalid", "会话权限画像无效")
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -474,8 +1234,8 @@ class GatewayStore:
             created_targets: list[Path] = []
             try:
                 connection.execute(
-                    "INSERT INTO inbound_messages(message_id,sender_id,conversation_key,text,attachments_json,state,received_at,updated_at) VALUES (?,?,?,?,?,'pending_controller',?,?)",
-                    (message_id, sender_id, conversation_key, text, "[]", now, now),
+                    "INSERT INTO inbound_messages(message_id,sender_id,conversation_key,text,attachments_json,state,received_at,updated_at,user_hash,capability_profile) VALUES (?,?,?,?,?,'pending_controller',?,?,?,?)",
+                    (message_id, sender_id, conversation_key, text, "[]", now, now, user_digest, capability_profile),
                 )
                 for spec, content in media:
                     digest = hashlib.sha256(content).hexdigest()
@@ -654,4 +1414,6 @@ class GatewayStore:
             "controller_job_id": row["controller_job_id"],
             "received_at": row["received_at"],
             "error_code": row["error_code"],
+            "user_hash": row["user_hash"],
+            "capability_profile": row["capability_profile"],
         }

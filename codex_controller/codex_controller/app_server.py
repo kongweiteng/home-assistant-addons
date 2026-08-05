@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,8 @@ import queue
 import subprocess
 import threading
 from typing import Any, Callable
+
+from .tool_catalog import LEDGER_TOOLS, OPERATIONS_TOOLS, RENOVATION_TOOLS, TOOL_BY_NAME
 
 
 class AppServerError(RuntimeError):
@@ -25,10 +28,11 @@ class AppServerClient:
     """Owns one app-server process and its request/notification correlation."""
 
     BASE_DEVELOPER_INSTRUCTIONS = (
-        "你通过微信作为所有者的通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
+        "你通过微信作为通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
         "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，才使用已配置的结构化 MCP 工具；"
         "当前运行能力必须以本轮 MCP 工具目录和实际只读调用结果为准，不得沿用历史对话中的旧 Mac 代理、Hermes 或未接入判断。"
-        "不得使用 Shell、任意文件路径或自然语言绕过审批。不要输出内部推理、Token、路径或工具秘密。"
+        "不得使用 Shell、任意文件路径或自然语言绕过 Controller、Renovation Hub 或 Operations Broker 的服务端门禁。"
+        "不要输出内部推理、Token、路径或工具秘密。"
     )
 
     SAFE_ENV_KEYS = {
@@ -60,7 +64,8 @@ class AppServerClient:
         self.command = command
         self.codex_home = Path(codex_home)
         self.workspace = Path(workspace)
-        self.developer_instructions = self.build_developer_instructions(available_tools or [])
+        self.developer_instructions = self.build_developer_instructions(available_tools or [], "owner_legacy")
+        self._instruction_lock = threading.Lock()
         self.notification_handler = notification_handler or (lambda _message: None)
         self.request_timeout = request_timeout
         self.process: subprocess.Popen[str] | None = None
@@ -69,7 +74,8 @@ class AppServerClient:
         self._pending_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._thread_load_lock = threading.Lock()
-        self._loaded_thread_ids: set[str] = set()
+        self._loaded_thread_contexts: dict[str, str] = {}
+        self._forkable_threads: set[str] = set()
         self._stopped = threading.Event()
         self._threads: list[threading.Thread] = []
         self._protocol_error: AppServerError | None = None
@@ -79,26 +85,68 @@ class AppServerClient:
         self.initialized = False
 
     @classmethod
-    def build_developer_instructions(cls, available_tools: list[str]) -> str:
+    def build_developer_instructions(
+        cls,
+        available_tools: list[str],
+        capability_profile: str = "owner_legacy",
+    ) -> str:
         enabled = set(available_tools)
         instructions = cls.BASE_DEVELOPER_INSTRUCTIONS
-        if {"ledger_summary", "ledger_query", "renovation_dashboard"}.issubset(enabled):
+        if capability_profile == "member_read_only":
             instructions += (
-                " 当前会话已配置 Renovation Hub 装修账本和装修档案工具。用户询问账本是否连接、是否可用、当前支出、汇总或明细时，"
-                "必须先调用 renovation_dashboard、ledger_summary、ledger_query 或其他合适的只读工具核验；"
-                "其中 ledger_summary、ledger_query 和 renovation_dashboard 是无副作用的只读工具。"
+                " 当前微信用户是成员，只允许普通对话和本轮目录中的确定性只读装修查询。"
+                "不得尝试账本写入、附件消费或归档、导入、Home Assistant Operations，也不得声称成员拥有管理员权限。"
+            )
+        else:
+            instructions += " 当前微信用户是所有者；写入和 Operations 仍必须遵守现有结构化工具、幂等、Passkey 和服务端门禁。"
+        hub_tools = sorted(enabled & set(LEDGER_TOOLS | RENOVATION_TOOLS))
+        hub_read_tools = sorted(name for name in hub_tools if TOOL_BY_NAME[name].read_only)
+        hub_write_tools = sorted(name for name in hub_tools if not TOOL_BY_NAME[name].read_only)
+        if hub_tools:
+            instructions += f" 当前会话已配置 Renovation Hub 工具：{', '.join(hub_tools)}。"
+            if capability_profile != "member_read_only":
+                instructions += (
+                    "所有者清晰提出查询、图表、导出、记账、退款、更正、撤销、导入检查或装修媒体/事件归档等请求时，"
+                    "该请求本身就是本次匹配结构化工具调用的授权，应直接执行，不得再询问是否确认、是否授权或要求 Codex 弹窗审批。"
+                    "只有缺少工具必填字段，或目标、金额、记录、附件、动作等语义确实存在多种合理解释时才澄清；"
+                    "讨论、假设、举例、方案比较或仅询问‘如果这样做会怎样’不得推断为写入指令。"
+                )
+        if hub_read_tools:
+            instructions += (
+                f" 当前可用于装修只读核验的工具是：{', '.join(hub_read_tools)}。"
+                "这些工具均是无副作用的只读工具。"
+                "用户询问账本或装修档案是否连接、是否可用、当前支出、汇总、明细、项目、阶段、空间或时间线时，"
+                "必须从本轮实际可用且与意图匹配的只读工具中选择；不得要求调用本轮目录中不存在的工具。"
                 "用户自然语言提出查询、查看、核验、汇总或明细请求，就已经授权本次只读调用，应直接执行，"
                 "不需要 Passkey、写入确认或额外征求授权，也不得转入 Home Assistant Operations 授权流程；"
                 "只有工具实际返回权限错误时才能说明权限不足。"
-                "只要工具调用可用，就不得回复‘未连接账本’，也不得要求用户重新发送现有账目。写账、退款、修改和撤销必须调用对应结构化工具。"
+                "只要存在与本次意图匹配的可用只读工具，就不得回复‘未连接账本’，也不得要求用户重新发送现有账目。"
             )
+        elif hub_tools:
+            instructions += " 当前会话只配置了 Renovation Hub 写入工具，没有可用的装修只读查询工具；不得用写工具冒充查询，也不得把部分能力缺失误报为整个 Hub 未连接。"
         else:
             instructions += " 当前会话未配置 Renovation Hub 工具时，才可以明确说明装修账本工具目录不可用。"
-        if "ha_operations_propose_restart" in enabled:
+        if hub_write_tools:
+            instructions += f" 当前可用的装修写入工具是：{', '.join(hub_write_tools)}；写账、退款、修改、撤销或归档必须调用匹配的结构化工具并遵守服务端门禁。"
+        operation_tools = sorted(enabled & set(OPERATIONS_TOOLS))
+        if operation_tools:
             instructions += (
-                " 当前会话已配置受控 Home Assistant Operations 工具，但每次写操作仍必须遵守不可变提案、Passkey、精确白名单和执行门禁。"
+                f" 当前会话已配置受控 Home Assistant Operations 工具：{', '.join(operation_tools)}。"
+                "这些工具调用不依赖 Codex UI 审批；但真正执行仍必须经过 Broker 的不可变提案、Passkey、一次性收据、精确白名单和 execution gate，"
+                "任何工具预批准都不是对实际 Home Assistant 变更的授权。"
             )
         return instructions
+
+    def configure_developer_context(self, available_tools: list[str], capability_profile: str) -> None:
+        if capability_profile not in {"owner_legacy", "owner", "member_read_only"}:
+            raise AppServerError("invalid_capability_profile", "作业能力画像无效", definitive=True)
+        instructions = self.build_developer_instructions(available_tools, capability_profile)
+        with self._instruction_lock:
+            self.developer_instructions = instructions
+
+    def current_developer_instructions(self) -> str:
+        with self._instruction_lock:
+            return self.developer_instructions
 
     def build_child_env(self, source: dict[str, str] | None = None) -> dict[str, str]:
         original = os.environ if source is None else source
@@ -116,7 +164,8 @@ class AppServerClient:
         if self.process is not None and self.process.poll() is None:
             return
         with self._thread_load_lock:
-            self._loaded_thread_ids.clear()
+            self._loaded_thread_contexts.clear()
+            self._forkable_threads.clear()
         self.codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.workspace.mkdir(parents=True, mode=0o700, exist_ok=True)
         self._stopped.clear()
@@ -141,7 +190,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.1.9"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.0"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -167,7 +216,8 @@ class AppServerClient:
             thread.join(timeout=1)
         self._threads = []
         with self._thread_load_lock:
-            self._loaded_thread_ids.clear()
+            self._loaded_thread_contexts.clear()
+            self._forkable_threads.clear()
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if self.process is None or self.process.poll() is not None:
@@ -254,40 +304,57 @@ class AppServerClient:
 
     def start_thread(self) -> str:
         with self._thread_load_lock:
-            result = self.request(
-                "thread/start",
-                {
-                    "cwd": str(self.workspace),
-                    "sandbox": "read-only",
-                    "approvalPolicy": "never",
-                    "developerInstructions": self.developer_instructions,
-                },
-            )
-            thread = result.get("thread") if isinstance(result, dict) else None
-            thread_id = thread.get("id") if isinstance(thread, dict) else None
-            if not isinstance(thread_id, str) or not thread_id:
-                raise AppServerError("thread_unavailable", "thread/start 未返回 Thread ID")
-            self._loaded_thread_ids.add(thread_id)
-            return thread_id
+            return self._start_thread_locked()
 
-    def resume_thread(self, thread_id: str) -> None:
+    def _start_thread_locked(self) -> str:
+        result = self.request(
+            "thread/start",
+            {
+                "cwd": str(self.workspace),
+                "sandbox": "read-only",
+                "approvalPolicy": "never",
+                "developerInstructions": self.current_developer_instructions(),
+            },
+        )
+        thread = result.get("thread") if isinstance(result, dict) else None
+        thread_id = thread.get("id") if isinstance(thread, dict) else None
+        if not isinstance(thread_id, str) or not thread_id:
+            raise AppServerError("thread_unavailable", "thread/start 未返回 Thread ID")
+        self._loaded_thread_contexts[thread_id] = self._developer_context_fingerprint()
+        self._forkable_threads.discard(thread_id)
+        return thread_id
+
+    def resume_thread(self, thread_id: str) -> str:
         with self._thread_load_lock:
-            if thread_id in self._loaded_thread_ids:
-                return
-            result = self.request(
-                "thread/resume",
-                {
-                    "threadId": thread_id,
-                    "cwd": str(self.workspace),
-                    "sandbox": "read-only",
-                    "approvalPolicy": "never",
-                    "developerInstructions": self.developer_instructions,
-                },
-            )
+            fingerprint = self._developer_context_fingerprint()
+            loaded_fingerprint = self._loaded_thread_contexts.get(thread_id)
+            method = "thread/resume" if loaded_fingerprint is None else "thread/fork"
+            if loaded_fingerprint == fingerprint:
+                return thread_id
+            if loaded_fingerprint is not None and thread_id not in self._forkable_threads:
+                return self._start_thread_locked()
+            params = {
+                "threadId": thread_id,
+                "cwd": str(self.workspace),
+                "sandbox": "read-only",
+                "approvalPolicy": "never",
+                "developerInstructions": self.current_developer_instructions(),
+            }
+            result = self.request(method, params)
             thread = result.get("thread") if isinstance(result, dict) else None
-            if not isinstance(thread, dict) or thread.get("id") != thread_id:
+            loaded_thread_id = thread.get("id") if isinstance(thread, dict) else None
+            if not isinstance(loaded_thread_id, str) or not loaded_thread_id:
+                raise AppServerError("thread_unavailable", f"{method} 未返回 Thread ID")
+            if method == "thread/resume" and loaded_thread_id != thread_id:
                 raise AppServerError("thread_unavailable", "thread/resume 返回不匹配")
-            self._loaded_thread_ids.add(thread_id)
+            if method == "thread/fork" and loaded_thread_id == thread_id:
+                raise AppServerError("thread_unavailable", "thread/fork 未生成新 Thread")
+            self._loaded_thread_contexts[loaded_thread_id] = fingerprint
+            self._forkable_threads.add(loaded_thread_id)
+            return loaded_thread_id
+
+    def _developer_context_fingerprint(self) -> str:
+        return hashlib.sha256(self.current_developer_instructions().encode("utf-8")).hexdigest()
 
     def start_turn(
         self,
@@ -310,6 +377,8 @@ class AppServerClient:
         turn_id = turn.get("id") if isinstance(turn, dict) else None
         if not isinstance(turn_id, str) or not turn_id:
             raise AppServerError("turn_state_unknown", "turn/start 未返回 Turn ID")
+        with self._thread_load_lock:
+            self._forkable_threads.add(thread_id)
         return turn_id
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> Any:

@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
 from typing import Any
 import uuid
 
+from .tool_catalog import ALL_TOOL_NAMES, TOOL_DEFINITIONS
+
 
 CONVERSATION_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+CAPABILITY_PROFILES = frozenset({"owner_legacy", "owner", "member_read_only"})
 ACTIVE_STATES = ("queued", "running", "recovery_required")
 FINAL_STATES = ("completed", "failed", "cancelled")
 RECOVERY_RESOLUTIONS = {
@@ -60,6 +67,10 @@ class ControllerStore:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
+            existing_tables = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -84,6 +95,8 @@ class ControllerStore:
                     result_text TEXT,
                     error_code TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0,
+                    capability_profile TEXT NOT NULL DEFAULT 'owner_legacy'
+                        CHECK(capability_profile IN ('owner_legacy','owner','member_read_only')),
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -100,8 +113,65 @@ class ControllerStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id)
                 );
+                CREATE TABLE IF NOT EXISTS controller_meta (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    display_secret BLOB NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tool_policy_meta (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    catalog_revision INTEGER NOT NULL CHECK(catalog_revision >= 1),
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tool_policies (
+                    tool_name TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                    revision INTEGER NOT NULL CHECK(revision >= 1),
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS admin_mutations (
+                    request_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    request_digest TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS tool_invocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name TEXT NOT NULL,
+                    outcome TEXT NOT NULL CHECK(outcome IN ('succeeded','rejected','failed')),
+                    error_code TEXT,
+                    duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS tool_invocations_name_created_idx
+                    ON tool_invocations(tool_name, created_at DESC, id DESC);
+                CREATE TABLE IF NOT EXISTS mcp_catalog_observation (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    catalog_revision INTEGER,
+                    published_tools_json TEXT NOT NULL,
+                    error_code TEXT,
+                    observed_at TEXT NOT NULL
+                );
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+            if "capability_profile" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN capability_profile TEXT NOT NULL DEFAULT 'owner_legacy'"
+                )
+            now = utc_now()
+            if "controller_meta" not in existing_tables:
+                connection.execute(
+                    "INSERT INTO controller_meta(id,display_secret,created_at) VALUES (1,?,?)",
+                    (os.urandom(32), now),
+                )
+            if "tool_policy_meta" not in existing_tables:
+                connection.execute(
+                    "INSERT INTO tool_policy_meta(id,catalog_revision,updated_at) VALUES (1,1,?)",
+                    (now,),
+                )
+        os.chmod(self.database_path, 0o600)
 
     @staticmethod
     def validate_job(payload: dict[str, Any]) -> dict[str, Any]:
@@ -113,6 +183,7 @@ class ControllerStore:
         received_at = payload.get("received_at")
         attachments = payload.get("attachments")
         reply_capabilities = payload.get("reply_capabilities")
+        capability_profile = payload.get("capability_profile", "owner_legacy")
         if not isinstance(message_id, str) or not 1 <= len(message_id) <= 256:
             raise StoreError("invalid_job", "message_id 无效")
         if not isinstance(conversation_key, str) or not CONVERSATION_RE.fullmatch(conversation_key):
@@ -150,6 +221,8 @@ class ControllerStore:
             )
         if not isinstance(reply_capabilities, list) or not set(reply_capabilities).issubset({"text", "image", "file"}):
             raise StoreError("invalid_job", "reply_capabilities 无效")
+        if "capability_profile" in payload and capability_profile not in {"owner", "member_read_only"}:
+            raise StoreError("invalid_capability_profile", "作业能力画像无效")
         return {
             "version": 1,
             "message_id": message_id,
@@ -158,6 +231,7 @@ class ControllerStore:
             "text": text,
             "attachments": normalized_attachments,
             "reply_capabilities": sorted(set(reply_capabilities)),
+            "capability_profile": capability_profile,
         }
 
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -183,8 +257,17 @@ class ControllerStore:
             )
             job_id = str(uuid.uuid4())
             connection.execute(
-                "INSERT INTO jobs(job_id,message_id,conversation_key,state,input_digest,input_json,created_at) VALUES (?,?,?,?,?,?,?)",
-                (job_id, normalized["message_id"], normalized["conversation_key"], "queued", digest, serialized, now),
+                "INSERT INTO jobs(job_id,message_id,conversation_key,state,input_digest,input_json,capability_profile,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    job_id,
+                    normalized["message_id"],
+                    normalized["conversation_key"],
+                    "queued",
+                    digest,
+                    serialized,
+                    normalized["capability_profile"],
+                    now,
+                ),
             )
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             self._event(connection, job_id, "queued")
@@ -382,13 +465,301 @@ class ControllerStore:
         with self._connect() as connection:
             counts = {row["state"]: row["count"] for row in connection.execute("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state")}
             active = connection.execute(
-                "SELECT job_id,message_id,thread_id,turn_id,state,started_at FROM jobs WHERE state='running' LIMIT 1"
+                "SELECT job_id,conversation_key,thread_id,turn_id,state,started_at,capability_profile FROM jobs WHERE state='running' LIMIT 1"
             ).fetchone()
             return {
                 "jobs": {state: counts.get(state, 0) for state in (*ACTIVE_STATES, *FINAL_STATES)},
                 "threads": connection.execute("SELECT COUNT(*) FROM conversations WHERE thread_id IS NOT NULL").fetchone()[0],
-                "active_job": None if active is None else dict(active),
+                "active_job": None
+                if active is None
+                else {
+                    "job_short": self.short_id("JB", active["job_id"], connection=connection),
+                    "conversation_short": self.short_id("CV", active["conversation_key"], connection=connection),
+                    "thread_short": self.short_id("TH", active["thread_id"], connection=connection),
+                    "turn_short": self.short_id("TN", active["turn_id"], connection=connection),
+                    "state": active["state"],
+                    "started_at": active["started_at"],
+                },
             }
+
+    def short_id(
+        self,
+        prefix: str,
+        value: str | None,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str | None:
+        if not value:
+            return None
+        if not re.fullmatch(r"[A-Z]{2}", prefix):
+            raise ValueError("短标识前缀无效")
+        owns_connection = connection is None
+        active = self._connect() if connection is None else connection
+        try:
+            row = active.execute("SELECT display_secret FROM controller_meta WHERE id=1").fetchone()
+            if row is None or not isinstance(row["display_secret"], bytes) or len(row["display_secret"]) != 32:
+                raise StoreError("display_secret_invalid", "Controller 短标识密钥不可用", status=503)
+            digest = hmac.new(row["display_secret"], f"{prefix}\n{value}".encode("utf-8"), hashlib.sha256).digest()
+            token = base64.b32encode(digest).decode("ascii").rstrip("=")[:10]
+            return f"{prefix}-{token}"
+        finally:
+            if owns_connection:
+                active.close()
+
+    def public_job(self, document: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "job_id": document["job_id"],
+            "job_short": self.short_id("JB", document.get("job_id")),
+            "conversation_short": self.short_id("CV", document.get("conversation_key")),
+            "thread_short": self.short_id("TH", document.get("thread_id")),
+            "turn_short": self.short_id("TN", document.get("turn_id")),
+            "state": document["state"],
+            "queue_position": document.get("queue_position"),
+            "result": document.get("result"),
+            "error_code": document.get("error_code"),
+            "attempt": document.get("attempt"),
+            "created_at": document.get("created_at"),
+            "started_at": document.get("started_at"),
+            "finished_at": document.get("finished_at"),
+        }
+
+    def get_public_job(self, job_id: str) -> dict[str, Any]:
+        return self.public_job(self.get_job(job_id))
+
+    def tool_policy_snapshot(self) -> dict[str, Any]:
+        try:
+            with self._connect() as connection:
+                meta_rows = connection.execute(
+                    "SELECT catalog_revision FROM tool_policy_meta WHERE id=1"
+                ).fetchall()
+                if len(meta_rows) != 1 or not isinstance(meta_rows[0]["catalog_revision"], int):
+                    raise StoreError("tool_policy_invalid", "工具策略元数据损坏", status=503)
+                revision = meta_rows[0]["catalog_revision"]
+                if revision < 1:
+                    raise StoreError("tool_policy_invalid", "工具策略版本损坏", status=503)
+                enabled = set(ALL_TOOL_NAMES)
+                rows = connection.execute(
+                    "SELECT tool_name,enabled,revision FROM tool_policies ORDER BY tool_name"
+                ).fetchall()
+                for row in rows:
+                    if row["tool_name"] not in ALL_TOOL_NAMES:
+                        raise StoreError("tool_policy_invalid", "工具策略包含未知工具", status=503)
+                    if row["enabled"] not in (0, 1) or not isinstance(row["revision"], int):
+                        raise StoreError("tool_policy_invalid", "工具策略值损坏", status=503)
+                    if row["revision"] < 1 or row["revision"] > revision:
+                        raise StoreError("tool_policy_invalid", "工具策略版本越界", status=503)
+                    if row["enabled"] == 0:
+                        enabled.discard(row["tool_name"])
+                return {"revision": revision, "enabled": frozenset(enabled)}
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("tool_policy_invalid", "工具策略读取失败", status=503) from exc
+
+    def tool_catalog_revision(self) -> int:
+        return int(self.tool_policy_snapshot()["revision"])
+
+    def update_tool_policy(
+        self,
+        tool_name: str,
+        *,
+        enabled: bool,
+        revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if tool_name not in ALL_TOOL_NAMES:
+            raise StoreError("tool_not_found", "工具不存在", status=404)
+        if not isinstance(enabled, bool):
+            raise StoreError("invalid_tool_policy", "enabled 必须是布尔值")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise StoreError("invalid_tool_policy", "revision 无效")
+        if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
+            raise StoreError("invalid_request_id", "request_id 无效")
+        request_document = {
+            "scope": f"tool_policy:{tool_name}",
+            "enabled": enabled,
+            "revision": revision,
+        }
+        request_digest = hashlib.sha256(canonical_json(request_document).encode("utf-8")).hexdigest()
+        now = utc_now()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                replay = connection.execute(
+                    "SELECT request_digest,response_json FROM admin_mutations WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+                if replay is not None:
+                    if replay["request_digest"] != request_digest:
+                        raise StoreError("idempotency_conflict", "request_id 已用于不同管理请求", status=409)
+                    return json.loads(replay["response_json"])
+                meta = connection.execute(
+                    "SELECT catalog_revision FROM tool_policy_meta WHERE id=1"
+                ).fetchone()
+                if meta is None or not isinstance(meta["catalog_revision"], int) or meta["catalog_revision"] < 1:
+                    raise StoreError("tool_policy_invalid", "工具策略元数据损坏", status=503)
+                current_revision = meta["catalog_revision"]
+                for row in connection.execute(
+                    "SELECT tool_name,enabled,revision FROM tool_policies"
+                ):
+                    if row["tool_name"] not in ALL_TOOL_NAMES:
+                        raise StoreError("tool_policy_invalid", "工具策略包含未知工具", status=503)
+                    if row["enabled"] not in (0, 1) or not isinstance(row["revision"], int):
+                        raise StoreError("tool_policy_invalid", "工具策略值损坏", status=503)
+                    if row["revision"] < 1 or row["revision"] > current_revision:
+                        raise StoreError("tool_policy_invalid", "工具策略版本越界", status=503)
+                if current_revision != revision:
+                    raise StoreError("revision_conflict", "工具目录版本已变化，请刷新后重试", status=409)
+                next_revision = current_revision + 1
+                connection.execute(
+                    "INSERT INTO tool_policies(tool_name,enabled,revision,updated_at) VALUES (?,?,?,?) "
+                    "ON CONFLICT(tool_name) DO UPDATE SET enabled=excluded.enabled,revision=excluded.revision,updated_at=excluded.updated_at",
+                    (tool_name, int(enabled), next_revision, now),
+                )
+                connection.execute(
+                    "UPDATE tool_policy_meta SET catalog_revision=?,updated_at=? WHERE id=1",
+                    (next_revision, now),
+                )
+                response = {
+                    "tool_name": tool_name,
+                    "enabled": enabled,
+                    "revision": next_revision,
+                    "request_id": request_id,
+                }
+                serialized = canonical_json(response)
+                connection.execute(
+                    "INSERT INTO admin_mutations(request_id,scope,request_digest,response_json,created_at) VALUES (?,?,?,?,?)",
+                    (request_id, f"tool_policy:{tool_name}", request_digest, serialized, now),
+                )
+                return response
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("tool_policy_invalid", "工具策略写入失败", status=503) from exc
+
+    def record_mcp_catalog(self, revision: int | None, tools: list[str]) -> dict[str, Any]:
+        if revision is not None and (not isinstance(revision, int) or isinstance(revision, bool) or revision < 1):
+            raise StoreError("invalid_catalog_observation", "MCP 目录版本无效")
+        if not isinstance(tools, list) or any(name not in ALL_TOOL_NAMES for name in tools):
+            raise StoreError("invalid_catalog_observation", "MCP 目录包含未知工具")
+        normalized = sorted(set(tools)) if revision is not None else []
+        error_code = None if revision is not None else "tool_policy_invalid"
+        observed_at = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO mcp_catalog_observation(id,catalog_revision,published_tools_json,error_code,observed_at) "
+                "VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "catalog_revision=excluded.catalog_revision,published_tools_json=excluded.published_tools_json,"
+                "error_code=excluded.error_code,observed_at=excluded.observed_at",
+                (revision, canonical_json(normalized), error_code, observed_at),
+            )
+        return {"revision": revision, "tools": normalized, "observed_at": observed_at, "error_code": error_code}
+
+    def record_tool_invocation(
+        self,
+        tool_name: str,
+        *,
+        outcome: str,
+        error_code: str | None,
+        duration_ms: int,
+    ) -> None:
+        if tool_name not in ALL_TOOL_NAMES or outcome not in {"succeeded", "rejected", "failed"}:
+            return
+        bounded_error = None
+        if isinstance(error_code, str) and re.fullmatch(r"[a-z0-9_]{1,64}", error_code):
+            bounded_error = error_code
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO tool_invocations(tool_name,outcome,error_code,duration_ms,created_at) VALUES (?,?,?,?,?)",
+                (tool_name, outcome, bounded_error, max(0, min(int(duration_ms), 86_400_000)), utc_now()),
+            )
+            connection.execute(
+                "DELETE FROM tool_invocations WHERE id NOT IN (SELECT id FROM tool_invocations ORDER BY id DESC LIMIT 1000)"
+            )
+
+    def tool_control_document(
+        self,
+        configured_names: set[str] | frozenset[str],
+        callable_names: set[str] | frozenset[str] | None = None,
+    ) -> dict[str, Any]:
+        configured = set(configured_names) & set(ALL_TOOL_NAMES)
+        route_ready = configured if callable_names is None else set(callable_names) & configured
+        policy_error: str | None = None
+        try:
+            snapshot = self.tool_policy_snapshot()
+            revision = snapshot["revision"]
+            enabled_names = set(snapshot["enabled"])
+        except StoreError as exc:
+            policy_error = exc.code
+            revision = None
+            enabled_names = set()
+        with self._connect() as connection:
+            observation = connection.execute(
+                "SELECT catalog_revision,published_tools_json,error_code,observed_at FROM mcp_catalog_observation WHERE id=1"
+            ).fetchone()
+            latest_rows = connection.execute(
+                "SELECT tool_name,outcome,error_code,duration_ms,created_at FROM tool_invocations ORDER BY id DESC"
+            ).fetchall()
+        latest: dict[str, dict[str, Any]] = {}
+        for row in latest_rows:
+            if row["tool_name"] not in latest:
+                latest[row["tool_name"]] = {
+                    "outcome": row["outcome"],
+                    "error_code": row["error_code"],
+                    "duration_ms": row["duration_ms"],
+                    "created_at": row["created_at"],
+                }
+        published_names: set[str] = set()
+        observed_revision = None
+        observed_at = None
+        observation_error = None
+        if observation is not None:
+            observed_revision = observation["catalog_revision"]
+            observed_at = observation["observed_at"]
+            observation_error = observation["error_code"]
+            try:
+                decoded = json.loads(observation["published_tools_json"])
+                if isinstance(decoded, list) and all(name in ALL_TOOL_NAMES for name in decoded):
+                    published_names = set(decoded)
+                else:
+                    observation_error = "catalog_observation_invalid"
+            except json.JSONDecodeError:
+                observation_error = "catalog_observation_invalid"
+        observation_current = revision is not None and observed_revision == revision and observation_error is None
+        tools = []
+        for definition in TOOL_DEFINITIONS:
+            is_configured = definition.name in configured
+            is_enabled = policy_error is None and definition.name in enabled_names
+            is_published = observation_current and definition.name in published_names
+            tools.append(
+                {
+                    **definition.public_metadata(),
+                    "known": True,
+                    "configured": is_configured,
+                    "enabled": is_enabled,
+                    "mcp_published": is_published,
+                    "callable": definition.name in route_ready and is_enabled,
+                    "waiting_for_mcp_refresh": is_configured and is_enabled and not is_published,
+                    "last_invocation": latest.get(definition.name),
+                }
+            )
+        return {
+            "revision": revision,
+            "policy_error": policy_error,
+            "mcp": {
+                "observed_revision": observed_revision,
+                "observed_at": observed_at,
+                "error_code": observation_error,
+                "current": observation_current,
+                "published_count": len(published_names) if observation_current else 0,
+            },
+            "summary": {
+                "known": len(TOOL_DEFINITIONS),
+                "configured": len(configured),
+                "enabled": len(enabled_names & configured),
+                "published": len(published_names & configured) if observation_current else 0,
+                "callable": len(enabled_names & route_ready),
+            },
+            "tools": tools,
+        }
 
     def _job_document(self, connection: sqlite3.Connection, row: sqlite3.Row, *, include_input: bool = False) -> dict[str, Any]:
         queue_position = None
@@ -408,6 +779,7 @@ class ControllerStore:
             "result": row["result_text"],
             "error_code": row["error_code"],
             "attempt": row["attempt"],
+            "capability_profile": row["capability_profile"],
             "created_at": row["created_at"],
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],

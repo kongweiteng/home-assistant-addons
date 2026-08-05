@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hmac
 import json
 import re
+import secrets
+import time
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -19,6 +22,10 @@ from .store import StoreError
 
 ATTACHMENT_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})$")
 ATTACHMENT_PREVIEW_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/preview$")
+USER_RE = re.compile(r"^/api/users/(WX-[A-Z2-7]{10})$")
+USER_ACTION_RE = re.compile(r"^/api/users/(WX-[A-Z2-7]{10})/(suspend|resume|revoke)$")
+INVITATION_CANCEL_RE = re.compile(r"^/api/users/invitations/(IV-[A-Z2-7]{10})/cancel$")
+CSRF_BUCKET_SECONDS = 15 * 60
 
 
 def create_server(
@@ -30,8 +37,16 @@ def create_server(
     attachment_api_token: str,
     max_request_bytes: int = 1024 * 1024,
 ) -> ThreadingHTTPServer:
+    csrf_secret = secrets.token_bytes(32)
+
+    def csrf_token(bucket: int | None = None) -> str:
+        current = int(time.time() // CSRF_BUCKET_SECONDS) if bucket is None else bucket
+        return base64.urlsafe_b64encode(
+            hmac.new(csrf_secret, f"gateway-admin:{current}".encode("ascii"), hashlib.sha256).digest()
+        ).decode("ascii").rstrip("=")
+
     class Handler(BaseHTTPRequestHandler):
-        server_version = "WeixinGateway/0.1.4"
+        server_version = "WeixinGateway/0.2.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -48,7 +63,15 @@ def create_server(
                 self._asset(HTTPStatus.OK, "text/javascript; charset=utf-8", DASHBOARD_JS.encode("utf-8"))
                 return
             if path == "/api/status":
-                self._json(HTTPStatus.OK, service.status())
+                document = service.status()
+                document["csrf_token"] = csrf_token()
+                self._json(HTTPStatus.OK, document)
+                return
+            if path == "/api/users":
+                self._json(HTTPStatus.OK, {"version": 1, "result": service.users()})
+                return
+            if path == "/api/conversations":
+                self._json(HTTPStatus.OK, {"version": 1, "result": service.conversations()})
                 return
             if path == "/api/qr/image":
                 qr = service.qr_image_path
@@ -83,6 +106,8 @@ def create_server(
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
+            if path.startswith("/api/") and not self._csrf_valid():
+                return
             payload = self._read_json(allow_empty=path in {"/api/qr/start", "/api/owner-pairing/start"})
             if payload is None:
                 return
@@ -102,7 +127,42 @@ def create_server(
                     )
                 )
                 return
+            if path == "/api/users/invitations":
+                self._call(lambda: service.create_member_invitation(payload))
+                return
+            invitation_match = INVITATION_CANCEL_RE.fullmatch(path)
+            if invitation_match:
+                self._call(lambda: service.cancel_member_invitation(invitation_match.group(1), payload))
+                return
+            action_match = USER_ACTION_RE.fullmatch(path)
+            if action_match:
+                self._async_call(service.change_user_state(action_match.group(1), action_match.group(2), payload))
+                return
+            if path == "/api/owner-transfer":
+                self._async_call(service.transfer_owner(payload))
+                return
             self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            path = urlsplit(self.path).path
+            if not self._csrf_valid():
+                return
+            payload = self._read_json()
+            if payload is None:
+                return
+            match = USER_RE.fullmatch(path)
+            if match:
+                self._call(lambda: service.update_user_alias(match.group(1), payload))
+                return
+            self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+
+        def _csrf_valid(self) -> bool:
+            actual = self.headers.get("X-CSRF-Token", "")
+            bucket = int(time.time() // CSRF_BUCKET_SECONDS)
+            if not any(hmac.compare_digest(actual, csrf_token(candidate)) for candidate in (bucket, bucket - 1)):
+                self._json(HTTPStatus.FORBIDDEN, {"error": {"code": "csrf_invalid", "message": "页面令牌已失效，请刷新后重试。"}})
+                return False
+            return True
 
         def _authorized(self) -> bool:
             expected = f"Bearer {attachment_api_token}"
@@ -194,12 +254,32 @@ def create_server(
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>微信网关</title>
-<style>body{margin:0;background:#0b1220;color:#edf4ff;font:15px system-ui}main{max-width:960px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:#121c2e;border:1px solid #263751;border-radius:12px;padding:16px}b{font-size:22px;display:block;margin-top:8px}.muted{color:#91a4bd}code{color:#42d392}button{border:0;border-radius:9px;padding:10px 14px;background:#2374e1;color:white;cursor:pointer}img{max-width:320px;background:white;padding:12px;border-radius:12px}</style></head>
-<body><main><h1>微信网关</h1><p class="muted">最小 iLink 传输层；模型、账本和 HA 权限均不在本 Add-on。</p>
-<div class="grid"><div class="card">Poller<b id="poller">加载中</b></div><div class="card">身份<b id="identity">加载中</b></div><div class="card">Owner 绑定<b id="pairing">加载中</b></div><div class="card">待提交<b id="pending">-</b></div><div class="card">待回复<b id="submitted">-</b></div></div>
-<h2>二维码登录</h2><p>重新扫码会生成当前有效的 iLink 机器人身份；旧身份可能随即失效。</p><button id="qrStart">生成二维码</button><p id="qrState" class="muted">尚未生成</p><img id="qrImage" hidden alt="iLink 登录二维码">
-<h2>新身份 Owner 绑定</h2><p>Poller 显示 <code>pairing</code> 时生成一次性绑定码，并由 owner 在新机器人私聊中原样发送。绑定消息不会进入 Codex。</p><button id="pairStart">生成一次性绑定码</button><p class="muted">绑定码：<code id="pairCode">尚未生成</code></p>
-<h2>安全状态</h2><p id="details" class="muted">加载中</p><script src="app.js"></script></main></body></html>"""
+<style>body{margin:0;background:#0b1220;color:#edf4ff;font:15px system-ui}main{max-width:1120px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.card,.panel{background:#121c2e;border:1px solid #263751;border-radius:12px;padding:16px}.panel{margin-top:16px}b{font-size:22px;display:block;margin-top:8px}.muted{color:#91a4bd}.ok{color:#42d392}.warn{color:#ffcb6b}.error{color:#ff7b8b}code{color:#42d392}button{border:0;border-radius:9px;padding:9px 12px;background:#2374e1;color:white;cursor:pointer;margin:2px}button.secondary{background:#314158}button.danger{background:#a83c4b}button:disabled{opacity:.45;cursor:not-allowed}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #263751;vertical-align:top}.scroll{overflow:auto}.badge{display:inline-block;padding:3px 7px;border-radius:999px;background:#263751;font-size:12px}img{max-width:320px;background:white;padding:12px;border-radius:12px}.actions{display:flex;flex-wrap:wrap;gap:4px}.banner{min-height:22px;margin:10px 0}</style></head>
+<body><main><h1>微信网关</h1><p class="muted">一套 iLink 机器人身份、一个 Poller；每位私聊用户拥有独立会话和 Codex Thread。模型、账本和 HA 权限不在本 Add-on。</p><p id="banner" class="banner muted">正在加载安全状态…</p>
+<div class="grid"><div class="card">Poller<b id="poller">加载中</b></div><div class="card">身份<b id="identity">加载中</b></div><div class="card">Owner 绑定<b id="pairing">加载中</b></div><div class="card">有效用户<b id="activeUsers">-</b></div><div class="card">待提交<b id="pending">-</b></div><div class="card">待回复<b id="submitted">-</b></div></div>
+<section class="panel"><h2>多用户接入</h2><p>邀请码为一次性高熵口令，明文只显示一次、15 分钟过期。新成员默认仅允许普通讨论和已批准的装修只读查询，不获得记账写入、Operations 或主动通知权限。</p><button id="inviteStart">生成成员邀请码</button><button id="inviteCancel" class="secondary" disabled>取消本次邀请码</button><p>本次邀请码：<code id="inviteCode">尚未生成</code></p><p id="inviteState" class="muted">等待中的邀请码：0</p></section>
+<section class="panel"><h2>微信用户管理</h2><div class="scroll"><table><thead><tr><th>用户</th><th>角色/状态</th><th>会话标识</th><th>Thread</th><th>最近活动</th><th>操作</th></tr></thead><tbody id="usersBody"></tbody></table></div><p class="muted">页面只展示 HMAC 短标识，不展示原始微信 ID、完整 conversation key、Thread/job ID 或邀请码历史。</p></section>
+<section class="panel"><h2>会话排障</h2><div class="scroll"><table><thead><tr><th>用户</th><th>会话</th><th>Thread</th><th>最近作业</th><th>最近活动</th></tr></thead><tbody id="conversationsBody"></tbody></table></div></section>
+<section class="panel"><h2>二维码登录</h2><p>重新扫码会生成当前有效的 iLink 机器人身份；旧身份可能随即失效。</p><button id="qrStart">生成二维码</button><p id="qrState" class="muted">尚未生成</p><img id="qrImage" hidden alt="iLink 登录二维码"></section>
+<section class="panel"><h2>新身份 Owner 绑定</h2><p>Poller 显示 <code>pairing</code> 时生成一次性绑定码，并由 owner 在新机器人私聊中原样发送。绑定消息不会进入 Codex。</p><button id="pairStart">生成一次性绑定码</button><p>绑定码：<code id="pairCode">尚未生成</code></p></section>
+<section class="panel"><h2>安全状态</h2><p id="details" class="muted">加载中</p></section><script src="app.js"></script></main></body></html>"""
 
 
-DASHBOARD_JS = r"""const q=id=>document.getElementById(id);async function refresh(){try{const r=await fetch('api/status',{cache:'no-store'}),s=await r.json();q('poller').textContent=s.poller_state;q('identity').textContent=s.identity?'已就绪':'缺少';q('pairing').textContent=s.owner_pairing?.state||'不可用';q('pending').textContent=s.queue.messages.pending_controller;q('submitted').textContent=s.queue.messages.controller_submitted;q('qrState').textContent=s.qr.state;q('qrImage').hidden=!s.qr.has_image;if(s.qr.has_image)q('qrImage').src='api/qr/image?'+Date.now();q('details').textContent=`Controller ${s.controller_configured?'已配置':'未配置'} · allowlist ${s.identity?.allowed_user_count??0} · context ${s.identity?.context_count??0} · spool ${s.queue.spool_bytes} bytes · error ${s.last_error||'无'}`}catch(e){q('details').textContent=e.message}}q('qrStart').onclick=async()=>{try{const r=await fetch('api/qr/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),j=await r.json();if(!r.ok)throw new Error(j.error?.message||'生成失败');await refresh()}catch(e){alert(e.message)}};q('pairStart').onclick=async()=>{try{const r=await fetch('api/owner-pairing/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),j=await r.json();if(!r.ok)throw new Error(j.error?.message||'生成失败');q('pairCode').textContent=j.result.code;await refresh()}catch(e){alert(e.message)}};refresh();setInterval(refresh,3000);"""
+DASHBOARD_JS = r"""const q=id=>document.getElementById(id);let csrf='',revision=0,currentInvite='';
+const requestId=()=>globalThis.crypto?.randomUUID?.().replaceAll('-','')||`${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const cell=text=>{const td=document.createElement('td');td.textContent=text??'—';return td};
+const button=(label,kind,handler)=>{const value=document.createElement('button');value.textContent=label;if(kind)value.className=kind;value.onclick=handler;return value};
+function banner(message,kind='muted'){q('banner').textContent=message;q('banner').className=`banner ${kind}`}
+async function readJson(path){const response=await fetch(path,{cache:'no-store'}),document=await response.json();if(!response.ok)throw new Error(document.error?.message||document.error?.code||'读取失败');return document.result??document}
+async function mutate(path,method,payload){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(payload)}),document=await response.json();if(!response.ok)throw new Error(document.error?.message||document.error?.code||'操作失败');return document.result}
+async function userAction(user,action){try{const result=await mutate(`api/users/${user.wx_short}/${action}`,'POST',{revision,request_id:requestId()});revision=result.revision;banner('用户状态已更新','ok');await refresh()}catch(error){banner(error.message,'error')}}
+async function rename(user){const alias=prompt('输入新的用户别名',user.alias);if(alias===null)return;try{const result=await mutate(`api/users/${user.wx_short}`,'PATCH',{alias,revision,request_id:requestId()});revision=result.revision;banner('别名已更新','ok');await refresh()}catch(error){banner(error.message,'error')}}
+async function transfer(user){const confirmation=prompt(`确认把 Owner 转移给 ${user.alias}？请输入 TRANSFER_OWNER`,'');if(confirmation===null)return;try{const result=await mutate('api/owner-transfer','POST',{target_wx_short:user.wx_short,confirmation,revision,request_id:requestId()});revision=result.revision;banner('Owner 已原子转移，主动通知接收人同步更新','ok');await refresh()}catch(error){banner(error.message,'error')}}
+function renderUsers(users){const body=q('usersBody');body.replaceChildren();if(!users.length){const row=document.createElement('tr');const td=cell('尚无用户');td.colSpan=6;row.append(td);body.append(row);return}for(const user of users){const row=document.createElement('tr');row.append(cell(`${user.alias}\n${user.wx_short}`),cell(`${user.role} / ${user.status}${user.has_context?' / context 已有':' / context 缺少'}`),cell(user.conversation_short),cell(user.thread_short),cell(user.last_seen_at));const actions=document.createElement('td'),wrap=document.createElement('div');wrap.className='actions';wrap.append(button('改名','secondary',()=>rename(user)));if(user.role==='member'&&user.status==='active'){wrap.append(button('暂停','secondary',()=>userAction(user,'suspend')),button('移除','danger',()=>userAction(user,'revoke')),button('转为 Owner','',()=>transfer(user)))}else if(user.role==='member'&&user.status==='suspended'){wrap.append(button('恢复','',()=>userAction(user,'resume')),button('移除','danger',()=>userAction(user,'revoke')))}actions.append(wrap);row.append(actions);body.append(row)}}
+function renderConversations(items){const body=q('conversationsBody');body.replaceChildren();if(!items.length){const row=document.createElement('tr');const td=cell('尚无会话');td.colSpan=5;row.append(td);body.append(row);return}for(const item of items){const row=document.createElement('tr');row.append(cell(`${item.alias} · ${item.wx_short}`),cell(item.conversation_short),cell(item.thread_short),cell(item.last_job_short),cell(item.last_seen_at));body.append(row)}}
+async function refresh(){try{const [status,users,conversations]=await Promise.all([readJson('api/status'),readJson('api/users'),readJson('api/conversations')]);csrf=status.csrf_token;revision=users.revision;q('poller').textContent=status.poller_state;q('identity').textContent=status.identity?'已就绪':'缺少';q('pairing').textContent=status.owner_pairing?.state||'不可用';q('activeUsers').textContent=`${status.users.active} / ${status.users.total}`;q('pending').textContent=status.queue.messages.pending_controller;q('submitted').textContent=status.queue.messages.controller_submitted;q('qrState').textContent=status.qr.state;q('qrImage').hidden=!status.qr.has_image;if(status.qr.has_image)q('qrImage').src=`api/qr/image?${Date.now()}`;q('inviteState').textContent=`等待 ${status.invitations.waiting} · 已领取 ${status.invitations.claimed} · 过期 ${status.invitations.expired}`;q('details').textContent=`Controller ${status.controller_configured?'已配置':'未配置'} · capability ${status.controller_capability_state} · 单 owner 镜像 ${status.identity?.allowed_user_count??0} · context ${status.identity?.context_count??0} · spool ${status.queue.spool_bytes} bytes · error ${status.last_error||'无'}`;renderUsers(users.users);renderConversations(conversations.conversations);banner('状态已刷新','ok')}catch(error){banner(error.message,'error');q('details').textContent='状态读取失败'}}
+q('inviteStart').onclick=async()=>{try{const result=await mutate('api/users/invitations','POST',{revision,request_id:requestId(),ttl_seconds:900});q('inviteCode').textContent=result.code||'该请求已处理，邀请码明文不会再次显示';currentInvite=result.invite_short;q('inviteCancel').disabled=!currentInvite;revision=result.revision;banner('成员邀请码已生成，请通过可信渠道一次性提供给新成员','warn');await refresh()}catch(error){banner(error.message,'error')}};
+q('inviteCancel').onclick=async()=>{if(!currentInvite)return;try{const result=await mutate(`api/users/invitations/${currentInvite}/cancel`,'POST',{revision,request_id:requestId()});revision=result.revision;currentInvite='';q('inviteCancel').disabled=true;q('inviteCode').textContent='已取消';banner('邀请码已取消','ok');await refresh()}catch(error){banner(error.message,'error')}};
+q('qrStart').onclick=async()=>{try{await mutate('api/qr/start','POST',{});await refresh()}catch(error){banner(error.message,'error')}};
+q('pairStart').onclick=async()=>{try{const result=await mutate('api/owner-pairing/start','POST',{});q('pairCode').textContent=result.code;await refresh()}catch(error){banner(error.message,'error')}};
+refresh();setInterval(refresh,5000);"""

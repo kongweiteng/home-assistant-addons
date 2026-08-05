@@ -80,7 +80,44 @@ class ControllerService:
     def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.intake_enabled:
             raise StoreError("intake_disabled", "正式任务入口尚未启用", status=409)
-        return self.store.create_job(payload)
+        return self.store.public_job(self.store.create_job(payload))
+
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "capabilities": [
+                "job_capability_profile_v1",
+                "thread_short_v1",
+                "mcp_tool_policy_v1",
+            ],
+        }
+
+    def tool_status(self) -> dict[str, Any]:
+        configured = (
+            self.tool_context.configured_tools()
+            if self.tool_context is not None and hasattr(self.tool_context, "configured_tools")
+            else frozenset()
+        )
+        callable_names = (
+            self.tool_context.route_ready_tools()
+            if self.tool_context is not None and hasattr(self.tool_context, "route_ready_tools")
+            else configured
+        )
+        return self.store.tool_control_document(configured, callable_names)
+
+    def update_tool_policy(
+        self,
+        tool_name: str,
+        *,
+        enabled: bool,
+        revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        return self.store.update_tool_policy(
+            tool_name,
+            enabled=enabled,
+            revision=revision,
+            request_id=request_id,
+        )
 
     def begin_device_login(self) -> dict[str, Any]:
         if self.configured_auth_mode != "chatgpt_device_code":
@@ -120,11 +157,12 @@ class ControllerService:
 
     def status(self) -> dict[str, Any]:
         app = self.app_server.status()
-        available_tools = self.tool_context.available_tools() if self.tool_context is not None else []
+        tool_status = self.tool_status()
+        effective_names = [tool["name"] for tool in tool_status["tools"] if tool["callable"]]
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.1.9",
+            "version": "0.2.0",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -144,13 +182,16 @@ class ControllerService:
             "start_error": self.start_error,
             "app_server": app,
             "tools": {
-                "count": len(available_tools),
+                **tool_status["summary"],
+                "count": len(effective_names),
+                "names": effective_names,
                 "renovation_hub": any(
                     name.startswith("ledger_") or name.startswith("renovation_")
-                    for name in available_tools
+                    for name in effective_names
                 ),
-                "operations": any(name.startswith("ha_operations_") for name in available_tools),
-                "names": available_tools,
+                "operations": any(name.startswith("ha_operations_") for name in effective_names),
+                "mcp": tool_status["mcp"],
+                "policy_error": tool_status["policy_error"],
             },
             "pending_login": self.pending_login,
             "queue": self.store.status(),
@@ -171,6 +212,13 @@ class ControllerService:
             turn_id = turn.get("id") or params.get("turnId")
             status = turn.get("status")
             if isinstance(turn_id, str) and isinstance(status, str):
+                if allow_buffer:
+                    with self._event_lock:
+                        pending = self._pending_turn_events.get(turn_id)
+                        if pending:
+                            if len(pending) < 32:
+                                pending.append(message)
+                            return
                 if self.tool_context is not None:
                     self.tool_context.end_turn(turn_id)
                 if self.turn_media is not None:
@@ -205,18 +253,30 @@ class ControllerService:
         turn_started = False
         try:
             payload = job["input"]
+            capability_profile = payload.get("capability_profile", "owner_legacy")
+            effective_tools = (
+                self.tool_context.available_tools(capability_profile)
+                if self.tool_context is not None
+                else []
+            )
+            if hasattr(self.app_server, "configure_developer_context"):
+                self.app_server.configure_developer_context(effective_tools, capability_profile)
             if is_new_thread_command(payload):
                 thread_id = self.app_server.start_thread()
-                self.store.complete_new_thread(job["job_id"], thread_id, NEW_THREAD_RESULT)
+                thread_short = self.store.short_id("TH", thread_id)
+                result = f"{NEW_THREAD_RESULT}\nThread：{thread_short}"
+                self.store.complete_new_thread(job["job_id"], thread_id, result)
                 return
             if self.tool_context is not None:
-                self.tool_context.begin_job(job["job_id"], payload["message_id"])
+                self.tool_context.begin_job(job["job_id"], payload["message_id"], capability_profile)
             thread_id = self.store.conversation_thread(job["conversation_key"])
             if thread_id is None:
                 thread_id = self.app_server.start_thread()
                 self.store.assign_thread(job["job_id"], thread_id)
             else:
-                self.app_server.resume_thread(thread_id)
+                loaded_thread_id = self.app_server.resume_thread(thread_id)
+                if isinstance(loaded_thread_id, str) and loaded_thread_id:
+                    thread_id = loaded_thread_id
                 self.store.assign_thread(job["job_id"], thread_id)
             input_items = None
             if self.turn_media is not None:
@@ -261,6 +321,7 @@ class ControllerService:
     def _flush_turn_events(self, turn_id: str) -> None:
         with self._event_lock:
             events = self._pending_turn_events.pop(turn_id, [])
+        events.sort(key=lambda message: message.get("method") == "turn/completed")
         for message in events:
             self.handle_notification(message, allow_buffer=False)
 

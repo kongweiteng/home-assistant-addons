@@ -19,6 +19,13 @@ class CodexHermesContractTests(unittest.TestCase):
         self.assertEqual(schema["properties"]["version"]["const"], 1)
         self.assertIn("message_id", schema["required"])
         self.assertIn("conversation_key", schema["required"])
+        self.assertNotIn("capability_profile", schema["required"])
+        self.assertEqual(
+            schema["properties"]["capability_profile"]["enum"],
+            ["owner", "member_read_only"],
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertNotIn("owner_legacy", json.dumps(schema))
         serialized = json.dumps(schema).lower()
         for forbidden in ("token", "cookie", "password", "user_id"):
             self.assertNotIn(forbidden, serialized)

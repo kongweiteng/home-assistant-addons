@@ -47,7 +47,7 @@ def config(root: Path) -> NotificationConfig:
         mqtt_tls=False,
         allowed_audiences=frozenset({"owner"}),
         ledger_path=root / "notification-ledger.sqlite3",
-        addon_version="0.1.4",
+        addon_version="0.2.0",
     )
 
 
@@ -92,7 +92,7 @@ class PackagingTests(unittest.TestCase):
         dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
         run = (ADDON / "run.sh").read_text(encoding="utf-8")
         main = (ADDON / "weixin_gateway" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('version: "0.1.4"', config_text)
+        self.assertIn('version: "0.2.0"', config_text)
         self.assertIn("notification_bridge_enabled: false", config_text)
         self.assertIn('notification_mqtt_host: ""', config_text)
         self.assertIn('notification_mqtt_username: "str?"', config_text)
@@ -176,7 +176,7 @@ class ContractTests(unittest.TestCase):
                 self.assertEqual(raised.exception.code, code)
 
     def test_discovery_keeps_topics_and_uses_gateway_identity(self) -> None:
-        messages = discovery_messages("0.1.4")
+        messages = discovery_messages("0.2.0")
         self.assertIn(
             "homeassistant/binary_sensor/weixin_gateway_notification_online/config",
             messages,
@@ -403,8 +403,8 @@ class GatewayOutboundTests(unittest.TestCase):
         service.client = client  # type: ignore[assignment]
         return service
 
-    def run_async(self, coroutine) -> None:
-        asyncio.run(coroutine)
+    def run_async(self, coroutine):
+        return asyncio.run(coroutine)
 
     def test_exact_owner_context_and_deterministic_client_id(self) -> None:
         client = RecordingIlinkClient()
@@ -415,24 +415,155 @@ class GatewayOutboundTests(unittest.TestCase):
         expected = "codex-weixin-notification-" + hashlib.sha256(b"message-1").hexdigest()[:32]
         self.assertEqual(client.sent[0]["client_id"], expected)
 
-    def test_no_owner_multiple_owner_and_missing_context_fail_closed(self) -> None:
-        cases = [
-            (identity(owners=[], contexts={}), "notification_owner_unavailable"),
-            (identity(owners=["one", "two"], contexts={"one": "a", "two": "b"}), "notification_owner_unavailable"),
-            (identity(owners=["fixture-owner"], contexts={}), "notification_context_missing"),
-        ]
-        for index, (document, code) in enumerate(cases):
-            with self.subTest(code=code):
-                client = RecordingIlinkClient()
-                service = self.service(document, client)
+    def test_members_never_join_notification_audience_and_owner_transfer_is_atomic(self) -> None:
+        document = identity(contexts={"fixture-owner": "owner-context", "fixture-member": "member-context"})
+        client = RecordingIlinkClient()
+        service = self.service(document, client)
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "notification-member-invite", "ttl_seconds": 900}
+        )
+        self.store.claim_member_invitation(user_id="fixture-member", text=invitation["code"])
+        self.run_async(service.send_notification("before-transfer", "正文"))
+        self.assertEqual(client.sent[-1]["to_user_id"], "fixture-owner")
+        users = service.users()
+        member = next(user for user in users["users"] if user["role"] == "member")
+        transferred = self.run_async(
+            service.transfer_owner(
+                {
+                    "target_wx_short": member["wx_short"],
+                    "revision": users["revision"],
+                    "request_id": "notification-owner-transfer",
+                    "confirmation": "TRANSFER_OWNER",
+                }
+            )
+        )
+        self.assertEqual(transferred["owner"]["wx_short"], member["wx_short"])
+        self.assertEqual(service.identity["allowed_user_ids"], ["fixture-member"])
+        self.run_async(service.send_notification("after-transfer", "正文"))
+        self.assertEqual(client.sent[-1]["to_user_id"], "fixture-member")
+        self.assertEqual(client.sent[-1]["context_token"], "member-context")
 
-                async def exercise() -> None:
-                    with self.assertRaises(StoreError) as raised:
-                        await service.send_notification(f"message-{index}", "正文")
-                    self.assertEqual(raised.exception.code, code)
+    def test_owner_transfer_waits_for_inflight_notification_then_changes_target(self) -> None:
+        document = identity(contexts={"fixture-owner": "owner-context", "fixture-member": "member-context"})
 
-                self.run_async(exercise())
-                self.assertFalse(client.sent)
+        class BlockingClient(RecordingIlinkClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+                if not self.sent:
+                    self.started.set()
+                    await self.release.wait()
+                return await super().send_text(to_user_id, text, context_token, client_id)
+
+        client = BlockingClient()
+        service = self.service(document, client)
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "linear-notification-invite", "ttl_seconds": 900}
+        )
+        self.store.claim_member_invitation(user_id="fixture-member", text=invitation["code"])
+        member = next(user for user in service.users()["users"] if user["role"] == "member")
+
+        async def exercise() -> None:
+            notification_task = asyncio.create_task(service.send_notification("linear-notification-before", "第一条"))
+            await asyncio.wait_for(client.started.wait(), timeout=1)
+            transfer_task = asyncio.create_task(
+                service.transfer_owner(
+                    {
+                        "target_wx_short": member["wx_short"],
+                        "revision": self.store.users_revision(),
+                        "request_id": "linear-notification-transfer",
+                        "confirmation": "TRANSFER_OWNER",
+                    }
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(transfer_task.done())
+            client.release.set()
+            await asyncio.wait_for(notification_task, timeout=2)
+            await asyncio.wait_for(transfer_task, timeout=2)
+            await service.send_notification("linear-notification-after", "第二条")
+
+        self.run_async(exercise())
+        self.assertEqual([item["to_user_id"] for item in client.sent], ["fixture-owner", "fixture-member"])
+        self.assertEqual(self.store.active_owner()["private_user_id"], "fixture-member")
+
+    def test_owner_transfer_and_notification_share_a_linearizable_authorization_fence(self) -> None:
+        document = identity(contexts={"fixture-owner": "owner-context", "fixture-member": "member-context"})
+
+        class BlockingClient(RecordingIlinkClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+                self.entered.set()
+                await self.release.wait()
+                return await super().send_text(to_user_id, text, context_token, client_id)
+
+        async def exercise() -> None:
+            client = BlockingClient()
+            service = self.service(document, client)
+            invitation = service.create_member_invitation(
+                {"revision": self.store.users_revision(), "request_id": "notification-race-invite", "ttl_seconds": 900}
+            )
+            self.store.claim_member_invitation(user_id="fixture-member", text=invitation["code"])
+            users = service.users()
+            member = next(user for user in users["users"] if user["role"] == "member")
+            notification_task = asyncio.create_task(service.send_notification("notification-before-transfer", "正文"))
+            await client.entered.wait()
+            transfer_task = asyncio.create_task(
+                service.transfer_owner(
+                    {
+                        "target_wx_short": member["wx_short"],
+                        "revision": users["revision"],
+                        "request_id": "notification-race-transfer",
+                        "confirmation": "TRANSFER_OWNER",
+                    }
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(transfer_task.done())
+            client.release.set()
+            await notification_task
+            await transfer_task
+            self.assertEqual(client.sent[-1]["to_user_id"], "fixture-owner")
+            client.entered = asyncio.Event()
+            client.release = asyncio.Event()
+            client.release.set()
+            await service.send_notification("notification-after-transfer", "正文")
+            self.assertEqual(client.sent[-1]["to_user_id"], "fixture-member")
+
+        self.run_async(exercise())
+
+    def test_no_owner_ambiguous_migration_and_missing_context_fail_closed(self) -> None:
+        client = RecordingIlinkClient()
+        no_owner = self.service(identity(owners=[], contexts={}), client)
+
+        async def reject_no_owner() -> None:
+            with self.assertRaises(StoreError) as raised:
+                await no_owner.send_notification("message-no-owner", "正文")
+            self.assertEqual(raised.exception.code, "notification_owner_unavailable")
+
+        self.run_async(reject_no_owner())
+        self.assertFalse(client.sent)
+        with self.assertRaises(StoreError) as ambiguous:
+            self.service(identity(owners=["one", "two"], contexts={"one": "a", "two": "b"}), RecordingIlinkClient())
+        self.assertEqual(ambiguous.exception.code, "owner_migration_ambiguous")
+
+        missing_client = RecordingIlinkClient()
+        missing = self.service(identity(owners=["fixture-owner"], contexts={}), missing_client)
+
+        async def reject_missing_context() -> None:
+            with self.assertRaises(StoreError) as raised:
+                await missing.send_notification("message-missing-context", "正文")
+            self.assertEqual(raised.exception.code, "notification_context_missing")
+
+        self.run_async(reject_missing_context())
+        self.assertFalse(missing_client.sent)
 
     def test_session_expired_calls_ilink_once_and_stops_followup(self) -> None:
         client = RecordingIlinkClient(response={"errcode": SESSION_EXPIRED_ERRCODE})

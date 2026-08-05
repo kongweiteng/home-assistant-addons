@@ -17,6 +17,10 @@
     "version": {"const": 1},
     "message_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "conversation_key": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "capability_profile": {
+      "enum": ["owner", "member_read_only"],
+      "description": "0.2.0 起由 Gateway 显式发送的最小权限画像；缺失只用于兼容旧版唯一 owner Gateway。"
+    },
     "received_at": {"type": "string", "format": "date-time"},
     "text": {"type": "string", "maxLength": 32000},
     "attachments": {

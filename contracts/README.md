@@ -15,3 +15,4 @@
 2. 原始微信用户 ID、Token、账目正文、附件内容和内部 bearer 不得进入契约 fixture。
 3. 删除字段、收紧类型或改变错误语义必须升级契约版本并重新完成开发前评审。
 4. JSON Schema 只描述跨组件边界；每个服务仍需在运行时执行大小、权限、路径和业务不变量校验。
+5. `capability_profile` 是 additive 字段。Gateway `0.2.0` 对 owner 发送 `owner`、对成员发送 `member_read_only`；Controller 缺失该字段时只按旧 Gateway 的唯一 owner 兼容路径处理。成员画像只允许普通对话和固定安全只读工具，不能继承账本写入、媒体归档/消费、导出或 Operations。

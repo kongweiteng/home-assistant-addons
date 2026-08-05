@@ -17,7 +17,8 @@ from .app_server import AppServerClient
 from .media_input import TurnMediaManager
 from .service import ControllerService
 from .store import ControllerStore
-from .tool_proxy import NATURAL_QUERY_READ_ONLY_TOOLS, ToolProxyServer, ToolRouter
+from .tool_catalog import ALL_TOOL_NAMES
+from .tool_proxy import ToolProxyServer, ToolRouter
 
 
 def read_api_key_from_fd() -> str:
@@ -165,7 +166,7 @@ def write_codex_config(
         " }\n\n"
         + "\n".join(
             f"[mcp_servers.home_assistant_tools.tools.{name}]\napproval_mode = \"approve\"\n"
-            for name in sorted(NATURAL_QUERY_READ_ONLY_TOOLS)
+            for name in sorted(ALL_TOOL_NAMES)
         )
     )
     if config.exists() and config.is_symlink():
@@ -215,6 +216,11 @@ def main() -> None:
         codex_model=codex_model,
     )
 
+    store = ControllerStore(
+        os.environ.get("CONTROLLER_DATABASE_PATH", data_dir / "controller.sqlite3"),
+        max_queue=int(os.environ.get("CONTROLLER_MAX_QUEUE", "200")),
+        max_result_chars=int(os.environ.get("CONTROLLER_MAX_RESULT_CHARS", "12000")),
+    )
     router = ToolRouter(
         ledger_base_url=os.environ.get("CONTROLLER_LEDGER_BASE_URL", ""),
         ledger_token=os.environ.get("CONTROLLER_LEDGER_API_TOKEN", ""),
@@ -223,17 +229,13 @@ def main() -> None:
         operations_base_url=os.environ.get("CONTROLLER_OPERATIONS_BASE_URL", ""),
         operations_token=os.environ.get("CONTROLLER_OPERATIONS_API_TOKEN", ""),
         max_media_bytes=int(os.environ.get("CONTROLLER_MAX_MEDIA_BYTES", str(1024 * 1024 * 1024))),
+        store=store,
     )
     proxy = ToolProxyServer(socket_path, router)
     proxy.start()
 
     turn_media = TurnMediaManager(data_dir / "turn-media", router.preview_attachment)
 
-    store = ControllerStore(
-        os.environ.get("CONTROLLER_DATABASE_PATH", data_dir / "controller.sqlite3"),
-        max_queue=int(os.environ.get("CONTROLLER_MAX_QUEUE", "200")),
-        max_result_chars=int(os.environ.get("CONTROLLER_MAX_RESULT_CHARS", "12000")),
-    )
     binary = os.environ.get("CODEX_BINARY", "/opt/codex/node_modules/.bin/codex")
     app_server = AppServerClient(
         [binary, "app-server", "--listen", "stdio://"],

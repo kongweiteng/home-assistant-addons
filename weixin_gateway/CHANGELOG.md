@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.2.0
+
+- 在一套 iLink 身份和一个 Poller 下新增唯一 owner、多 member 私有用户目录；每位用户拥有独立 conversation 和 Codex Thread 关联。
+- 新增 128 bit 高熵一次性成员邀请码，磁盘只保存带盐摘要，覆盖过期、取消、并发领取和重放拒绝；领取消息不进入 Codex。
+- 新增别名、暂停、恢复、移除和精确确认的原子 owner 转移；身份 `allowed_user_ids` 始终只镜像当前 owner，旧版回退不会把 member 误当通知接收人。
+- Gateway 提交 additive `capability_profile`；member 固定为 `member_read_only`，只有 Controller capabilities 握手支持时才提交，旧 Controller 下失败关闭。
+- suspended/revoked 用户的新消息立即拒绝；已提交结果在微信发送前再次复核状态并可记录 `reply_suppressed_user_inactive`。
+- 迁移时为 0.1.x 遗留排队消息回填旧 owner 哈希和权限画像；owner 转移后重新授权只允许权限不变或降级，禁止旧消息继承新 owner 权限。
+- 暂停/移除、owner 转移、主动通知目标选择和多分片发送在同一事件循环线性化，并固定“出站锁 -> 授权锁”顺序，避免死锁和过期角色收件。
+- 新增 HMAC `WX-*`、`CV-*`、`TH-*` 会话排障标识，以及 JSON + CSRF + revision + request_id 的管理员 API 和完整中文 Ingress 交互。
+- 新增 additive SQLite 用户、邀请、会话、管理幂等 schema；0/1/>1 旧 allowlist 分别不猜 owner、确定迁移、以 `owner_migration_ambiguous` 阻断。
+- 扫码或导入切换到不同 iLink account 时失败关闭旧待处理消息并清空旧 principal 目录，避免新身份继承旧 owner/member。
+
 ## 0.1.4
 
 - 新增默认关闭的 MQTT v1 主动通知适配器，兼容现有 request/result/status/HA birth 主题，直接经当前唯一 owner 的 iLink 上下文发送，不调用 Codex、Controller 或模型。

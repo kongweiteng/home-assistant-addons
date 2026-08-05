@@ -4,13 +4,17 @@ import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
+import http.client
 import json
 from pathlib import Path
 import secrets
+import sqlite3
 import tempfile
+import threading
 import unittest
 from unittest import mock
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 from weixin_gateway.protocol import (
     ProtocolError,
@@ -21,9 +25,16 @@ from weixin_gateway.protocol import (
     extract_message,
     parse_aes_key,
 )
-from weixin_gateway.api import DASHBOARD_HTML, DASHBOARD_JS
-from weixin_gateway.service import ControllerClient, GatewayService, split_text
-from weixin_gateway.store import GatewayStore, IdentityStore, StoreError
+from weixin_gateway.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
+from weixin_gateway.service import ControllerClient, GatewayService, split_text, with_thread_short
+from weixin_gateway.store import (
+    GatewayStore,
+    IdentityStore,
+    StoreError,
+    conversation_key,
+    user_hash,
+    utc_now,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,7 +76,28 @@ class CompletedController(StubController):
 
     async def job(self, _job_id: str) -> dict:
         self.job_calls += 1
-        return {"state": "completed", "result": "完成"}
+        return {"state": "completed", "result": "完成", "thread_short": "TH-ABCDEFGHIJ"}
+
+
+class LegacySubmittingController(StubController):
+    configured = True
+
+    def __init__(self) -> None:
+        self.submissions: list[dict] = []
+
+    async def submit(self, payload: dict) -> dict:
+        self.submissions.append(payload)
+        return {"job_id": "legacy-job", "state": "queued"}
+
+    async def job(self, _job_id: str) -> dict:
+        return {"state": "queued"}
+
+
+class CompatibleSubmittingController(LegacySubmittingController):
+    capability_state = "compatible"
+
+    async def supports_capability(self, capability: str) -> bool:
+        return capability == "job_capability_profile_v1"
 
 
 class StubIlinkClient:
@@ -130,7 +162,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.1.4"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.2.0"', api_source)
 
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
@@ -160,7 +192,10 @@ class ProtocolTests(unittest.TestCase):
     def test_dashboard_exposes_admin_pairing_without_unsafe_html_rendering(self) -> None:
         self.assertIn("api/owner-pairing/start", DASHBOARD_JS)
         self.assertIn("绑定消息不会进入 Codex", DASHBOARD_HTML)
-        self.assertIn("textContent=j.result.code", DASHBOARD_JS)
+        self.assertIn("api/users/invitations", DASHBOARD_JS)
+        self.assertIn("api/owner-transfer", DASHBOARD_JS)
+        self.assertIn("X-CSRF-Token", DASHBOARD_JS)
+        self.assertIn("HMAC 短标识", DASHBOARD_HTML)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
 
 
@@ -171,9 +206,33 @@ class StoreTests(unittest.TestCase):
         self.identity_store = IdentityStore(self.root / "data")
         self.identity_store.save_identity(fixture_identity())
         self.store = GatewayStore(self.root / "data" / "gateway.sqlite3", data_dir=self.root / "data", spool_ttl_seconds=60)
+        self.store.migrate_identity_allowlist(["fixture-owner"])
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_user_directory_enforces_documented_thirty_two_user_limit(self) -> None:
+        for index in range(31):
+            invitation = self.store.create_member_invitation(
+                expected_revision=self.store.users_revision(),
+                request_id=f"capacity-invite-{index:02d}",
+            )
+            claimed = self.store.claim_member_invitation(
+                user_id=f"fixture-member-{index:02d}",
+                text=invitation["code"],
+            )
+            self.assertIsNotNone(claimed)
+
+        users = self.store.list_users()
+        self.assertEqual(users["limits"]["max_users"], 32)
+        self.assertEqual(len(users["users"]), 32)
+        with self.assertRaises(StoreError) as context:
+            self.store.create_member_invitation(
+                expected_revision=users["revision"],
+                request_id="capacity-invite-overflow",
+            )
+        self.assertEqual(context.exception.code, "user_limit_reached")
+        self.assertEqual(context.exception.status, 409)
 
     def test_message_dedup_attachment_path_digest_expiry_and_one_time_consumption(self) -> None:
         content = b"synthetic-receipt"
@@ -298,6 +357,288 @@ class StoreTests(unittest.TestCase):
         client_id, already_sent = self.store.prepare_chunk("fixture-job", 0)
         self.assertEqual(client_id, first[0])
         self.assertTrue(already_sent)
+        self.assertEqual(with_thread_short("完成", "invalid"), "完成")
+        self.assertEqual(
+            with_thread_short("完成", "TH-ABCDEFGHIJ"),
+            "完成\n\nThread：TH-ABCDEFGHIJ",
+        )
+        self.assertEqual(
+            with_thread_short("完成\n\nThread：TH-ABCDEFGHIJ", "TH-ABCDEFGHIJ").count("TH-ABCDEFGHIJ"),
+            1,
+        )
+
+    def test_allowlist_zero_one_and_ambiguous_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = GatewayStore(Path(tmp) / "empty.sqlite3", data_dir=Path(tmp) / "empty")
+            self.assertEqual(empty.migrate_identity_allowlist([])["state"], "empty")
+            self.assertFalse(empty.list_users()["users"])
+        with tempfile.TemporaryDirectory() as tmp:
+            single = GatewayStore(Path(tmp) / "single.sqlite3", data_dir=Path(tmp) / "single")
+            migrated = single.migrate_identity_allowlist(["fixture-owner"])
+            self.assertEqual(migrated["state"], "migrated")
+            self.assertEqual(single.list_users()["users"][0]["role"], "owner")
+            reopened = GatewayStore(single.database_path, data_dir=Path(tmp) / "single")
+            self.assertEqual(reopened.migrate_identity_allowlist(["fixture-owner"])["state"], "existing")
+        with tempfile.TemporaryDirectory() as tmp:
+            ambiguous = GatewayStore(Path(tmp) / "ambiguous.sqlite3", data_dir=Path(tmp) / "ambiguous")
+            with self.assertRaises(StoreError) as raised:
+                ambiguous.migrate_identity_allowlist(["one", "two"])
+            self.assertEqual(raised.exception.code, "owner_migration_ambiguous")
+            self.assertFalse(ambiguous.list_users()["users"])
+
+    def test_legacy_schema_upgrade_is_additive_and_restart_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "gateway.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE inbound_messages (
+                        message_id TEXT PRIMARY KEY,
+                        sender_id TEXT NOT NULL,
+                        conversation_key TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        attachments_json TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        controller_job_id TEXT,
+                        received_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        error_code TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO inbound_messages VALUES (?,?,?,?,?,'completed',NULL,?,?,NULL)",
+                    ("legacy-message", "legacy-owner", "sha256:legacy", "完成", "[]", utc_now(), utc_now()),
+                )
+            upgraded = GatewayStore(database, data_dir=root)
+            document = upgraded.get_message("legacy-message")
+            self.assertEqual(document["capability_profile"], "owner_legacy")
+            self.assertIsNone(document["user_hash"])
+            reopened = GatewayStore(database, data_dir=root)
+            self.assertEqual(reopened.get_message("legacy-message"), document)
+
+    def test_legacy_pending_owner_message_is_backfilled_for_role_revalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            database = root / "gateway.sqlite3"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    """
+                    CREATE TABLE inbound_messages (
+                        message_id TEXT PRIMARY KEY,
+                        sender_id TEXT NOT NULL,
+                        conversation_key TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        attachments_json TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        controller_job_id TEXT,
+                        received_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        error_code TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO inbound_messages VALUES (?,?,?,?,?,'pending_controller',NULL,?,?,NULL)",
+                    (
+                        "legacy-pending-owner",
+                        "legacy-owner",
+                        conversation_key("legacy-owner"),
+                        "执行所有者任务",
+                        "[]",
+                        utc_now(),
+                        utc_now(),
+                    ),
+                )
+            upgraded = GatewayStore(database, data_dir=root)
+            upgraded.migrate_identity_allowlist(["legacy-owner"])
+            pending = upgraded.get_message("legacy-pending-owner")
+            self.assertEqual(pending["user_hash"], user_hash("legacy-owner"))
+            self.assertEqual(pending["capability_profile"], "owner")
+
+            invitation = upgraded.create_member_invitation(
+                expected_revision=upgraded.users_revision(),
+                request_id="legacy-pending-invite",
+            )
+            member = upgraded.claim_member_invitation(
+                user_id="legacy-new-owner",
+                text=invitation["code"],
+            )
+            assert member is not None
+            public_member = next(
+                user for user in upgraded.list_users()["users"] if user["role"] == "member"
+            )
+            upgraded.transfer_owner(
+                target_wx_short=public_member["wx_short"],
+                expected_revision=upgraded.users_revision(),
+                request_id="legacy-pending-transfer",
+                confirmation="TRANSFER_OWNER",
+            )
+            authorization = upgraded.authorize_stored_message(
+                pending["user_hash"],
+                pending["capability_profile"],
+            )
+            self.assertTrue(authorization["allowed"])
+            self.assertEqual(authorization["capability_profile"], "member_read_only")
+
+    def test_member_invitation_is_hashed_one_time_concurrent_and_not_replayable(self) -> None:
+        users = self.store.list_users()
+        invitation = self.store.create_member_invitation(
+            expected_revision=users["revision"],
+            request_id="invite-request-0001",
+        )
+        self.assertIn("code", invitation)
+        self.assertNotIn(invitation["code"].encode("utf-8"), self.store.database_path.read_bytes())
+        replay = self.store.create_member_invitation(
+            expected_revision=users["revision"],
+            request_id="invite-request-0001",
+        )
+        self.assertNotIn("code", replay)
+        self.assertEqual(replay["state"], "created_code_already_shown")
+
+        def claim(value: str):
+            return self.store.claim_member_invitation(user_id=value, text=invitation["code"])
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(claim, ["fixture-member-a", "fixture-member-b"]))
+        claimed = [result for result in results if result is not None]
+        self.assertEqual(len(claimed), 1)
+        self.assertIsNone(self.store.claim_member_invitation(user_id="fixture-member-c", text=invitation["code"]))
+        self.assertEqual(len(self.store.list_users()["users"]), 2)
+
+    def test_invitation_expiry_cancel_revision_and_idempotency(self) -> None:
+        revision = self.store.users_revision()
+        expired = self.store.create_member_invitation(
+            expected_revision=revision,
+            request_id="invite-expire-0001",
+        )
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE pairing_invitations SET expires_at=? WHERE state='waiting'",
+                ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),),
+            )
+        self.assertIsNone(self.store.claim_member_invitation(user_id="late-user", text=expired["code"]))
+        current = self.store.users_revision()
+        cancellable = self.store.create_member_invitation(
+            expected_revision=current,
+            request_id="invite-cancel-create",
+        )
+        cancelled = self.store.cancel_member_invitation(
+            invite_short=cancellable["invite_short"],
+            expected_revision=cancellable["revision"],
+            request_id="invite-cancel-0001",
+        )
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertIsNone(self.store.claim_member_invitation(user_id="cancelled-user", text=cancellable["code"]))
+        with self.assertRaises(StoreError) as stale:
+            self.store.update_alias(
+                wx_short=self.store.list_users()["users"][0]["wx_short"],
+                alias="新管理员",
+                expected_revision=0,
+                request_id="alias-stale-0001",
+            )
+        self.assertEqual(stale.exception.code, "revision_conflict")
+
+    def test_owner_protection_transfer_and_short_ids_persist(self) -> None:
+        before = self.store.list_users()
+        owner = before["users"][0]
+        with self.assertRaises(StoreError) as protected:
+            self.store.change_user_state(
+                wx_short=owner["wx_short"],
+                action="suspend",
+                expected_revision=before["revision"],
+                request_id="owner-suspend-0001",
+            )
+        self.assertEqual(protected.exception.code, "owner_protected")
+        invitation = self.store.create_member_invitation(
+            expected_revision=before["revision"],
+            request_id="owner-transfer-invite",
+        )
+        self.store.claim_member_invitation(user_id="fixture-member", text=invitation["code"])
+        current = self.store.list_users()
+        member = next(user for user in current["users"] if user["role"] == "member")
+        with self.assertRaises(StoreError) as confirmation:
+            self.store.transfer_owner(
+                target_wx_short=member["wx_short"],
+                expected_revision=current["revision"],
+                request_id="owner-transfer-bad",
+                confirmation="yes",
+            )
+        self.assertEqual(confirmation.exception.code, "owner_transfer_confirmation_required")
+        transferred = self.store.transfer_owner(
+            target_wx_short=member["wx_short"],
+            expected_revision=current["revision"],
+            request_id="owner-transfer-good",
+            confirmation="TRANSFER_OWNER",
+        )
+        self.assertEqual(transferred["owner"]["wx_short"], member["wx_short"])
+        after = self.store.list_users()
+        self.assertEqual(sum(user["role"] == "owner" and user["status"] == "active" for user in after["users"]), 1)
+        reopened = GatewayStore(self.store.database_path, data_dir=self.root / "data")
+        self.assertEqual(
+            {user["wx_short"] for user in after["users"]},
+            {user["wx_short"] for user in reopened.list_users()["users"]},
+        )
+        encoded = json.dumps(reopened.list_users(), ensure_ascii=False)
+        self.assertNotIn("fixture-owner", encoded)
+        self.assertNotIn("fixture-member", encoded)
+
+    def test_owner_transfer_and_suspend_race_keeps_one_owner(self) -> None:
+        initial = self.store.list_users()
+        invitation = self.store.create_member_invitation(
+            expected_revision=initial["revision"], request_id="race-invite-create"
+        )
+        self.store.claim_member_invitation(user_id="race-member", text=invitation["code"])
+        current = self.store.list_users()
+        member = next(user for user in current["users"] if user["role"] == "member")
+
+        def transfer():
+            try:
+                return self.store.transfer_owner(
+                    target_wx_short=member["wx_short"],
+                    expected_revision=current["revision"],
+                    request_id="race-transfer-request",
+                    confirmation="TRANSFER_OWNER",
+                )
+            except StoreError as exc:
+                return exc.code
+
+        def suspend():
+            try:
+                return self.store.change_user_state(
+                    wx_short=member["wx_short"],
+                    action="suspend",
+                    expected_revision=current["revision"],
+                    request_id="race-suspend-request",
+                )
+            except StoreError as exc:
+                return exc.code
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = [executor.submit(transfer), executor.submit(suspend)]
+            outcomes = [future.result() for future in results]
+        self.assertIn("revision_conflict", outcomes)
+        final = self.store.list_users()["users"]
+        self.assertEqual(sum(user["role"] == "owner" and user["status"] == "active" for user in final), 1)
+
+    def test_identity_replacement_resets_principals_and_fails_pending_messages_closed(self) -> None:
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        self.store.store_message(
+            message_id="identity-replacement-pending",
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="尚未提交",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        self.store.reset_access_directory_for_identity_replacement()
+        self.assertFalse(self.store.list_users()["users"])
+        message = self.store.get_message("identity-replacement-pending")
+        self.assertEqual(message["state"], "failed")
+        self.assertEqual(message["error_code"], "identity_replaced")
 
 
 class ServiceTests(unittest.TestCase):
@@ -381,6 +722,80 @@ class ServiceTests(unittest.TestCase):
         self.assertFalse(self.store.message_exists("fixture-pairing-correct"))
         self.assertEqual(service.poller_state, "polling")
         self.assertEqual(len(service.client.sent), 1)  # type: ignore[union-attr]
+
+    def test_same_account_qr_refresh_restores_existing_owner_mirror(self) -> None:
+        service = self.service()
+        service.qr_state = {
+            "state": "scanned",
+            "qrcode": "fixture-qr",
+            "has_image": True,
+            "base_url": "https://ilinkai.weixin.qq.com",
+        }
+
+        class ConfirmedQrClient(StubIlinkClient):
+            async def api_get(self, _path: str, *, base_url: str | None = None) -> dict:
+                return {
+                    "status": "confirmed",
+                    "ilink_bot_id": "fixture-account",
+                    "bot_token": "refreshed-ilink-token-000000000000",
+                    "baseurl": base_url or "https://ilinkai.weixin.qq.com",
+                    "ilink_user_id": "fixture-bot-user",
+                }
+
+        self.run_async(service._poll_qr(ConfirmedQrClient()))
+        identity = self.identity_store.load_identity()
+        assert identity is not None
+        self.assertEqual(service.qr_state["state"], "credential_ready")
+        self.assertEqual(identity["allowed_user_ids"], ["fixture-owner"])
+        self.assertEqual(self.store.active_owner()["private_user_id"], "fixture-owner")
+
+    def test_different_account_qr_refresh_clears_old_access_directory(self) -> None:
+        service = self.service()
+        service.qr_state = {
+            "state": "scanned",
+            "qrcode": "fixture-qr-new-account",
+            "has_image": True,
+            "base_url": "https://ilinkai.weixin.qq.com",
+        }
+
+        class ConfirmedQrClient(StubIlinkClient):
+            async def api_get(self, _path: str, *, base_url: str | None = None) -> dict:
+                return {
+                    "status": "confirmed",
+                    "ilink_bot_id": "replacement-account",
+                    "bot_token": "replacement-ilink-token-00000000000",
+                    "baseurl": base_url or "https://ilinkai.weixin.qq.com",
+                    "ilink_user_id": "replacement-bot-user",
+                }
+
+        self.run_async(service._poll_qr(ConfirmedQrClient()))
+        identity = self.identity_store.load_identity()
+        assert identity is not None
+        self.assertEqual(identity["allowed_user_ids"], [])
+        self.assertFalse(self.store.list_users()["users"])
+
+    def test_restart_repairs_owner_mirror_after_database_only_transfer(self) -> None:
+        service = self.service()
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "restart-owner-invite", "ttl_seconds": 900}
+        )
+        self.store.claim_member_invitation(user_id="restart-new-owner", text=invitation["code"])
+        member = next(user for user in self.store.list_users()["users"] if user["role"] == "member")
+        self.store.transfer_owner(
+            target_wx_short=member["wx_short"],
+            expected_revision=self.store.users_revision(),
+            request_id="restart-database-only-transfer",
+            confirmation="TRANSFER_OWNER",
+        )
+        before_restart = self.identity_store.load_identity()
+        assert before_restart is not None
+        self.assertEqual(before_restart["allowed_user_ids"], ["fixture-owner"])
+
+        self.service()
+        after_restart = self.identity_store.load_identity()
+        assert after_restart is not None
+        self.assertEqual(after_restart["allowed_user_ids"], ["restart-new-owner"])
+        self.assertEqual(self.store.active_owner()["private_user_id"], "restart-new-owner")
 
     def test_poll_loop_persists_cursor_after_message_and_deduplicates_replay(self) -> None:
         async def exercise() -> None:
@@ -483,6 +898,360 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([call["method"] for call in session.calls], ["POST", "GET"])
         self.assertTrue(all(call["headers"]["Authorization"] == f"Bearer {token}" for call in session.calls))
 
+    def test_member_invitation_claim_keeps_owner_mirror_and_creates_read_only_message(self) -> None:
+        service = self.service()
+        revision = self.store.users_revision()
+        invitation = service.create_member_invitation(
+            {"revision": revision, "request_id": "service-member-invite", "ttl_seconds": 900}
+        )
+        raw = fixture_update()["msgs"][0]
+        claim = json.loads(json.dumps(raw))
+        claim["message_id"] = "member-claim-message"
+        claim["from_user_id"] = "fixture-member"
+        claim["item_list"] = [{"type": 1, "text_item": {"text": invitation["code"]}}]
+        question = json.loads(json.dumps(raw))
+        question["message_id"] = "member-question-message"
+        question["from_user_id"] = "fixture-member"
+
+        async def exercise() -> None:
+            await service._ingest(claim)
+            await service._ingest(question)
+
+        self.run_async(exercise())
+        identity = self.identity_store.load_identity()
+        assert identity is not None
+        self.assertEqual(identity["allowed_user_ids"], ["fixture-owner"])
+        self.assertEqual(len(service.client.sent), 1)  # type: ignore[union-attr]
+        stored = self.store.get_message("member-question-message")
+        self.assertEqual(stored["capability_profile"], "member_read_only")
+        self.assertNotEqual(stored["conversation_key"], self.store.user_by_private_id("fixture-owner")["conversation_key"])
+
+    def test_old_controller_fails_closed_for_member_without_submission(self) -> None:
+        service = self.service()
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "legacy-member-invite", "ttl_seconds": 900}
+        )
+        member = self.store.claim_member_invitation(user_id="legacy-member", text=invitation["code"])
+        assert member is not None
+        message = self.store.store_message(
+            message_id="legacy-member-message",
+            sender_id="legacy-member",
+            conversation_key=member["conversation_key"],
+            text="查询装修汇总",
+            media=[],
+            user_digest=member["user_hash"],
+            capability_profile="member_read_only",
+        )
+        controller = LegacySubmittingController()
+        service.controller = controller  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertFalse(controller.submissions)
+        self.assertEqual(self.store.get_message(message["message_id"])["error_code"], "controller_capability_incompatible")
+        self.assertEqual(len(service.client.sent), 1)  # type: ignore[union-attr]
+
+    def test_old_controller_keeps_owner_legacy_submission_without_profile(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        self.store.store_message(
+            message_id="legacy-owner-message",
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="普通讨论",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        controller = LegacySubmittingController()
+        service.controller = controller  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertEqual(len(controller.submissions), 1)
+        self.assertNotIn("capability_profile", controller.submissions[0])
+
+    def test_compatible_controller_receives_member_profile(self) -> None:
+        service = self.service()
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "compatible-member-invite", "ttl_seconds": 900}
+        )
+        member = self.store.claim_member_invitation(user_id="compatible-member", text=invitation["code"])
+        assert member is not None
+        self.store.store_message(
+            message_id="compatible-member-message",
+            sender_id="compatible-member",
+            conversation_key=member["conversation_key"],
+            text="查询装修汇总",
+            media=[],
+            user_digest=member["user_hash"],
+            capability_profile="member_read_only",
+        )
+        controller = CompatibleSubmittingController()
+        service.controller = controller  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertEqual(len(controller.submissions), 1)
+        self.assertEqual(controller.submissions[0]["capability_profile"], "member_read_only")
+
+    def test_role_change_uses_least_privilege_for_queued_messages(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        old_owner_message = self.store.store_message(
+            message_id="queued-owner-before-transfer",
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="执行所有者任务",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "queued-owner-invite", "ttl_seconds": 900}
+        )
+        member = self.store.claim_member_invitation(user_id="queued-new-owner", text=invitation["code"])
+        assert member is not None
+        new_owner_message = self.store.store_message(
+            message_id="queued-member-before-transfer",
+            sender_id="queued-new-owner",
+            conversation_key=member["conversation_key"],
+            text="查询装修汇总",
+            media=[],
+            user_digest=member["user_hash"],
+            capability_profile="member_read_only",
+        )
+        public_member = next(user for user in service.users()["users"] if user["role"] == "member")
+
+        async def exercise() -> None:
+            await service.transfer_owner(
+                {
+                    "target_wx_short": public_member["wx_short"],
+                    "revision": self.store.users_revision(),
+                    "request_id": "queued-owner-transfer",
+                    "confirmation": "TRANSFER_OWNER",
+                }
+            )
+            controller = CompatibleSubmittingController()
+            service.controller = controller  # type: ignore[assignment]
+
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+            self.assertEqual(len(controller.submissions), 2)
+            self.assertEqual(
+                [payload["capability_profile"] for payload in controller.submissions],
+                ["member_read_only", "member_read_only"],
+            )
+
+        self.run_async(exercise())
+        self.assertEqual(self.store.get_message(old_owner_message["message_id"])["state"], "controller_submitted")
+        self.assertEqual(self.store.get_message(new_owner_message["message_id"])["state"], "controller_submitted")
+
+    def test_completed_reply_appends_thread_short_once(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        stored = self.store.store_message(
+            message_id="thread-short-reply",
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="普通讨论",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        self.store.mark_submitted(stored["message_id"], "thread-short-job")
+        service.controller = CompletedController()  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        sent = service.client.sent  # type: ignore[union-attr]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["text"].count("Thread：TH-ABCDEFGHIJ"), 1)
+        self.assertEqual(self.store.get_message(stored["message_id"])["state"], "completed")
+
+    def test_suspended_member_result_is_suppressed_before_weixin_send(self) -> None:
+        service = self.service()
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "suppress-member-invite", "ttl_seconds": 900}
+        )
+        member = self.store.claim_member_invitation(user_id="suppress-member", text=invitation["code"])
+        assert member is not None
+        stored = self.store.store_message(
+            message_id="suppress-member-message",
+            sender_id="suppress-member",
+            conversation_key=member["conversation_key"],
+            text="查询装修汇总",
+            media=[],
+            user_digest=member["user_hash"],
+            capability_profile="member_read_only",
+        )
+        self.store.mark_submitted(stored["message_id"], "completed-member-job")
+        public_member = next(user for user in self.store.list_users()["users"] if user["role"] == "member")
+        self.store.change_user_state(
+            wx_short=public_member["wx_short"],
+            action="suspend",
+            expected_revision=self.store.users_revision(),
+            request_id="suppress-member-action",
+        )
+        service.controller = CompletedController()  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        message = self.store.get_message(stored["message_id"])
+        self.assertEqual(message["error_code"], "reply_suppressed_user_inactive")
+        self.assertFalse(service.client.sent)  # type: ignore[union-attr]
+
+    def test_member_suspend_waits_for_complete_multichunk_reply(self) -> None:
+        service = self.service()
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "linear-send-invite", "ttl_seconds": 900}
+        )
+        member = self.store.claim_member_invitation(user_id="linear-send-member", text=invitation["code"])
+        assert member is not None
+        stored = self.store.store_message(
+            message_id="linear-send-message",
+            sender_id="linear-send-member",
+            conversation_key=member["conversation_key"],
+            text="查询",
+            media=[],
+            user_digest=member["user_hash"],
+            capability_profile="member_read_only",
+        )
+        self.store.mark_submitted(stored["message_id"], "linear-send-job")
+        message = self.store.get_message(stored["message_id"])
+        public_member = next(user for user in self.store.list_users()["users"] if user["role"] == "member")
+
+        class BlockingClient(StubIlinkClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+                if not self.sent:
+                    self.started.set()
+                    await self.release.wait()
+                return await super().send_text(to_user_id, text, context_token, client_id)
+
+        client = BlockingClient()
+        service.client = client  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            send_task = asyncio.create_task(service._send_result(message, "甲" * 4500))
+            await asyncio.wait_for(client.started.wait(), timeout=1)
+            suspend_task = asyncio.create_task(
+                service.change_user_state(
+                    public_member["wx_short"],
+                    "suspend",
+                    {
+                        "revision": self.store.users_revision(),
+                        "request_id": "linear-send-suspend",
+                    },
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(suspend_task.done())
+            client.release.set()
+            self.assertIsNone(await asyncio.wait_for(send_task, timeout=2))
+            await asyncio.wait_for(suspend_task, timeout=2)
+
+        self.run_async(exercise())
+        self.assertEqual(len(client.sent), 2)
+        self.assertEqual(self.store.user_by_private_id("linear-send-member")["status"], "suspended")
+
+    def test_suspend_and_final_send_share_a_linearizable_authorization_fence(self) -> None:
+        service = self.service()
+        invitation = service.create_member_invitation(
+            {"revision": self.store.users_revision(), "request_id": "fence-member-invite", "ttl_seconds": 900}
+        )
+        member = self.store.claim_member_invitation(user_id="fence-member", text=invitation["code"])
+        assert member is not None
+        public_member = next(user for user in service.users()["users"] if user["role"] == "member")
+
+        class BlockingClient(StubIlinkClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict:
+                self.entered.set()
+                await self.release.wait()
+                return await super().send_text(to_user_id, text, context_token, client_id)
+
+        async def exercise() -> None:
+            client = BlockingClient()
+            service.client = client  # type: ignore[assignment]
+            message = {
+                "message_id": "fence-message",
+                "controller_job_id": "fence-job",
+                "sender_id": "fence-member",
+                "user_hash": member["user_hash"],
+                "capability_profile": "member_read_only",
+            }
+            send_task = asyncio.create_task(service._send_result(message, "第一条回复"))
+            await client.entered.wait()
+            suspend_task = asyncio.create_task(
+                service.change_user_state(
+                    public_member["wx_short"],
+                    "suspend",
+                    {
+                        "revision": self.store.users_revision(),
+                        "request_id": "fence-member-suspend",
+                    },
+                )
+            )
+            await asyncio.sleep(0)
+            self.assertFalse(suspend_task.done())
+            client.release.set()
+            self.assertIsNone(await send_task)
+            await suspend_task
+            sent_count = len(client.sent)
+            suppression = await service._send_result(
+                {**message, "controller_job_id": "fence-job-after-suspend"},
+                "第二条回复",
+            )
+            self.assertEqual(suppression, "reply_suppressed_user_inactive")
+            self.assertEqual(len(client.sent), sent_count)
+
+        self.run_async(exercise())
+
     def test_poller_defaults_disabled_and_exact_activation_is_required(self) -> None:
         async def start_and_stop() -> None:
             disabled = self.service()
@@ -536,6 +1305,89 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(context.exception.code, "owner_binding_required")
 
         self.run_async(reject_unbound())
+
+
+class AdminApiTests(unittest.TestCase):
+    def test_json_csrf_revision_idempotency_and_privacy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_store = IdentityStore(root / "data")
+            identity_store.save_identity(fixture_identity())
+            store = GatewayStore(root / "data" / "gateway.sqlite3", data_dir=root / "data")
+            service = GatewayService(
+                identity_store=identity_store,
+                store=store,
+                controller=StubController(),  # type: ignore[arg-type]
+                bootstrap_identity={},
+                poller_enabled=False,
+                owner_pairing_enabled=False,
+                activation_confirmation="",
+                max_media_bytes=1024,
+            )
+            loop = asyncio.new_event_loop()
+            server = create_server(
+                "127.0.0.1",
+                0,
+                service=service,
+                loop=loop,
+                attachment_api_token="a" * 32,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                connection.request("GET", "/api/status")
+                response = connection.getresponse()
+                status = json.loads(response.read())
+                self.assertEqual(response.status, 200)
+                csrf = status["csrf_token"]
+                revision = status["users"]["revision"]
+
+                body = json.dumps(
+                    {"revision": revision, "request_id": "api-invite-request-01", "ttl_seconds": 900}
+                )
+                connection.request("POST", "/api/users/invitations", body, {"Content-Type": "application/json"})
+                denied = connection.getresponse()
+                denied_document = json.loads(denied.read())
+                self.assertEqual(denied.status, 403)
+                self.assertEqual(denied_document["error"]["code"], "csrf_invalid")
+
+                connection.request(
+                    "POST",
+                    "/api/users/invitations",
+                    body,
+                    {"Content-Type": "text/plain", "X-CSRF-Token": csrf},
+                )
+                wrong_type = connection.getresponse()
+                wrong_type.read()
+                self.assertEqual(wrong_type.status, 415)
+
+                headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+                connection.request("POST", "/api/users/invitations", body, headers)
+                created = connection.getresponse()
+                created_document = json.loads(created.read())
+                self.assertEqual(created.status, 200)
+                self.assertIn("code", created_document["result"])
+
+                connection.request("POST", "/api/users/invitations", body, headers)
+                replay = connection.getresponse()
+                replay_document = json.loads(replay.read())
+                self.assertEqual(replay.status, 200)
+                self.assertNotIn("code", replay_document["result"])
+
+                connection.request("GET", "/api/users")
+                users_response = connection.getresponse()
+                users_document = json.loads(users_response.read())
+                encoded = json.dumps(users_document, ensure_ascii=False)
+                self.assertNotIn("fixture-owner", encoded)
+                self.assertNotIn("conversation_key", encoded)
+                self.assertRegex(users_document["result"]["users"][0]["wx_short"], r"^WX-[A-Z2-7]{10}$")
+            finally:
+                connection.close()
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                loop.close()
 
 
 if __name__ == "__main__":

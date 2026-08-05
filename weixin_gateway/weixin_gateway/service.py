@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -51,6 +52,9 @@ class ControllerClient:
         self.token = token
         self.session = session
         self._owns_session = session is None
+        self._capabilities: frozenset[str] | None = None
+        self._capabilities_checked_at = 0.0
+        self.capability_state = "unknown"
 
     @property
     def configured(self) -> bool:
@@ -69,6 +73,28 @@ class ControllerClient:
 
     async def job(self, job_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/internal/v1/jobs/{job_id}", None)
+
+    async def supports_capability(self, capability: str) -> bool:
+        if self._capabilities is not None and time.monotonic() - self._capabilities_checked_at < 60:
+            return capability in self._capabilities
+        try:
+            result = await self._request("GET", "/internal/v1/capabilities", None)
+        except StoreError as exc:
+            if exc.status in {404, 405}:
+                self._capabilities = frozenset()
+                self._capabilities_checked_at = time.monotonic()
+                self.capability_state = "legacy_incompatible"
+                return False
+            self.capability_state = "unavailable"
+            raise
+        values = result.get("capabilities")
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            self.capability_state = "invalid"
+            raise StoreError("controller_invalid_response", "Controller capabilities 响应无效", status=502)
+        self._capabilities = frozenset(values)
+        self._capabilities_checked_at = time.monotonic()
+        self.capability_state = "compatible" if capability in self._capabilities else "legacy_incompatible"
+        return capability in self._capabilities
 
     async def _request(self, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         if not self.configured:
@@ -121,6 +147,11 @@ class GatewayService:
         self.store = store
         self.controller = controller
         self.identity = identity_store.bootstrap(bootstrap_identity)
+        if self.identity is not None:
+            migration = self.store.migrate_identity_allowlist(list(self.identity.get("allowed_user_ids", [])))
+            owner_private_id = migration.get("owner_private_id")
+            if isinstance(owner_private_id, str) and self.identity.get("allowed_user_ids") != [owner_private_id]:
+                self.identity_store.mirror_owner(self.identity, owner_private_id)
         self.poller_enabled = poller_enabled
         self.owner_pairing_enabled = owner_pairing_enabled
         self.activation_confirmation = activation_confirmation
@@ -137,6 +168,7 @@ class GatewayService:
         self._status_lock = threading.Lock()
         self._stop = asyncio.Event()
         self._outbound_lock = asyncio.Lock()
+        self._authorization_lock = asyncio.Lock()
 
     async def start(self) -> None:
         await self.controller.start()
@@ -240,11 +272,29 @@ class GatewayService:
                 context_token=str(message.get("context_token") or "") or None,
             ):
                 self.identity = self.identity_store.load_identity()
+                self.store.register_paired_owner(sender_id)
                 self.poller_state = "polling"
                 self.last_message_at = utc_now()
                 await self._send_owner_pairing_confirmation(sender_id, str(message.get("context_token") or "") or None, message["message_id"])
             return
-        if sender_id not in allowed_user_ids:
+        user = self.store.user_by_private_id(sender_id)
+        if user is None:
+            claimed = self.store.claim_member_invitation(
+                user_id=sender_id,
+                text=str(message.get("text") or ""),
+            )
+            if claimed is not None:
+                if message["context_token"]:
+                    self.identity_store.set_context(self.identity, sender_id, message["context_token"])
+                self.last_message_at = utc_now()
+                await self._send_member_pairing_confirmation(
+                    sender_id,
+                    str(message.get("context_token") or "") or None,
+                    message["message_id"],
+                    claimed,
+                )
+            return
+        if user["status"] != "active":
             return
         if self.store.message_exists(message["message_id"]):
             return
@@ -258,13 +308,15 @@ class GatewayService:
                 self.last_error = exc.code
         if not message["text"] and not media:
             return
-        conversation_key = "sha256:" + hashlib.sha256(f"weixin:{sender_id}".encode("utf-8")).hexdigest()
+        user = self.store.touch_user(sender_id) or user
         self.store.store_message(
             message_id=message["message_id"],
             sender_id=sender_id,
-            conversation_key=conversation_key,
+            conversation_key=user["conversation_key"],
             text=message["text"],
             media=media,
+            user_digest=user["user_hash"],
+            capability_profile="owner" if user["role"] == "owner" else "member_read_only",
         )
         self.last_message_at = utc_now()
 
@@ -289,6 +341,32 @@ class GatewayService:
         except Exception:
             self.last_error = "owner_pairing_confirmation_failed"
 
+    async def _send_member_pairing_confirmation(
+        self,
+        sender_id: str,
+        context_token: str | None,
+        message_id: str,
+        user: dict[str, Any],
+    ) -> None:
+        if self.client is None:
+            return
+        client_id = "codex-weixin-member-pairing-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
+        try:
+            async with self._outbound_lock:
+                response = await self.client.send_text(
+                    sender_id,
+                    "微信成员绑定成功。当前账号只允许普通讨论和已批准的装修只读查询。",
+                    context_token,
+                    client_id,
+                )
+            if response.get("ret", 0) == SESSION_EXPIRED_ERRCODE or response.get("errcode", 0) == SESSION_EXPIRED_ERRCODE:
+                self.poller_state = "session_expired"
+                self.last_error = "session_expired"
+            elif response.get("ret", 0) not in {0, None} or response.get("errcode", 0) not in {0, None}:
+                self.last_error = "member_pairing_confirmation_failed"
+        except Exception:
+            self.last_error = "member_pairing_confirmation_failed"
+
     async def _delivery_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -303,8 +381,44 @@ class GatewayService:
                             "attachments": message["attachments"],
                             "reply_capabilities": ["text", "image", "file"],
                         }
+                        stored_profile = str(message.get("capability_profile") or "owner_legacy")
                         try:
-                            job = await self.controller.submit(payload)
+                            incompatible = False
+                            async with self._authorization_lock:
+                                authorization = self.store.authorize_stored_message(
+                                    message.get("user_hash"), stored_profile
+                                )
+                                if not authorization["allowed"]:
+                                    self.store.mark_finished(
+                                        message["message_id"],
+                                        success=False,
+                                        error_code=str(authorization["error_code"]),
+                                    )
+                                    continue
+                                profile = str(authorization["capability_profile"])
+                                profile_supported = await self._controller_supports_capability_profile()
+                                if profile == "member_read_only" and not profile_supported:
+                                    incompatible = True
+                                    job = None
+                                else:
+                                    if profile_supported:
+                                        payload["capability_profile"] = (
+                                            "owner" if profile == "owner_legacy" else profile
+                                        )
+                                    job = await self.controller.submit(payload)
+                            if incompatible:
+                                suppression = await self._send_direct_result(
+                                    message,
+                                    "当前 Codex Controller 尚未启用成员只读权限协商，本条消息未提交。",
+                                    error_code="controller_capability_incompatible",
+                                )
+                                self.store.mark_finished(
+                                    message["message_id"],
+                                    success=False,
+                                    error_code=suppression or "controller_capability_incompatible",
+                                )
+                                continue
+                            assert job is not None
                         except StoreError as exc:
                             self.last_error = exc.code
                             break
@@ -318,13 +432,38 @@ class GatewayService:
                         if job["state"] == "completed":
                             if self.poller_state == "session_expired":
                                 break
-                            await self._send_result(message, str(job.get("result") or "任务已完成。"))
+                            self.store.update_conversation_link(
+                                message.get("user_hash"),
+                                thread_short=job.get("thread_short"),
+                                job_id=message.get("controller_job_id"),
+                            )
+                            outbound = dict(message)
+                            outbound["thread_short"] = job.get("thread_short")
+                            suppression = await self._send_result(
+                                outbound, str(job.get("result") or "任务已完成。")
+                            )
+                            if suppression:
+                                self.store.mark_finished(
+                                    message["message_id"],
+                                    success=False,
+                                    error_code=suppression,
+                                )
+                                continue
                             self.store.mark_finished(message["message_id"], success=True)
                         elif job["state"] in {"failed", "cancelled", "recovery_required"}:
                             if self.poller_state == "session_expired":
                                 break
                             text = "任务状态需要人工核对，请在 Codex Controller 页面查看。" if job["state"] == "recovery_required" else "任务未完成，请在 Codex Controller 页面查看错误状态。"
-                            await self._send_result(message, text)
+                            outbound = dict(message)
+                            outbound["thread_short"] = job.get("thread_short")
+                            suppression = await self._send_result(outbound, text)
+                            if suppression:
+                                self.store.mark_finished(
+                                    message["message_id"],
+                                    success=False,
+                                    error_code=suppression,
+                                )
+                                continue
                             self.store.mark_finished(message["message_id"], success=False, error_code=job.get("error_code") or job["state"])
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
@@ -336,32 +475,58 @@ class GatewayService:
                 self.last_error = "delivery_failed"
                 await asyncio.sleep(5)
 
-    async def _send_result(self, message: dict[str, Any], text: str) -> None:
+    async def _controller_supports_capability_profile(self) -> bool:
+        callback = getattr(self.controller, "supports_capability", None)
+        if callback is None:
+            return False
+        return bool(await callback("job_capability_profile_v1"))
+
+    async def _send_direct_result(self, message: dict[str, Any], text: str, *, error_code: str) -> str | None:
+        direct = dict(message)
+        direct["controller_job_id"] = f"gateway-{error_code}-{message['message_id']}"
+        return await self._send_result(direct, text)
+
+    async def _send_result(self, message: dict[str, Any], text: str) -> str | None:
         if self.poller_state == "session_expired":
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         if self.identity is None or self.client is None:
             raise StoreError("credential_missing", "无法回传微信消息", status=503)
+        text = with_thread_short(text, message.get("thread_short"))
         chunks = split_text(text, 4000)
         async with self._outbound_lock:
-            for index, chunk in enumerate(chunks):
-                client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
-                if already_sent:
-                    continue
-                context = self.identity_store.context(self.identity, message["sender_id"])
-                response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
-                ret = response.get("ret", 0)
-                errcode = response.get("errcode", 0)
-                if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
-                    self.poller_state = "session_expired"
-                    self.last_error = "session_expired"
-                    raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-                if ret not in {0, None} or errcode not in {0, None}:
-                    code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
-                    self.store.mark_chunk(message["controller_job_id"], index, success=False, error_code=code)
-                    raise ProtocolError(code, "微信发送失败", retryable=code == "send_rate_limited")
-                self.store.mark_chunk(message["controller_job_id"], index, success=True)
-                if index + 1 < len(chunks):
-                    await asyncio.sleep(0.5)
+            async with self._authorization_lock:
+                authorization = self.store.authorize_stored_message(
+                    message.get("user_hash"),
+                    str(message.get("capability_profile") or "owner_legacy"),
+                )
+                if not authorization["allowed"]:
+                    return (
+                        "reply_suppressed_user_inactive"
+                        if authorization["error_code"] == "message_user_inactive"
+                        else "reply_suppressed_authorization_invalid"
+                    )
+                for index, chunk in enumerate(chunks):
+                    if self.poller_state == "session_expired":
+                        raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+                    client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
+                    if already_sent:
+                        continue
+                    context = self.identity_store.context(self.identity, message["sender_id"])
+                    response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
+                    ret = response.get("ret", 0)
+                    errcode = response.get("errcode", 0)
+                    if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
+                        self.poller_state = "session_expired"
+                        self.last_error = "session_expired"
+                        raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+                    if ret not in {0, None} or errcode not in {0, None}:
+                        code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
+                        self.store.mark_chunk(message["controller_job_id"], index, success=False, error_code=code)
+                        raise ProtocolError(code, "微信发送失败", retryable=code == "send_rate_limited")
+                    self.store.mark_chunk(message["controller_job_id"], index, success=True)
+                    if index + 1 < len(chunks):
+                        await asyncio.sleep(0.5)
+        return None
 
     async def send_notification(self, message_id: str, text: str) -> None:
         """Send one deterministic notification to the single bound owner."""
@@ -369,12 +534,13 @@ class GatewayService:
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         if self.identity is None or self.client is None:
             raise StoreError("credential_missing", "无法发送微信通知", status=503)
-        owner_id, context = self.notification_owner_context()
         client_id = "codex-weixin-notification-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
         async with self._outbound_lock:
-            if self.poller_state == "session_expired":
-                raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-            response = await self.client.send_text(owner_id, text, context, client_id)
+            async with self._authorization_lock:
+                if self.poller_state == "session_expired":
+                    raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
+                owner_id, context = self.notification_owner_context()
+                response = await self.client.send_text(owner_id, text, context, client_id)
         ret = response.get("ret", 0)
         errcode = response.get("errcode", 0)
         if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
@@ -389,10 +555,11 @@ class GatewayService:
         """Return the only authorized notification target or fail closed."""
         if self.identity is None:
             raise StoreError("credential_missing", "无法发送微信通知", status=503)
+        owner = self.store.active_owner()
+        owner_id = owner["private_user_id"]
         owners = self.identity.get("allowed_user_ids", [])
-        if not isinstance(owners, list) or len(owners) != 1:
-            raise StoreError("notification_owner_unavailable", "微信通知要求精确绑定一个 owner", status=409)
-        owner_id = owners[0]
+        if owners != [owner_id]:
+            raise StoreError("notification_owner_mirror_invalid", "微信 owner 镜像不一致", status=409)
         context = self.identity_store.context(self.identity, owner_id)
         if not context:
             raise StoreError("notification_context_missing", "微信 owner 缺少当前会话上下文", status=409)
@@ -452,24 +619,33 @@ class GatewayService:
                     self.qr_state["state"] = "expired"
                     return
                 elif state == "confirmed":
-                    self.identity_store.clear_owner_pairing()
-                    identity = {
-                        "account_id": str(response.get("ilink_bot_id") or ""),
-                        "token": str(response.get("bot_token") or ""),
-                        "base_url": str(response.get("baseurl") or "https://ilinkai.weixin.qq.com"),
-                        "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
-                        "user_id": str(response.get("ilink_user_id") or ""),
-                        "allowed_user_ids": [],
-                        "get_updates_buf": "",
-                        "context_tokens": {},
-                    }
-                    self.identity_store.save_identity(identity)
-                    self.identity = self.identity_store.load_identity()
-                    self._refresh_client()
-                    self.qr_state["state"] = "credential_ready"
+                    async with self._authorization_lock:
+                        self.identity_store.clear_owner_pairing()
+                        previous_account = None if self.identity is None else self.identity.get("account_id")
+                        identity = {
+                            "account_id": str(response.get("ilink_bot_id") or ""),
+                            "token": str(response.get("bot_token") or ""),
+                            "base_url": str(response.get("baseurl") or "https://ilinkai.weixin.qq.com"),
+                            "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+                            "user_id": str(response.get("ilink_user_id") or ""),
+                            "allowed_user_ids": [],
+                            "get_updates_buf": "",
+                            "context_tokens": {},
+                        }
+                        if self.identity is not None and self.identity.get("account_id") != identity["account_id"]:
+                            self.store.reset_access_directory_for_identity_replacement()
+                        self.identity_store.save_identity(identity)
+                        self.identity = self.identity_store.load_identity()
+                        if previous_account is not None and previous_account == identity["account_id"]:
+                            migration = self.store.migrate_identity_allowlist([])
+                            owner_private_id = migration.get("owner_private_id")
+                            if isinstance(owner_private_id, str) and self.identity is not None:
+                                self.identity_store.mirror_owner(self.identity, owner_private_id)
+                        self._refresh_client()
+                        self.qr_state["state"] = "credential_ready"
                     return
                 await asyncio.sleep(1)
-        except (ProtocolError, asyncio.CancelledError):
+        except (ProtocolError, StoreError, asyncio.CancelledError):
             if self.qr_state is not None and self.qr_state.get("state") not in {"credential_ready", "expired"}:
                 self.qr_state["state"] = "failed"
         finally:
@@ -487,8 +663,16 @@ class GatewayService:
         if self.poller_state not in {"disabled", "stopped"}:
             raise StoreError("poller_active", "真实 Poller 运行时不能导入 iLink 身份", status=409)
         self.identity_store.clear_owner_pairing()
+        previous_account = None if self.identity is None else self.identity.get("account_id")
         result = self.identity_store.import_migration(reference, key)
         self.identity = self.identity_store.load_identity()
+        if self.identity is not None:
+            if previous_account is not None and previous_account != self.identity.get("account_id"):
+                self.store.reset_access_directory_for_identity_replacement()
+            migration = self.store.migrate_identity_allowlist(list(self.identity.get("allowed_user_ids", [])))
+            owner_private_id = migration.get("owner_private_id")
+            if isinstance(owner_private_id, str) and self.identity.get("allowed_user_ids") != [owner_private_id]:
+                self.identity_store.mirror_owner(self.identity, owner_private_id)
         self._refresh_client()
         return result
 
@@ -501,15 +685,100 @@ class GatewayService:
             raise StoreError("owner_pairing_unavailable", "请先启动新身份配对 Poller", status=409)
         return self.identity_store.start_owner_pairing(self.identity)
 
+    def users(self) -> dict[str, Any]:
+        document = self.store.list_users()
+        contexts = {} if self.identity is None else self.identity.get("context_tokens", {})
+        private_by_short = {
+            self.store.short_id("WX", user["user_hash"]): user["private_user_id"]
+            for user in self._private_users()
+        }
+        for user in document["users"]:
+            private_id = private_by_short.get(user["wx_short"])
+            user["has_context"] = bool(private_id and contexts.get(private_id))
+        return document
+
+    def conversations(self) -> dict[str, Any]:
+        return self.store.list_conversations()
+
+    def create_member_invitation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.store.create_member_invitation(
+            expected_revision=payload.get("revision"),
+            request_id=payload.get("request_id"),
+            ttl_seconds=payload.get("ttl_seconds", 15 * 60),
+        )
+
+    def cancel_member_invitation(self, invite_short: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.store.cancel_member_invitation(
+            invite_short=invite_short,
+            expected_revision=payload.get("revision"),
+            request_id=payload.get("request_id"),
+        )
+
+    def update_user_alias(self, wx_short: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.store.update_alias(
+            wx_short=wx_short,
+            alias=str(payload.get("alias") or ""),
+            expected_revision=payload.get("revision"),
+            request_id=payload.get("request_id"),
+        )
+
+    async def change_user_state(self, wx_short: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self._authorization_lock:
+            return self.store.change_user_state(
+                wx_short=wx_short,
+                action=action,
+                expected_revision=payload.get("revision"),
+                request_id=payload.get("request_id"),
+            )
+
+    async def transfer_owner(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.identity is None:
+            raise StoreError("credential_missing", "缺少完整 iLink 身份", status=409)
+        async with self._authorization_lock:
+            result = self.store.transfer_owner(
+                target_wx_short=str(payload.get("target_wx_short") or ""),
+                expected_revision=payload.get("revision"),
+                request_id=payload.get("request_id"),
+                confirmation=str(payload.get("confirmation") or ""),
+            )
+            if result.pop("replayed", False):
+                return result
+            target_private_id = result.pop("owner_private_id")
+            previous_private_id = result.pop("previous_owner_private_id")
+            try:
+                self.identity_store.mirror_owner(self.identity, target_private_id)
+            except Exception as exc:
+                self.store.restore_owner_after_mirror_failure(
+                    previous_private_id,
+                    target_private_id,
+                    str(payload.get("request_id") or ""),
+                )
+                raise StoreError("owner_identity_mirror_failed", "Owner 转移未能同步身份镜像", status=500) from exc
+            return result
+
+    def _private_users(self) -> list[dict[str, Any]]:
+        with self.store._connect() as connection:
+            return [self.store._private_user_document(row) for row in connection.execute("SELECT * FROM weixin_users")]
+
     def status(self) -> dict[str, Any]:
         identity = None if self.identity is None else self.identity_store.public_summary(self.identity)
+        users = self.users()
+        active_users = sum(1 for user in users["users"] if user["status"] == "active")
         return {
-            "version": "0.1.4",
+            "version": "0.2.0",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,
             "owner_pairing": self.identity_store.owner_pairing_summary(self.identity),
             "controller_configured": self.controller.configured,
+            "controller_capability_state": getattr(self.controller, "capability_state", "unknown"),
+            "users": {
+                "revision": users["revision"],
+                "total": len(users["users"]),
+                "active": active_users,
+                "members": sum(1 for user in users["users"] if user["role"] == "member"),
+            },
+            "invitations": self.store.invitation_summary(),
             "last_poll_at": self.last_poll_at,
             "last_message_at": self.last_message_at,
             "last_error": self.last_error,
@@ -535,3 +804,15 @@ def split_text(text: str, limit: int) -> list[str]:
         chunks.append(remaining[:boundary])
         remaining = remaining[boundary:]
     return chunks
+
+
+def with_thread_short(text: str, thread_short: Any) -> str:
+    """Append the public Thread identifier once to every Controller reply."""
+    if not isinstance(thread_short, str) or not re_fullmatch_thread_short(thread_short):
+        return text
+    marker = f"Thread：{thread_short}"
+    return text if marker in text else f"{text.rstrip()}\n\n{marker}"
+
+
+def re_fullmatch_thread_short(value: str) -> bool:
+    return len(value) == 13 and value.startswith("TH-") and all(character in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" for character in value[3:])

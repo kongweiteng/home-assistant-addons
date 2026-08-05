@@ -7,7 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import select
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,7 @@ from codex_controller.mcp_proxy import socket_call, tool_catalog
 from codex_controller.media_input import TurnMediaManager
 from codex_controller.service import ControllerService, NEW_THREAD_RESULT, is_new_thread_command
 from codex_controller.store import ControllerStore, StoreError
+from codex_controller.tool_catalog import ALL_TOOL_NAMES, MEMBER_READ_ONLY_TOOL_NAMES, TOOL_BY_NAME
 from codex_controller.tool_proxy import ToolProxyError, ToolProxyServer, ToolRouter, validate_base_url
 
 
@@ -45,6 +48,7 @@ def controller_request(
     *,
     payload: dict | None = None,
     authorized: bool = False,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict]:
     token = "t" * 32
     server = create_server(
@@ -61,6 +65,8 @@ def controller_request(
     headers = {"Content-Type": "application/json"} if body is not None else {}
     if authorized:
         headers["Authorization"] = f"Bearer {token}"
+    if extra_headers:
+        headers.update(extra_headers)
     try:
         connection.request(method, path, body=body, headers=headers)
         response = connection.getresponse()
@@ -113,6 +119,10 @@ for line in sys.stdin:
         if thread_loaded:
             print(json.dumps({"id":request_id,"error":{"code":-32602,"message":"thread already loaded"}}), flush=True)
             continue
+        thread_loaded = True
+        result = {"thread":{"id":thread_id,"turns":[]}}
+    elif method == "thread/fork":
+        thread_id = "thread-forked"
         thread_loaded = True
         result = {"thread":{"id":thread_id,"turns":[]}}
     elif method == "turn/start":
@@ -221,6 +231,126 @@ class ControllerStoreTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(document["result"]["state"], "completed")
 
+    def test_capability_profile_and_hmac_short_ids_are_persistent_and_redacted(self) -> None:
+        payload = fixture_job()
+        payload["capability_profile"] = "member_read_only"
+        job = self.store.create_job(payload)
+        self.assertEqual(job["capability_profile"], "member_read_only")
+        claimed = self.store.claim_next()
+        assert claimed is not None
+        self.store.assign_thread(claimed["job_id"], "thread-private-fixture")
+        self.store.assign_turn(claimed["job_id"], "turn-private-fixture")
+        private = self.store.get_job(claimed["job_id"])
+        public = self.store.public_job(private)
+        self.assertRegex(public["thread_short"], r"^TH-[A-Z2-7]{10}$")
+        self.assertRegex(public["conversation_short"], r"^CV-[A-Z2-7]{10}$")
+        self.assertNotIn("thread-private-fixture", json.dumps(public))
+        self.assertNotIn(payload["conversation_key"], json.dumps(public))
+
+        restarted = ControllerStore(self.root / "controller.sqlite3")
+        self.assertEqual(
+            restarted.short_id("TH", "thread-private-fixture"),
+            public["thread_short"],
+        )
+        invalid = fixture_job("fixture-invalid-profile")
+        invalid["capability_profile"] = "member_writer"
+        with self.assertRaises(StoreError) as context:
+            restarted.create_job(invalid)
+        self.assertEqual(context.exception.code, "invalid_capability_profile")
+        explicit_legacy = fixture_job("fixture-explicit-owner-legacy")
+        explicit_legacy["capability_profile"] = "owner_legacy"
+        with self.assertRaises(StoreError) as legacy_context:
+            restarted.create_job(explicit_legacy)
+        self.assertEqual(legacy_context.exception.code, "invalid_capability_profile")
+
+    def test_tool_policy_revision_idempotency_concurrency_and_restart_persistence(self) -> None:
+        first = self.store.update_tool_policy(
+            "ledger_summary",
+            enabled=False,
+            revision=1,
+            request_id="request-policy-0001",
+        )
+        self.assertEqual(first["revision"], 2)
+        self.assertNotIn("ledger_summary", self.store.tool_policy_snapshot()["enabled"])
+        replay = self.store.update_tool_policy(
+            "ledger_summary",
+            enabled=False,
+            revision=1,
+            request_id="request-policy-0001",
+        )
+        self.assertEqual(replay, first)
+        with self.assertRaises(StoreError) as replay_conflict:
+            self.store.update_tool_policy(
+                "ledger_summary",
+                enabled=True,
+                revision=2,
+                request_id="request-policy-0001",
+            )
+        self.assertEqual(replay_conflict.exception.code, "idempotency_conflict")
+        with self.assertRaises(StoreError) as stale:
+            self.store.update_tool_policy(
+                "ledger_query",
+                enabled=False,
+                revision=1,
+                request_id="request-policy-0002",
+            )
+        self.assertEqual(stale.exception.code, "revision_conflict")
+
+        results: list[str] = []
+        barrier = threading.Barrier(3)
+
+        def update(name: str, request_id: str) -> None:
+            barrier.wait()
+            try:
+                self.store.update_tool_policy(name, enabled=False, revision=2, request_id=request_id)
+            except StoreError as exc:
+                results.append(exc.code)
+            else:
+                results.append("ok")
+
+        threads = [
+            threading.Thread(target=update, args=("ledger_query", "request-policy-0003")),
+            threading.Thread(target=update, args=("ledger_show", "request-policy-0004")),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=3)
+        self.assertCountEqual(results, ["ok", "revision_conflict"])
+
+        restarted = ControllerStore(self.root / "controller.sqlite3")
+        snapshot = restarted.tool_policy_snapshot()
+        self.assertEqual(snapshot["revision"], 3)
+        self.assertNotIn("ledger_summary", snapshot["enabled"])
+
+    def test_corrupt_tool_policy_fails_closed(self) -> None:
+        self.store.update_tool_policy(
+            "ledger_summary",
+            enabled=False,
+            revision=1,
+            request_id="request-corrupt-0001",
+        )
+        with self.store._connect() as connection:
+            connection.execute("PRAGMA ignore_check_constraints=ON")
+            connection.execute("UPDATE tool_policies SET enabled=2 WHERE tool_name='ledger_summary'")
+        with self.assertRaises(StoreError) as context:
+            self.store.tool_policy_snapshot()
+        self.assertEqual(context.exception.code, "tool_policy_invalid")
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            store=self.store,
+        )
+        self.assertEqual(router.available_tools(), [])
+        with self.assertRaises(ToolProxyError) as call:
+            router.call("ledger_summary", {})
+        self.assertEqual(call.exception.code, "tool_policy_invalid")
+        restarted = ControllerStore(self.root / "controller.sqlite3")
+        with self.assertRaises(StoreError) as after_restart:
+            restarted.tool_policy_snapshot()
+        self.assertEqual(after_restart.exception.code, "tool_policy_invalid")
+
 
 class AppServerClientTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -286,7 +416,8 @@ class AppServerClientTests(unittest.TestCase):
         self.assertIn("只有用户意图确实需要装修账本或 Home Assistant 操作时", instructions)
         self.assertIn("普通问答", instructions)
         self.assertIn("当前会话已配置 Renovation Hub", instructions)
-        self.assertIn("必须先调用 renovation_dashboard", instructions)
+        self.assertIn("必须从本轮实际可用且与意图匹配的只读工具中选择", instructions)
+        self.assertIn("ledger_query, ledger_summary, renovation_dashboard", instructions)
         self.assertIn("无副作用的只读工具", instructions)
         self.assertIn("不需要 Passkey、写入确认或额外征求授权", instructions)
         self.assertIn("不得转入 Home Assistant Operations 授权流程", instructions)
@@ -302,7 +433,7 @@ class AppServerClientTests(unittest.TestCase):
             return {"thread": {"id": "thread-existing", "turns": []}}
 
         self.client.request = fake_request  # type: ignore[method-assign]
-        self.client.resume_thread("thread-existing")
+        self.assertEqual(self.client.resume_thread("thread-existing"), "thread-existing")
         self.assertEqual(observed[0][0], "thread/resume")
         params = observed[0][1]
         self.assertEqual(params["threadId"], "thread-existing")
@@ -321,8 +452,54 @@ class AppServerClientTests(unittest.TestCase):
 
         self.client.request = fake_request  # type: ignore[method-assign]
         self.assertEqual(self.client.start_thread(), "thread-new")
-        self.client.resume_thread("thread-new")
+        self.assertEqual(self.client.resume_thread("thread-new"), "thread-new")
         self.assertEqual(observed, ["thread/start"])
+
+    def test_empty_loaded_thread_is_replaced_when_developer_context_changes(self) -> None:
+        observed: list[tuple[str, dict]] = []
+
+        def fake_request(method: str, params: dict) -> dict:
+            observed.append((method, params))
+            thread_id = "thread-original" if len(observed) == 1 else "thread-replacement"
+            return {"thread": {"id": thread_id, "turns": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(self.client.start_thread(), "thread-original")
+        self.client.configure_developer_context(["ledger_show"], "member_read_only")
+        self.assertEqual(self.client.resume_thread("thread-original"), "thread-replacement")
+        self.assertEqual([method for method, _params in observed], ["thread/start", "thread/start"])
+        replacement = observed[1][1]
+        self.assertEqual(replacement["sandbox"], "read-only")
+        self.assertEqual(replacement["approvalPolicy"], "never")
+        self.assertIn("当前微信用户是成员", replacement["developerInstructions"])
+
+    def test_loaded_thread_with_turn_is_forked_when_developer_context_changes(self) -> None:
+        observed: list[tuple[str, dict]] = []
+
+        def fake_request(method: str, params: dict) -> dict:
+            observed.append((method, params))
+            if method == "turn/start":
+                return {"turn": {"id": "turn-original"}}
+            thread_id = "thread-original" if method == "thread/start" else "thread-refreshed"
+            return {"thread": {"id": thread_id, "turns": []}}
+
+        self.client.request = fake_request  # type: ignore[method-assign]
+        self.assertEqual(self.client.start_thread(), "thread-original")
+        self.assertEqual(
+            self.client.start_turn("thread-original", "普通讨论", "message-original"),
+            "turn-original",
+        )
+        self.client.configure_developer_context(["ledger_show"], "member_read_only")
+        self.assertEqual(self.client.resume_thread("thread-original"), "thread-refreshed")
+        self.assertEqual(
+            [method for method, _params in observed],
+            ["thread/start", "turn/start", "thread/fork"],
+        )
+        fork = observed[2][1]
+        self.assertEqual(fork["threadId"], "thread-original")
+        self.assertEqual(fork["sandbox"], "read-only")
+        self.assertEqual(fork["approvalPolicy"], "never")
+        self.assertIn("当前微信用户是成员", fork["developerInstructions"])
 
     def test_stop_clears_loaded_threads_and_requires_resume_after_restart(self) -> None:
         observed: list[str] = []
@@ -334,7 +511,7 @@ class AppServerClientTests(unittest.TestCase):
         self.client.request = fake_request  # type: ignore[method-assign]
         self.assertEqual(self.client.start_thread(), "thread-restart")
         self.client.stop()
-        self.client.resume_thread("thread-restart")
+        self.assertEqual(self.client.resume_thread("thread-restart"), "thread-restart")
         self.assertEqual(observed, ["thread/start", "thread/resume"])
 
     def test_concurrent_resume_of_unknown_thread_sends_only_one_rpc(self) -> None:
@@ -397,16 +574,87 @@ class AppServerClientTests(unittest.TestCase):
             self.assertEqual(current["thread_id"], "thread-fixture")
             self.assertEqual(current["result"], "查询完成。")
 
+    def test_buffered_agent_item_is_flushed_before_turn_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            service = ControllerService(store, self.client, intake_enabled=False)
+            job = store.create_job(fixture_job("fixture-buffered-item"))
+            running = store.claim_next()
+            assert running is not None
+
+            service.handle_notification(
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "turnId": "turn-buffered",
+                        "item": {"type": "agentMessage", "text": "缓存结果。"},
+                    },
+                }
+            )
+            store.assign_thread(job["job_id"], "thread-buffered")
+            store.assign_turn(job["job_id"], "turn-buffered")
+            service.handle_notification(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "turn": {"id": "turn-buffered", "status": "completed"},
+                    },
+                }
+            )
+
+            self.assertEqual(store.get_job(job["job_id"])["state"], "running")
+            service._flush_turn_events("turn-buffered")
+            completed = store.get_job(job["job_id"])
+            self.assertEqual(completed["state"], "completed")
+            self.assertEqual(completed["result"], "缓存结果。")
+
     def test_current_instructions_describe_only_the_configured_tool_families(self) -> None:
         operations_only = AppServerClient.build_developer_instructions(
             ["ha_operations_propose_restart"]
         )
         self.assertIn("当前会话未配置 Renovation Hub", operations_only)
         self.assertIn("当前会话已配置受控 Home Assistant Operations", operations_only)
+        self.assertIn("不依赖 Codex UI 审批", operations_only)
+        self.assertIn("Passkey", operations_only)
+        self.assertIn("一次性收据", operations_only)
 
         no_tools = AppServerClient.build_developer_instructions([])
         self.assertIn("当前会话未配置 Renovation Hub", no_tools)
         self.assertNotIn("当前会话已配置受控 Home Assistant Operations", no_tools)
+
+        member = AppServerClient.build_developer_instructions(
+            sorted(MEMBER_READ_ONLY_TOOL_NAMES),
+            "member_read_only",
+        )
+        self.assertIn("当前微信用户是成员", member)
+        self.assertIn("不得尝试账本写入", member)
+        self.assertNotIn("当前会话已配置受控 Home Assistant Operations", member)
+
+        partial = AppServerClient.build_developer_instructions(["ledger_summary"])
+        self.assertIn("当前会话已配置 Renovation Hub 工具：ledger_summary", partial)
+        self.assertIn("当前可用于装修只读核验的工具是：ledger_summary", partial)
+        self.assertNotIn("ledger_query, ledger_summary", partial)
+        self.assertNotIn("当前会话未配置 Renovation Hub", partial)
+
+    def test_owner_clear_tool_request_is_direct_authorization_without_write_inference(self) -> None:
+        instructions = AppServerClient.build_developer_instructions(
+            [
+                "ledger_generate_chart",
+                "ledger_export",
+                "ledger_add_refund",
+                "ledger_correct_payment",
+                "renovation_media_ingest",
+                "ha_operations_execute_restart",
+            ],
+            "owner",
+        )
+        self.assertIn("图表、导出、记账、退款、更正", instructions)
+        self.assertIn("该请求本身就是本次匹配结构化工具调用的授权", instructions)
+        self.assertIn("不得再询问是否确认、是否授权或要求 Codex 弹窗审批", instructions)
+        self.assertIn("只有缺少工具必填字段", instructions)
+        self.assertIn("讨论、假设、举例、方案比较", instructions)
+        self.assertIn("不得推断为写入指令", instructions)
+        self.assertIn("任何工具预批准都不是对实际 Home Assistant 变更的授权", instructions)
 
     def test_turn_accepts_official_local_image_input(self) -> None:
         observed: list[tuple[str, dict]] = []
@@ -569,16 +817,13 @@ class ControllerApiBaseUrlTests(unittest.TestCase):
             self.assertEqual(mcp_config["env"]["PYTHONPATH"], str(mcp_pythonpath))
             self.assertEqual(
                 mcp_config["tools"],
-                {
-                    "ledger_query": {"approval_mode": "approve"},
-                    "ledger_show": {"approval_mode": "approve"},
-                    "ledger_summary": {"approval_mode": "approve"},
-                    "renovation_area_list": {"approval_mode": "approve"},
-                    "renovation_dashboard": {"approval_mode": "approve"},
-                    "renovation_project_list": {"approval_mode": "approve"},
-                    "renovation_stage_list": {"approval_mode": "approve"},
-                    "renovation_timeline": {"approval_mode": "approve"},
-                },
+                {name: {"approval_mode": "approve"} for name in ALL_TOOL_NAMES},
+            )
+            self.assertEqual(mcp_config["tools"]["ledger_generate_chart"], {"approval_mode": "approve"})
+            self.assertEqual(mcp_config["tools"]["ledger_add_refund"], {"approval_mode": "approve"})
+            self.assertEqual(
+                mcp_config["tools"]["ha_operations_execute_restart"],
+                {"approval_mode": "approve"},
             )
             self.assertNotIn("fixture-api-key-value", content)
             self.assertEqual(list(codex_home.glob(".config.toml.*")), [])
@@ -634,6 +879,11 @@ class ControllerApiBaseUrlTests(unittest.TestCase):
                 self.assertEqual(initialized["result"]["serverInfo"]["name"], "ha-controller-tools")
                 self.assertEqual(len(catalog["result"]["tools"]), 26)
                 by_name = {tool["name"]: tool for tool in catalog["result"]["tools"]}
+                self.assertTrue(set(by_name).issubset(mcp_config["tools"]))
+                for name in by_name:
+                    self.assertEqual(mcp_config["tools"][name], {"approval_mode": "approve"})
+                self.assertEqual(mcp_config["tools"]["ledger_generate_chart"], {"approval_mode": "approve"})
+                self.assertEqual(mcp_config["tools"]["ledger_add_refund"], {"approval_mode": "approve"})
                 self.assertIn("renovation_dashboard", by_name)
                 for name in (
                     "ledger_query",
@@ -804,7 +1054,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
         )
         try:
             status = service.status()
-            self.assertEqual(status["tools"]["count"], 31)
+            self.assertEqual(status["tools"]["count"], 30)
             self.assertTrue(status["tools"]["renovation_hub"])
             self.assertTrue(status["tools"]["operations"])
             self.assertIn("ledger_summary", status["tools"]["names"])
@@ -867,6 +1117,10 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertNotIn("<input", DASHBOARD_HTML.lower())
         self.assertNotIn("openai_api_key", DASHBOARD_HTML + DASHBOARD_JS)
         self.assertNotIn("openai_base_url", DASHBOARD_HTML + DASHBOARD_JS)
+        self.assertIn("意图示例不是固定关键词", DASHBOARD_HTML)
+        self.assertIn("X-CSRF-Token", DASHBOARD_JS)
+        self.assertIn("MCP 已发布", DASHBOARD_JS)
+        self.assertNotIn("innerHTML", DASHBOARD_JS)
 
     def test_addon_config_and_run_script_keep_key_out_of_environment(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
@@ -883,7 +1137,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.1.9"
+        expected = "0.2.0"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -994,7 +1248,8 @@ class ControllerAuthenticationTests(unittest.TestCase):
             completed = store.get_job(reset["job_id"])
             self.assertEqual(completed["state"], "completed")
             self.assertEqual(completed["thread_id"], "thread-refreshed")
-            self.assertEqual(completed["result"], NEW_THREAD_RESULT)
+            self.assertTrue(completed["result"].startswith(NEW_THREAD_RESULT))
+            self.assertRegex(completed["result"], r"Thread：TH-[A-Z2-7]{10}$")
             self.assertEqual(app.started, 1)
             self.assertEqual(app.resumed, [])
             self.assertEqual(app.turns, [])
@@ -1011,7 +1266,322 @@ class ControllerAuthenticationTests(unittest.TestCase):
             self.assertEqual(app.turns, [("thread-refreshed", "当前连接装修账本了吗")])
 
 
+class ControllerToolApiTests(unittest.TestCase):
+    class App:
+        auth_mode = "apiKey"
+        account_ready = True
+        notification_handler = None
+
+        @staticmethod
+        def status() -> dict:
+            return {
+                "running": True,
+                "initialized": True,
+                "protocol_error": None,
+                "account": {"auth_mode": "apiKey", "plan_type": None, "ready": True},
+            }
+
+    def test_tool_management_requires_json_csrf_revision_and_idempotency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            router = ToolRouter(
+                ledger_base_url="http://renovation-hub:8101",
+                ledger_token="l" * 32,
+                store=store,
+            )
+            service = ControllerService(
+                store,
+                self.App(),  # type: ignore[arg-type]
+                intake_enabled=True,
+                auth_mode="api_key",
+                api_key="fixture-api-key-value",
+                tool_context=router,
+            )
+            queued = store.create_job(fixture_job("fixture-api-private"))
+            running = store.claim_next()
+            assert running is not None
+            store.assign_thread(queued["job_id"], "thread-api-private")
+            store.assign_turn(queued["job_id"], "turn-api-private")
+
+            token = "t" * 32
+            server = create_server(
+                "127.0.0.1",
+                0,
+                service=service,
+                api_token=token,
+                max_request_bytes=1024 * 1024,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def request(
+                method: str,
+                path: str,
+                payload: dict | None = None,
+                headers: dict[str, str] | None = None,
+            ) -> tuple[int, dict]:
+                connection = HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                body = None if payload is None else json.dumps(payload).encode("utf-8")
+                try:
+                    connection.request(method, path, body=body, headers=headers or {})
+                    response = connection.getresponse()
+                    return response.status, json.loads(response.read())
+                finally:
+                    connection.close()
+
+            try:
+                status_code, status = request("GET", "/api/status")
+                self.assertEqual(status_code, 200)
+                csrf = status["csrf_token"]
+                serialized = json.dumps(status, ensure_ascii=False)
+                self.assertNotIn("thread-api-private", serialized)
+                self.assertNotIn("turn-api-private", serialized)
+                self.assertNotIn(fixture_job()["conversation_key"], serialized)
+                self.assertRegex(status["queue"]["active_job"]["thread_short"], r"^TH-[A-Z2-7]{10}$")
+                self.assertNotIn("capability_profile", status["queue"]["active_job"])
+
+                auth_without_csrf, auth_document = request(
+                    "POST",
+                    "/api/auth/api-key/retry",
+                    {},
+                    {"Content-Type": "application/json"},
+                )
+                self.assertEqual((auth_without_csrf, auth_document["error"]["code"]), (403, "csrf_required"))
+
+                payload = {"enabled": False, "revision": 1, "request_id": "request-api-0001"}
+                missing_status, missing = request(
+                    "PATCH",
+                    "/api/tools/ledger_summary",
+                    payload,
+                    {"Content-Type": "application/json"},
+                )
+                self.assertEqual((missing_status, missing["error"]["code"]), (403, "csrf_required"))
+                media_status, media = request(
+                    "PATCH",
+                    "/api/tools/ledger_summary",
+                    payload,
+                    {"Content-Type": "text/plain", "X-CSRF-Token": csrf},
+                )
+                self.assertEqual((media_status, media["error"]["code"]), (415, "content_type_required"))
+                headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+                updated_status, updated = request(
+                    "PATCH", "/api/tools/ledger_summary", payload, headers
+                )
+                self.assertEqual(updated_status, 200)
+                self.assertEqual(updated["result"]["revision"], 2)
+                replay_status, replay = request(
+                    "PATCH", "/api/tools/ledger_summary", payload, headers
+                )
+                self.assertEqual(replay_status, 200)
+                self.assertEqual(replay["result"], updated["result"])
+                conflict_status, conflict = request(
+                    "PATCH",
+                    "/api/tools/ledger_summary",
+                    {"enabled": True, "revision": 2, "request_id": "request-api-0001"},
+                    headers,
+                )
+                self.assertEqual((conflict_status, conflict["error"]["code"]), (409, "idempotency_conflict"))
+                stale_status, stale = request(
+                    "PATCH",
+                    "/api/tools/ledger_query",
+                    {"enabled": False, "revision": 1, "request_id": "request-api-0002"},
+                    headers,
+                )
+                self.assertEqual((stale_status, stale["error"]["code"]), (409, "revision_conflict"))
+
+                tools_status, tools = request("GET", "/api/tools")
+                self.assertEqual(tools_status, 200)
+                self.assertEqual(tools["result"]["revision"], 2)
+                by_name = {item["name"]: item for item in tools["result"]["tools"]}
+                self.assertFalse(by_name["ledger_summary"]["enabled"])
+                self.assertEqual(len(by_name), 32)
+
+                unauthorized, _ = request("GET", "/internal/v1/capabilities")
+                self.assertEqual(unauthorized, 401)
+                capability_status, capabilities = request(
+                    "GET",
+                    "/internal/v1/capabilities",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                self.assertEqual(capability_status, 200)
+                self.assertIn("job_capability_profile_v1", capabilities["result"]["capabilities"])
+                self.assertNotIn("owner_legacy", json.dumps(capabilities))
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+
 class ToolRouterTests(unittest.TestCase):
+    def test_tool_metadata_is_complete_unique_and_member_allowlist_is_exact(self) -> None:
+        self.assertEqual(len(ALL_TOOL_NAMES), 32)
+        self.assertEqual(set(TOOL_BY_NAME), set(ALL_TOOL_NAMES))
+        self.assertEqual(
+            MEMBER_READ_ONLY_TOOL_NAMES,
+            {
+                "ledger_show",
+                "ledger_query",
+                "ledger_summary",
+                "renovation_dashboard",
+                "renovation_project_list",
+                "renovation_stage_list",
+                "renovation_area_list",
+                "renovation_timeline",
+            },
+        )
+        for definition in TOOL_BY_NAME.values():
+            with self.subTest(name=definition.name):
+                self.assertTrue(definition.display_name)
+                self.assertTrue(definition.intent_examples)
+                self.assertIn(definition.risk_type, {"read_only", "write", "controlled"})
+                self.assertEqual(definition.input_schema["type"], "object")
+
+    def test_tool_invocation_audit_is_bounded_to_latest_thousand_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database_path = Path(temporary) / "controller.sqlite3"
+            store = ControllerStore(database_path)
+            for index in range(1005):
+                store.record_tool_invocation(
+                    "ledger_summary",
+                    outcome="succeeded",
+                    error_code=None,
+                    duration_ms=index,
+                )
+            with sqlite3.connect(database_path) as connection:
+                count, minimum_duration, maximum_duration = connection.execute(
+                    "SELECT COUNT(*),MIN(duration_ms),MAX(duration_ms) FROM tool_invocations"
+                ).fetchone()
+            self.assertEqual(count, 1000)
+            self.assertEqual(minimum_duration, 5)
+            self.assertEqual(maximum_duration, 1004)
+
+    def test_policy_and_member_profile_fail_closed_before_upstream(self) -> None:
+        observed: list[str] = []
+
+        def fake_request(_method: str, _url: str, _token: str, payload: dict | None) -> dict:
+            assert payload is not None
+            observed.append(payload["name"])
+            return {"version": 1, "result": {"ok": True}}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            router = ToolRouter(
+                ledger_base_url="http://renovation-hub:8101",
+                ledger_token="l" * 32,
+                operations_base_url="http://ha-operations-broker:8098",
+                operations_token="o" * 32,
+                request_json=fake_request,
+                store=store,
+            )
+            router.begin_job("member-job", "member-message", "member_read_only")
+            router.call("ledger_summary", {})
+            self.assertEqual(observed, ["ledger_summary"])
+            for name in (
+                "ledger_add_payment",
+                "ledger_add_refund",
+                "ledger_generate_chart",
+                "ledger_export",
+                "ha_operations_authorization_status",
+            ):
+                with self.subTest(name=name), self.assertRaises(ToolProxyError) as context:
+                    router.call(name, {})
+                self.assertEqual(context.exception.code, "tool_not_allowed_for_profile")
+            router.clear_job("member-job")
+
+            store.update_tool_policy(
+                "ledger_summary",
+                enabled=False,
+                revision=1,
+                request_id="request-router-0001",
+            )
+            self.assertNotIn("ledger_summary", router.available_tools())
+            with self.assertRaises(ToolProxyError) as disabled:
+                router.call("ledger_summary", {})
+            self.assertEqual(disabled.exception.code, "tool_disabled")
+            self.assertEqual(observed, ["ledger_summary"])
+            status = store.tool_control_document(router.configured_tools())
+            latest = {tool["name"]: tool for tool in status["tools"]}["ledger_summary"]["last_invocation"]
+            self.assertEqual(latest["outcome"], "rejected")
+            self.assertEqual(latest["error_code"], "tool_disabled")
+
+    def test_real_mcp_process_observes_catalog_emits_list_changed_and_rejects_disabled_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ControllerStore(root / "controller.sqlite3")
+            socket_path = root / "tool-proxy.sock"
+            router = ToolRouter(
+                ledger_base_url="http://renovation-hub:8101",
+                ledger_token="l" * 32,
+                store=store,
+            )
+            proxy = ToolProxyServer(socket_path, router)
+            proxy.start()
+            process = subprocess.Popen(
+                [sys.executable, "-m", "codex_controller.mcp_proxy"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "codex_controller"),
+                    "CONTROLLER_MCP_SOCKET": str(socket_path),
+                },
+            )
+
+            def exchange(document: dict, timeout: float = 3.0) -> dict:
+                assert process.stdin is not None and process.stdout is not None
+                process.stdin.write(json.dumps(document) + "\n")
+                process.stdin.flush()
+                ready, _, _ = select.select([process.stdout], [], [], timeout)
+                self.assertTrue(ready, "MCP 子进程未在期限内输出")
+                return json.loads(process.stdout.readline())
+
+            try:
+                initialized = exchange({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+                self.assertTrue(initialized["result"]["capabilities"]["tools"]["listChanged"])
+                listed = exchange({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+                self.assertIn("ledger_summary", {tool["name"] for tool in listed["result"]["tools"]})
+                observed = store.tool_control_document(router.configured_tools())
+                self.assertTrue(observed["mcp"]["current"])
+                self.assertIsNotNone(observed["mcp"]["observed_at"])
+
+                store.update_tool_policy(
+                    "ledger_summary",
+                    enabled=False,
+                    revision=1,
+                    request_id="request-mcp-0001",
+                )
+                assert process.stdout is not None
+                ready, _, _ = select.select([process.stdout], [], [], 3)
+                self.assertTrue(ready, "未收到 MCP tools/list_changed")
+                notification = json.loads(process.stdout.readline())
+                self.assertEqual(notification["method"], "notifications/tools/list_changed")
+                relisted = exchange({"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}})
+                self.assertNotIn("ledger_summary", {tool["name"] for tool in relisted["result"]["tools"]})
+                rejected = exchange(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {"name": "ledger_summary", "arguments": {}},
+                    }
+                )
+                self.assertTrue(rejected["result"]["isError"])
+                self.assertIn("tool_disabled", rejected["result"]["content"][0]["text"])
+                refreshed = store.tool_control_document(router.configured_tools())
+                self.assertTrue(refreshed["mcp"]["current"])
+                self.assertFalse({tool["name"]: tool for tool in refreshed["tools"]}["ledger_summary"]["mcp_published"])
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
+                proxy.stop()
+
     def test_mcp_catalog_filters_unconfigured_tools_and_operations_schemas_are_closed(self) -> None:
         catalog = tool_catalog(["ledger_summary", "ha_operations_propose_restart"])
         self.assertEqual([tool["name"] for tool in catalog], ["ledger_summary", "ha_operations_propose_restart"])
@@ -1383,7 +1953,7 @@ class ToolRouterTests(unittest.TestCase):
                 "ledger_attach",
                 {"idempotency_key": "fixture", "transaction_id": "fixture", "attachment_ref": "a" * 43},
             )
-        self.assertEqual(context.exception.code, "gateway_unavailable")
+        self.assertEqual(context.exception.code, "tool_unconfigured")
 
     def test_media_tool_streams_reference_without_base64_arguments(self) -> None:
         observed: list[tuple] = []

@@ -1,5 +1,19 @@
 # 更新记录
 
+## 0.2.0
+
+- 新增全部 32 个 MCP 工具的唯一元数据事实源，统一中文名称、服务归属、只读/写入/受控类型、Schema 和自然语言意图示例；Ingress 明确意图示例不是固定关键词。
+- 新增 SQLite 逐工具策略、catalog revision、管理 request ID 幂等、真实 MCP `tools/list` 心跳和有界脱敏调用审计；升级为 additive schema，既有工具默认开启并可在重启后保持策略。
+- MCP 声明 `listChanged` 并在策略 revision 变化时发送 `notifications/tools/list_changed`；页面的“已发布”只来自真实 `tools/list` 回报，不再使用 Router 本地清单推断。
+- 已加载 Thread 的角色或有效工具上下文变化时替换 conversation Thread：尚未发生 Turn 的空 Thread 重新 `thread/start`，已有持久 Turn 的 Thread 使用官方 `thread/fork` 保留历史；兼容 Codex `0.146.0` 对空 Thread 返回 `no rollout found` 的行为。
+- 工具关闭同时作用于 `tools/list` 和 `tools/call`。旧 Thread、缓存目录、策略损坏和未知策略均不能绕过服务端 fail-closed 门禁。
+- 新增 `owner_legacy`、`owner` 和 `member_read_only` 作业能力画像；成员只允许 8 个确定性安全装修查询，写账、媒体、导出和 Operations 保持拒绝。
+- 新增 HMAC `CV-*`、`TH-*`、`JB-*`、`TN-*` 排障短标识；`/new` 固定确认携带新 Thread 短标识，状态与作业 DTO 不返回完整会话、Thread 或 Turn ID。
+- 新增 JSON + 短期 CSRF + revision + request ID 工具管理 API和完整深色 Ingress 交互；错误、调用审计和页面均不回显 URL、bearer、API Key 或工具参数正文。
+- 修复 `item/completed` 在 Turn 绑定前被缓存、而 `turn/completed` 在绑定后抢先完成作业的竞态；同一 Turn 的缓存事件固定先落最终文本再完成状态，避免微信偶发取得空结果。
+- 私有 Codex 配置为全部 32 个固定内部 MCP 工具写入 `approval_mode="approve"`，覆盖 `ledger_generate_chart`、`ledger_add_refund` 和 Operations；保持 `approvalPolicy=never`，移除微信入口无法交互的 Codex 二次审批。
+- owner 的清晰查询、图表、导出、记账、退款、更正、撤销和归档请求本身即为匹配工具调用授权；仅在必填字段缺失或语义确实歧义时澄清，讨论/假设不得推断为写入。member、逐工具策略、Hub writer/幂等和 Broker Passkey/收据/allowlist/execution 门禁不变。
+
 ## 0.1.9
 
 - 修复 `/new` 创建的新 Thread 在同一 app-server 进程内被下一条消息重复 `thread/resume`、导致请求在 `turn/start` 前失败的问题。

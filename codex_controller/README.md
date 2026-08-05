@@ -26,6 +26,12 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.1.9` 修复同一 app-server 进程内新建 Thread 被下一条消息重复 `thread/resume` 的问题；当前进程已加载的 Thread 直接进入 `turn/start`，Controller/app-server 重启后才按持久映射恢复。
 - `0.1.9` 同时修复净化后的 app-server 环境无法导入本地 MCP 代理的问题；MCP 子进程只获得固定模块路径和无秘密 Unix Socket，真实 `tools/list` 必须能返回当前装修/运维工具目录。
 - `0.1.9` 将账本汇总、明细、单条流水以及装修项目/阶段/空间/时间线/驾驶舱查询明确标记为无副作用只读工具，并在 Codex MCP 配置中只预批准这些查询工具。用户自然语言提出查询或汇总即授权本次只读调用，不需要 Passkey 或额外确认；写账、退款、修改、撤销、归档和 Operations 权限不放宽。
+- `0.2.0` 新增 MCP 工具控制台：页面列出全部 32 个已知工具的中文名称、所属服务、风险类型、配置/策略/实际发布/可调用状态、自然语言意图示例和脱敏最近调用结果。意图示例不是固定关键词。
+- 每个工具都有 SQLite 持久开关。关闭会同时从下一次 MCP `tools/list` 隐藏并在 `tools/call` 服务端立即拒绝，因此旧 Thread 或缓存目录不能绕过；策略损坏时目录和调用全部 fail closed。
+- MCP 进程声明并发送标准 `notifications/tools/list_changed`，Controller 只把真实 `tools/list` 回报记录为“已发布”，不再用主进程本地清单冒充 app-server 实际装载。
+- Gateway 作业可携带 `owner` 或 `member_read_only` 能力画像；成员只允许 8 个确定性安全装修查询。Thread、会话、作业和 Turn 的页面诊断使用私有 HMAC 短标识，`/new` 回复会附带 `TH-*`。
+- 同一 app-server 进程中，Thread 的角色或有效工具上下文变化时会替换 conversation 的 Thread：尚未发生 Turn 的空 Thread 不能被官方 `thread/fork`，因此重新 `thread/start`；已经发生 Turn 并持久化的 Thread 才使用官方 `thread/fork` 保留历史。服务端工具门禁始终独立生效。
+- `0.2.0` 为全部 32 个固定内部 MCP 工具写入单工具 `approval_mode="approve"`，保持 Thread/Turn 的 `approvalPolicy=never`，使 owner 的清晰查询、图表、导出、记账、退款、更正和归档请求不再依赖无法在微信中操作的 Codex 审批弹窗。该配置只移除模型层二次审批，不改变 member allowlist、逐工具策略、Hub writer/幂等或 Operations Broker 门禁。
 - 默认仍不启用正式微信任务入口。
 - 旧 Hermes iLink 身份已经失效；正式装修 writer 已迁移到 Renovation Hub，Hermes 已停止，微信恢复不能依赖恢复旧 Hermes 进程，也不得形成双 poller 或双 writer。
 
@@ -37,7 +43,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - Ledger 与 Operations Broker bearer 只保留在 Controller 主进程，不进入 app-server 环境、模型提示或日志。
 - Gateway 附件 bearer 也只保留在 Controller 主进程；模型仅能提交短期 `attachment_ref`。图片预览文件固定写入私有 `/data/turn-media`，权限为 `0600`，不使用微信文件名构造路径。
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
-- MCP 工具审批只对已核实的无副作用装修查询使用单工具 `approve`；其他工具继续沿用 Codex 默认判断及 Controller/Hub/Broker 服务端强制门禁，不能用只读标注绕过写入控制。
+- 全部固定内部 MCP 工具使用单工具 `approve`，因此微信路径不依赖 Codex UI 审批；这不是权限放宽。`member_read_only`、逐工具策略、当前作业/Turn、稳定幂等键、Hub 单 writer 以及 Broker 的提案、Passkey、一次性收据、allowlist 和 execution gate 继续在服务端强制。
 - Controller 重启后，状态不确定的运行中作业进入 `recovery_required`，不会自动重放写操作。
 - 写工具只在当前活动 Turn 的上下文中可调用；Turn 结束后上下文立即清除，同一微信消息的同语义调用复用相同幂等键，不同消息生成不同幂等键。
 

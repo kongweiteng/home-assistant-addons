@@ -20,7 +20,13 @@ import unittest
 
 from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
 from codex_controller.app_server import AppServerClient, AppServerError
-from codex_controller.main import normalize_codex_model, normalize_openai_base_url, read_api_key_from_fd, write_codex_config
+from codex_controller.main import (
+    codex_app_server_command,
+    normalize_codex_model,
+    normalize_openai_base_url,
+    read_api_key_from_fd,
+    write_codex_config,
+)
 from codex_controller.mcp_proxy import socket_call, tool_catalog
 from codex_controller.media_input import TurnMediaManager
 from codex_controller.service import ControllerService, NEW_THREAD_RESULT, is_new_thread_command
@@ -552,6 +558,26 @@ class AppServerClientTests(unittest.TestCase):
         self.assertIn("不得回复‘未连接账本’", instructions)
         self.assertIn("不得沿用历史对话中的旧 Mac 代理", instructions)
         self.assertIn("不得使用 Shell", instructions)
+
+    def test_monitoring_requests_cannot_create_goals_or_background_continuations(self) -> None:
+        instructions = AppServerClient.build_developer_instructions(
+            ["ledger_summary"],
+            "owner",
+        )
+        self.assertIn("不得创建 Codex Goal", instructions)
+        self.assertIn("不得承诺后台持续监控", instructions)
+        self.assertIn("独立自动化服务", instructions)
+        self.assertEqual(
+            codex_app_server_command("/opt/codex/codex"),
+            [
+                "/opt/codex/codex",
+                "app-server",
+                "--disable",
+                "goals",
+                "--listen",
+                "stdio://",
+            ],
+        )
 
     def test_thread_resume_refreshes_current_instructions_and_safety_policy(self) -> None:
         observed: list[tuple[str, dict]] = []
@@ -1267,7 +1293,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.2.2"
+        expected = "0.2.3"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1588,6 +1614,90 @@ class ControllerToolApiTests(unittest.TestCase):
 
 
 class ToolRouterTests(unittest.TestCase):
+    def test_structured_hub_validation_error_is_preserved_safely(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args: object) -> None:
+                return None
+
+            def do_POST(self) -> None:  # noqa: N802
+                body = json.dumps(
+                    {
+                        "error": {
+                            "code": "invalid_tags",
+                            "message": "grouped_tags 包含未知维度",
+                        }
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            router = ToolRouter(
+                ledger_base_url=f"http://localhost:{server.server_port}",
+                ledger_token="l" * 32,
+            )
+            router.begin_job("fixture-validation-job", "fixture-validation-message", "owner")
+            with self.assertRaises(ToolProxyError) as context:
+                router.call(
+                    "ledger_add_payment",
+                    {
+                        "amount_cents": 100,
+                        "occurred_on": "2026-08-05",
+                        "grouped_tags": {"未知": ["测试"]},
+                    },
+                )
+            self.assertEqual(context.exception.code, "invalid_tags")
+            self.assertEqual(str(context.exception), "grouped_tags 包含未知维度")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_unstructured_hub_http_error_remains_generic(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *_args: object) -> None:
+                return None
+
+            def do_POST(self) -> None:  # noqa: N802
+                body = b"upstream private failure"
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            router = ToolRouter(
+                ledger_base_url=f"http://localhost:{server.server_port}",
+                ledger_token="l" * 32,
+            )
+            router.begin_job("fixture-generic-job", "fixture-generic-message", "owner")
+            with self.assertRaises(ToolProxyError) as context:
+                router.call(
+                    "ledger_add_payment",
+                    {
+                        "amount_cents": 100,
+                        "occurred_on": "2026-08-05",
+                        "grouped_tags": {},
+                    },
+                )
+            self.assertEqual(context.exception.code, "upstream_rejected")
+            self.assertNotIn("private failure", str(context.exception))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
     def test_chart_tool_requires_active_job_before_hub_call(self) -> None:
         calls: list[str] = []
 
@@ -1671,6 +1781,27 @@ class ToolRouterTests(unittest.TestCase):
                 self.assertTrue(definition.intent_examples)
                 self.assertIn(definition.risk_type, {"read_only", "write", "controlled"})
                 self.assertEqual(definition.input_schema["type"], "object")
+        payment_schema = TOOL_BY_NAME["ledger_add_payment"].input_schema
+        self.assertEqual(
+            set(payment_schema["required"]),
+            {"amount_cents", "occurred_on", "grouped_tags"},
+        )
+        self.assertEqual(
+            set(payment_schema["properties"]),
+            {
+                "amount_cents",
+                "occurred_on",
+                "grouped_tags",
+                "merchant",
+                "note",
+                "is_deposit",
+                "source_ref",
+                "project_id",
+                "stage_id",
+                "area_id",
+            },
+        )
+        self.assertFalse(payment_schema["properties"]["grouped_tags"]["additionalProperties"])
 
     def test_tool_invocation_audit_is_bounded_to_latest_thousand_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

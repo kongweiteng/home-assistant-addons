@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.2.2`。
+当前版本：`0.2.3`。
 
 ## 通用微信会话
 
@@ -16,6 +16,8 @@
 - `/new` 确认和内部作业状态会返回稳定 `TH-*` 短标识，便于排查旧 Thread；完整 Thread、Turn 和 conversation key 不进入页面 DTO。
 - Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；用户自然语言提出查询、查看、核验、汇总或明细请求，即授权本次无副作用只读调用，不需要 Passkey、写入确认或额外征求授权。不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
 - 对 owner，清晰的图表、导出、记账、退款、更正、撤销、导入检查和装修媒体/事件归档请求也视为本次匹配工具调用授权，不再询问“是否确认/授权”。只有缺少必填字段或语义确有多种合理解释时才澄清；讨论、假设、举例和方案比较不能推断为写入命令。
+- app-server 启动时显式禁用 `goals`。普通微信 Turn 不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；需要持续监控时应建立独立 automation/monitor 服务、生命周期和通知通道。
+- bootstrap `ledger_add_payment` 与 Hub manifest 一致，只发布 canonical v2 金额分、日期和九维 `grouped_tags`。Hub 的白名单结构化校验错误会在长度、JSON 形态、错误码和消息控制字符检查后保留；非结构化、超长、未知或敏感错误继续返回通用上游拒绝。
 
 ## 配置
 
@@ -133,4 +135,4 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 
 当前旧 Hermes iLink 身份已经失效，不能作为微信恢复目标。回滚 Controller 时应关闭 intake、保留队列和新 Gateway 身份；微信恢复必须修复当前 Gateway 或重新扫码并重新绑定。
 
-从 `0.2.2` 回退到 `0.2.1` 时，旧版本会忽略 additive `result_summary`、`job_artifacts` 表和私有 artifact 文件。应先回退 Controller，使新作业不再产生 artifact，再按需要回退 Gateway；不要删除 `/data/job-artifacts`，待确认没有未发送或仍需下载的图片后再单独清理。
+从 `0.2.3` 回退到 `0.2.2` 不需要数据库迁移；回退会恢复 Goals 可用和通用 Hub HTTP 错误语义，因此应先关闭 intake、排空活动作业并确认没有依赖持续监控的请求。若继续回退到 `0.2.1`，旧版本会忽略 additive `result_summary`、`job_artifacts` 表和私有 artifact 文件；不要删除 `/data/job-artifacts`，待确认没有未发送或仍需下载的图片后再单独清理。

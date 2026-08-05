@@ -34,6 +34,7 @@ class AppServerClient:
         "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，才使用已配置的结构化 MCP 工具；"
         "当前运行能力必须以本轮 MCP 工具目录和实际只读调用结果为准，不得沿用历史对话中的旧 Mac 代理、Hermes 或未接入判断。"
         "不得使用 Shell、任意文件路径或自然语言绕过 Controller、Renovation Hub 或 Operations Broker 的服务端门禁。"
+        "不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；持续监控必须交由具有独立生命周期和通知通道的独立自动化服务。"
         "不要输出内部推理、Token、路径或工具秘密。"
     )
 
@@ -218,7 +219,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.2"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.3"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")

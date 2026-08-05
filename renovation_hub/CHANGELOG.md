@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.2.6
+
+- 将 `ledger_add_payment` 的模型可见 manifest/dispatch 契约收紧为 canonical v2，必填金额分、日期和九维 `grouped_tags`，不再暴露 legacy 分类、标签或格式版本字段。
+- registry handler 在写事务前拒绝未知/legacy 字段、缺失 `grouped_tags` 和未知标签维度，并强制 `ledger_format_version=2`；`LedgerStore.add_payment` 的内部 v1 兼容路径继续保留。
+- 分组标签 Schema 与 portable v2 的九个固定维度、24 项总上限和 40 字符单项上限共用同一常量，并增加失败零流水/零审计回归。
+- 本版本只修改本地候选和测试；不部署、不重启、不写正式账本，也不改变 writer generation 或 active lease。
+
 ## 0.2.5
 
 - 新增 Renovation Hub 单一业务工具 registry，由同一事实源生成受认证 MCP manifest 与 `/internal/v1/tools/call` dispatch，当前覆盖 30 个公开账本、项目、阶段、空间、时间线、搜索和媒体动作。

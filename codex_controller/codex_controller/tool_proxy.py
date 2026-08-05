@@ -42,6 +42,37 @@ MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MEDIA_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "video/mp4", "video/quicktime", "video/webm"}
 DEFAULT_MAX_GATEWAY_MEDIA_BYTES = 1024 * 1024 * 1024
 MAX_JOB_ARTIFACT_BYTES = 20 * 1024 * 1024
+MAX_UPSTREAM_ERROR_BYTES = 16 * 1024
+MAX_UPSTREAM_ERROR_MESSAGE_CHARS = 500
+SAFE_UPSTREAM_ERROR_CODES = frozenset(
+    {
+        "area_not_found",
+        "idempotency_conflict",
+        "invalid_amount",
+        "invalid_date",
+        "invalid_date_range",
+        "invalid_datetime",
+        "invalid_idempotency_key",
+        "invalid_input",
+        "invalid_tags",
+        "media_invalid",
+        "media_link_invalid",
+        "media_missing",
+        "media_not_found",
+        "media_not_ready",
+        "media_size_invalid",
+        "media_type_rejected",
+        "payment_has_refunds",
+        "payment_not_found",
+        "project_not_found",
+        "refund_exceeds_payment",
+        "stage_not_found",
+        "transaction_not_found",
+        "version_conflict",
+        "version_required",
+        "writer_disabled",
+    }
+)
 
 
 class ToolProxyError(RuntimeError):
@@ -664,7 +695,12 @@ def _request_json(method: str, url: str, token: str, payload: dict[str, Any] | N
         with urlopen(request, timeout=15) as response:
             data = response.read(2 * 1024 * 1024 + 1)
     except HTTPError as exc:
-        exc.close()
+        try:
+            structured_error = _safe_structured_http_error(exc)
+        finally:
+            exc.close()
+        if structured_error is not None:
+            raise structured_error from exc
         raise ToolProxyError("upstream_rejected", f"内部服务拒绝请求：HTTP {exc.code}") from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ToolProxyError("upstream_unavailable", "内部服务不可用") from exc
@@ -677,6 +713,40 @@ def _request_json(method: str, url: str, token: str, payload: dict[str, Any] | N
     if not isinstance(result, dict):
         raise ToolProxyError("upstream_invalid_json", "内部服务响应不是对象")
     return result
+
+
+def _safe_structured_http_error(exc: HTTPError) -> ToolProxyError | None:
+    if exc.code not in {400, 404, 409, 422}:
+        return None
+    try:
+        if exc.headers.get_content_type() != "application/json":
+            return None
+        data = exc.read(MAX_UPSTREAM_ERROR_BYTES + 1)
+    except (AttributeError, OSError):
+        return None
+    if not data or len(data) > MAX_UPSTREAM_ERROR_BYTES:
+        return None
+    try:
+        document = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or set(document) != {"error"}:
+        return None
+    error = document.get("error")
+    if not isinstance(error, dict) or set(error) != {"code", "message"}:
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    if code not in SAFE_UPSTREAM_ERROR_CODES:
+        return None
+    if (
+        not isinstance(message, str)
+        or not 1 <= len(message) <= MAX_UPSTREAM_ERROR_MESSAGE_CHARS
+        or message != message.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in message)
+    ):
+        return None
+    return ToolProxyError(code, message)
 
 
 def _request_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[dict[str, Any], bytes]:

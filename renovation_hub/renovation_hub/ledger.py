@@ -541,7 +541,7 @@ class LedgerStore:
         )
         return {
             "service": "renovation_hub",
-            "version": "0.2.5",
+            "version": "0.2.6",
             "health": "degraded" if recovery_required else "ok",
             "recovery_required": recovery_required,
             "schema_version": int(meta["schema_version"]),

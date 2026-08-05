@@ -114,8 +114,58 @@ def _operation(
     )
 
 
+PAYMENT_TAG_DIMENSIONS = (
+    "主题",
+    "空间",
+    "专业",
+    "性质",
+    "渠道",
+    "品牌",
+    "生态",
+    "阶段",
+    "状态",
+)
+PAYMENT_V2_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "amount_cents": {"type": "integer", "minimum": 1, "maximum": 100_000_000_000},
+        "occurred_on": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}$"},
+        "grouped_tags": {
+            "type": "object",
+            "properties": {
+                dimension: {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 40},
+                    "maxItems": 24,
+                    "uniqueItems": True,
+                }
+                for dimension in PAYMENT_TAG_DIMENSIONS
+            },
+            "additionalProperties": False,
+        },
+        "merchant": {"type": "string", "maxLength": 200},
+        "note": {"type": "string", "maxLength": 2000},
+        "is_deposit": {"type": "boolean"},
+        "source_ref": {"type": "string", "maxLength": 256},
+        "project_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "stage_id": {"type": "string", "minLength": 1, "maxLength": 64},
+        "area_id": {"type": "string", "minLength": 1, "maxLength": 64},
+    },
+    "required": ["amount_cents", "occurred_on", "grouped_tags"],
+    "additionalProperties": False,
+}
+
+
 BOOTSTRAP_HUB_DEFINITIONS: tuple[ToolDefinition, ...] = (
-    _hub("ledger_add_payment", "新增付款", "write", "向 Renovation Hub 装修账本新增付款；写操作受单 writer 和稳定幂等键约束。", "记一笔瓷砖付款", "新增装修支出"),
+    _hub(
+        "ledger_add_payment",
+        "新增付款",
+        "write",
+        "向 Renovation Hub 装修账本新增 canonical v2 付款；必须使用金额分、日期和九维 grouped_tags，写操作受单 writer 和稳定幂等键约束。",
+        "记一笔瓷砖付款",
+        "新增装修支出",
+        input_schema=PAYMENT_V2_INPUT_SCHEMA,
+    ),
     _hub("ledger_add_refund", "新增退款", "write", "向 Renovation Hub 装修账本新增退款；写入受单 writer 和稳定幂等键约束。", "登记一笔退款", "记录商家返款"),
     _hub("ledger_correct_payment", "更正付款", "write", "更正既有装修付款；必须通过结构化工具并受服务端写入边界约束。", "把这笔付款金额改正", "更正付款分类"),
     _hub("ledger_undo", "撤销账本操作", "write", "撤销允许回退的既有账本操作；受服务端审计和幂等边界约束。", "撤销刚才那笔记账", "回退上一项账本修改"),

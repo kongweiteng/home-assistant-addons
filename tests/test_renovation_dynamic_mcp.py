@@ -24,6 +24,7 @@ from renovation_hub.business_tools import (
 from renovation_hub.hub import RenovationHubStore
 from renovation_hub.ledger import LedgerError
 from renovation_hub.media import MediaService
+from renovation_hub.portable import MAX_GROUPED_TAG_LENGTH, MAX_GROUPED_TAGS, TAG_DIMENSIONS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,6 +111,51 @@ class BusinessManifestTests(unittest.TestCase):
                 if name not in {"ledger_attach", "renovation_media_ingest"}
             )
         )
+
+        payment_schema = next(
+            tool["inputSchema"]
+            for tool in manifest["tools"]
+            if tool["name"] == "ledger_add_payment"
+        )
+        self.assertEqual(
+            set(payment_schema["required"]),
+            {"amount_cents", "occurred_on", "grouped_tags"},
+        )
+        self.assertEqual(
+            set(payment_schema["properties"]),
+            {
+                "amount_cents",
+                "occurred_on",
+                "grouped_tags",
+                "merchant",
+                "note",
+                "is_deposit",
+                "source_ref",
+                "project_id",
+                "stage_id",
+                "area_id",
+            },
+        )
+        for legacy in (
+            "amount",
+            "date",
+            "category",
+            "description",
+            "main_category",
+            "tags",
+            "ledger_format_version",
+        ):
+            self.assertNotIn(legacy, payment_schema["properties"])
+        grouped_tags = payment_schema["properties"]["grouped_tags"]
+        self.assertEqual(grouped_tags["type"], "object")
+        self.assertFalse(grouped_tags["additionalProperties"])
+        self.assertEqual(set(grouped_tags["properties"]), set(TAG_DIMENSIONS))
+        for dimension in TAG_DIMENSIONS:
+            values = grouped_tags["properties"][dimension]
+            self.assertEqual(values["type"], "array")
+            self.assertEqual(values["maxItems"], MAX_GROUPED_TAGS)
+            self.assertTrue(values["uniqueItems"])
+            self.assertEqual(values["items"]["maxLength"], MAX_GROUPED_TAG_LENGTH)
 
     def test_registry_rejects_namespace_schema_and_duplicate_drift(self) -> None:
         first = BUSINESS_TOOL_REGISTRY[0]
@@ -380,6 +426,82 @@ class BusinessDispatchTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "media_not_found")
         self.assertEqual(context.exception.status, 404)
+
+    def test_payment_dispatch_is_v2_only_and_rejects_legacy_shapes_before_write(self) -> None:
+        created = dispatch_tool(
+            self.store,
+            {
+                "name": "ledger_add_payment",
+                "actor_hash": "sha256:fixture",
+                "arguments": {
+                    "idempotency_key": key("payment-v2"),
+                    "amount_cents": 23_800,
+                    "occurred_on": "2026-08-05",
+                    "grouped_tags": {
+                        "主题": ["主材"],
+                        "空间": ["厨房"],
+                        "专业": ["泥瓦"],
+                    },
+                    "merchant": "示例供应商",
+                    "note": "厨房墙砖",
+                    "project_id": self.project["id"],
+                },
+            },
+        )["transaction"]
+        self.assertEqual(created["ledger_format_version"], 2)
+        self.assertEqual(created["main_category"], "")
+        self.assertEqual(created["grouped_tags"]["主题"], ["主材"])
+
+        with self.store._connect() as connection:
+            baseline = connection.execute(
+                "SELECT (SELECT COUNT(*) FROM transactions), (SELECT COUNT(*) FROM audit_log)"
+            ).fetchone()
+
+        invalid_cases = (
+            (
+                {
+                    "idempotency_key": key("legacy-shape"),
+                    "amount": "238.00",
+                    "date": "2026-08-05",
+                    "category": "主材",
+                    "description": "厨房墙砖",
+                },
+                "invalid_input",
+            ),
+            (
+                {
+                    "idempotency_key": key("missing-grouped-tags"),
+                    "amount_cents": 23_800,
+                    "occurred_on": "2026-08-05",
+                },
+                "invalid_input",
+            ),
+            (
+                {
+                    "idempotency_key": key("unknown-dimension"),
+                    "amount_cents": 23_800,
+                    "occurred_on": "2026-08-05",
+                    "grouped_tags": {"自定义维度": ["主材"]},
+                },
+                "invalid_tags",
+            ),
+        )
+        for arguments, expected_code in invalid_cases:
+            with self.subTest(expected_code=expected_code), self.assertRaises(LedgerError) as context:
+                dispatch_tool(
+                    self.store,
+                    {
+                        "name": "ledger_add_payment",
+                        "actor_hash": "sha256:fixture",
+                        "arguments": arguments,
+                    },
+                )
+            self.assertEqual(context.exception.code, expected_code)
+            with self.store._connect() as connection:
+                current = connection.execute(
+                    "SELECT (SELECT COUNT(*) FROM transactions), (SELECT COUNT(*) FROM audit_log)"
+                ).fetchone()
+            self.assertEqual(tuple(current), tuple(baseline))
 
 
 class ManifestEndpointTests(unittest.TestCase):

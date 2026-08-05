@@ -193,6 +193,10 @@ def write_codex_config(
             temporary_path.unlink()
 
 
+def codex_app_server_command(binary: str) -> list[str]:
+    return [binary, "app-server", "--disable", "goals", "--listen", "stdio://"]
+
+
 def main() -> None:
     data_dir = Path(os.environ.get("CONTROLLER_DATA_DIR", "/data")).resolve()
     codex_home = Path(os.environ.get("CONTROLLER_CODEX_HOME", data_dir / "codex-home")).resolve()
@@ -241,7 +245,7 @@ def main() -> None:
 
     binary = os.environ.get("CODEX_BINARY", "/opt/codex/node_modules/.bin/codex")
     app_server = AppServerClient(
-        [binary, "app-server", "--listen", "stdio://"],
+        codex_app_server_command(binary),
         codex_home=codex_home,
         workspace=workspace,
         available_tools=router.available_tools(),

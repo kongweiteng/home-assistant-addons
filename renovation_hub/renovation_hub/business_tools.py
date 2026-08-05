@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from .ledger import LedgerError
+from .portable import MAX_GROUPED_TAG_LENGTH, MAX_GROUPED_TAGS, TAG_DIMENSIONS
 
 
 MANIFEST_VERSION = 1
 MANIFEST_SERVICE = "renovation_hub"
 MANIFEST_SCOPE = "business"
-BUSINESS_CATALOG_REVISION = 1
+BUSINESS_CATALOG_REVISION = 2
 ALLOWED_TRANSPORTS = {"json", "gateway_attachment", "gateway_media_stream"}
 ALLOWED_RISK_TYPES = {"read", "write"}
 
@@ -99,16 +100,17 @@ DATETIME = _string(40, minimum=1)
 LIMIT = _integer(1, 1000)
 TAG = _string(160, minimum=1)
 TAGS = {"type": "array", "items": TAG, "maxItems": 64, "uniqueItems": True}
-GROUPED_TAGS = {
-    "type": "object",
-    "additionalProperties": {
-        "type": "array",
-        "items": _string(80, minimum=1),
-        "maxItems": 32,
-        "uniqueItems": True,
-    },
-    "maxProperties": 9,
-}
+GROUPED_TAGS = _object(
+    {
+        dimension: {
+            "type": "array",
+            "items": _string(MAX_GROUPED_TAG_LENGTH, minimum=1),
+            "maxItems": MAX_GROUPED_TAGS,
+            "uniqueItems": True,
+        }
+        for dimension in TAG_DIMENSIONS
+    }
+)
 MEDIA_LINK = _object(
     {
         "target_type": _enum("event", "transaction", "stage", "area"),
@@ -181,6 +183,45 @@ def _store_call(method: str, *, result_key: str | None = None) -> ToolHandler:
         return {result_key: result} if result_key else result
 
     return handler
+
+
+_PAYMENT_V2_ALLOWED_FIELDS = {
+    "idempotency_key",
+    "amount_cents",
+    "occurred_on",
+    "grouped_tags",
+    "merchant",
+    "note",
+    "is_deposit",
+    "source_ref",
+    "project_id",
+    "stage_id",
+    "area_id",
+}
+_PAYMENT_V2_REQUIRED_FIELDS = {"amount_cents", "occurred_on", "grouped_tags"}
+
+
+def _ledger_add_payment_v2(
+    store: Any,
+    _media: Any | None,
+    arguments: dict[str, Any],
+    actor_hash: str,
+) -> dict[str, Any]:
+    unknown = sorted(set(arguments) - _PAYMENT_V2_ALLOWED_FIELDS)
+    if unknown:
+        raise LedgerError(
+            "invalid_input",
+            f"ledger_add_payment 不接受字段：{', '.join(unknown)}",
+        )
+    missing = sorted(_PAYMENT_V2_REQUIRED_FIELDS - set(arguments))
+    if missing:
+        raise LedgerError(
+            "invalid_input",
+            f"ledger_add_payment 缺少字段：{', '.join(missing)}",
+        )
+    payload = dict(arguments)
+    payload["ledger_format_version"] = 2
+    return store.add_payment(payload, actor_hash=actor_hash)
 
 
 def _ledger_show(store: Any, _media: Any | None, arguments: dict[str, Any], _actor_hash: str) -> dict[str, Any]:
@@ -320,22 +361,19 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
             {
                 "amount_cents": _integer(1, 100_000_000_000),
                 "occurred_on": DATE,
-                "main_category": _string(80),
+                "grouped_tags": GROUPED_TAGS,
                 "merchant": _string(200),
                 "note": _string(2000),
                 "is_deposit": {"type": "boolean"},
-                "tags": TAGS,
-                "grouped_tags": GROUPED_TAGS,
-                "ledger_format_version": {"type": "integer", "enum": [1, 2]},
                 "source_ref": _string(256),
                 "project_id": ID,
                 "stage_id": ID,
                 "area_id": ID,
             },
-            required=("amount_cents", "occurred_on"),
+            required=("amount_cents", "occurred_on", "grouped_tags"),
         ),
         business_actions=("ledger.transaction.create",),
-        handler=_store_call("add_payment"),
+        handler=_ledger_add_payment_v2,
     ),
     _tool(
         "ledger_add_refund",

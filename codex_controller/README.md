@@ -35,6 +35,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.2.1` 从 Renovation Hub 的受认证 business manifest 动态加载完整工具 Schema，并保存 last-good；Hub 暂时不可达或返回非法目录时继续使用已验证目录，首次启动则使用内置兼容 bootstrap。
 - Hub manifest revision/digest 变化会更新 Controller catalog revision、发出 `listChanged` 并让 app-server 在不重启的情况下重新 `tools/list`。未来合法的 `ledger_*` / `renovation_*` 工具自动对 owner/owner_legacy 开放；member 永远只保留服务端固定 8 个只读工具。
 - `0.2.2` 在 `ledger_generate_chart` 成功后立即从 Hub 固定下载接口读取 PNG，校验引用、MIME、大小、PNG 签名和 SHA-256，再以 `0700/0600` 权限私有固化到 `/data/job-artifacts`。completed job 只返回确定性中文摘要和安全 artifact DTO，不返回 Hub `download_ref`、bearer、内部 URL 或文件路径。
+- `0.2.3` 使用 `codex app-server --disable goals --listen stdio://` 启动官方进程，禁止普通微信 Turn 派生后台 Goal 与后续消息竞争作业所有权；持续监控必须交给独立自动化服务。
+- `0.2.3` 的 bootstrap 付款目录与 Hub canonical v2 契约一致；Hub 返回白名单内、有界且结构化的校验错误时保留 `invalid_input` / `invalid_tags` 等可纠正语义，非 JSON、超长或未知错误仍统一脱敏。
 - artifact 下载分为 Gateway bearer 内部接口和 HA Ingress 高熵短期 token 接口；默认保留 24 小时，单图 20 MiB、总配额 100 MiB、每 job 最多 4 个，过期和孤立文件自动清理。模型被明确禁止自行构造图片或下载链接。
 - 默认仍不启用正式微信任务入口。
 - 旧 Hermes iLink 身份已经失效；正式装修 writer 已迁移到 Renovation Hub，Hermes 已停止，微信恢复不能依赖恢复旧 Hermes 进程，也不得形成双 poller 或双 writer。

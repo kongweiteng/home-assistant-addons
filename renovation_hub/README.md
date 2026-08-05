@@ -18,6 +18,7 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 - 统一搜索可同时检索账目、施工时间线和媒体；媒体 list/show 只返回业务元数据与受控内容 URL，不暴露存储文件名、来源摘要或私有路径。
 - 便携包导入不执行包内 `verify.py`，由 Hub 自身交叉核对 SQLite、JSON、CSV、JSONL、manifest、附件、退款、分类、标签、月份汇总和审计顺序。
 - v2 分组式多标签现已成为正式迁移后的原生主库格式：完整保留九个维度的 `维度:值` 标签、退款继承、`grouped_tags`、维度汇总、稳定导出 ID、附件和审计；v1 本地兼容语义继续保留。
+- `ledger_add_payment` 的模型可见契约固定为 canonical v2：只接受 `amount_cents`、`occurred_on`、九维 `grouped_tags` 和有限上下文字段；legacy 分类/标签/版本字段会在写事务前被拒绝，内部 `LedgerStore` 仍保留 v1 兼容调用。
 - 正式包只写入按来源 SHA-256 隔离的私有影子目录；原始快照、附件和 Hub 兼容数据库同时保留，重复导入会重新校验而不是盲信缓存报告。
 - 正式切换使用持久 `cutover manifest + writer generation + active lease`，依次经过 `migration_prepared -> source_frozen -> primary_seeded -> cutover_ready -> primary_writer`；裸 bearer 不能推进状态。
 - 每次紧急停写都会原子轮换 writer generation；任何停写前生成的激活确认串在重启后也不能重放。
@@ -29,7 +30,7 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 
 ## 当前阶段
 
-- 版本：`0.2.5`，实验候选。
+- 版本：`0.2.6`，实验候选。
 - 默认 `writer_mode=read_only`。
 - P1～P6 本地源码与合成验证已完成；最终完整门禁和 amd64/aarch64 镜像证据以当前交付报告为准，不复用旧候选结果。
 - 维护者 HAOS 已完成本地 Store 只读影子安装、Ingress、权限、真实未登录 Controller 路由和重启持久化验证；未创建 GitHub Release。

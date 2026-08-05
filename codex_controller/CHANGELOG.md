@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.2.3
+
+- app-server 启动命令增加 `--disable goals`，从进程能力层禁止后台 Goal continuation 与普通微信 Turn 竞争同一作业/会话所有权。
+- developer instructions 明确不得创建 Codex Goal、承诺后台持续监控或稍后主动跟进；持续监控必须交由独立自动化服务。
+- 内置 bootstrap `ledger_add_payment` Schema 收紧为 canonical v2，与 Hub 的金额分、日期和九维 `grouped_tags` 契约一致。
+- Controller 有界读取 Hub HTTP JSON 错误，仅保留白名单内的结构化可纠正校验码与安全消息；非 JSON、超长、未知或不安全正文继续返回通用 `upstream_rejected`。
+- 新增命令、提示词、bootstrap Schema、结构化错误和非结构化错误回归；不部署、不重启、不处理既有生产作业。
+
 ## 0.2.2
 
 - `ledger_generate_chart` 成功后由 Controller 从 Hub 固定 bearer 接口立即读取 PNG，并校验引用格式、MIME、长度、PNG 签名、大小和 SHA-256；模型不再收到 Hub `download_ref`。

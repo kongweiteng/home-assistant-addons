@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .business_tools import business_manifest, dispatch_business_tool
 from .hub import RenovationHubStore
 from .ledger import LedgerError, LedgerStore
 
@@ -23,7 +24,7 @@ def create_server(
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "RenovationHub/0.2.4"
+        server_version = "RenovationHub/0.2.5"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -68,6 +69,10 @@ def create_server(
             if path == "/internal/v1/status":
                 if self._authorized():
                     self._json(HTTPStatus.OK, store.status())
+                return
+            if path == "/internal/v1/mcp/manifest":
+                if self._authorized():
+                    self._json(HTTPStatus.OK, business_manifest())
                 return
             if path.startswith("/internal/v1/downloads/chart/"):
                 if not self._authorized():
@@ -188,69 +193,15 @@ def create_server(
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def dispatch_tool(store: LedgerStore, payload: dict[str, Any]) -> dict[str, Any]:
-    name = payload.get("name")
-    arguments = payload.get("arguments", {})
-    actor_hash = str(payload.get("actor_hash") or "system")
-    if not isinstance(arguments, dict):
-        raise LedgerError("invalid_input", "arguments 必须是对象")
-    if name == "ledger_add_payment":
-        return store.add_payment(arguments, actor_hash=actor_hash)
-    if name == "ledger_add_refund":
-        return store.add_refund(arguments, actor_hash=actor_hash)
-    if name == "ledger_correct_payment":
-        return store.correct_payment(arguments, actor_hash=actor_hash)
-    if name == "ledger_undo":
-        return store.undo(arguments, actor_hash=actor_hash)
-    if name == "ledger_attach":
-        return store.attach_content(arguments, actor_hash=actor_hash)
-    if name == "ledger_show":
-        return store.show(str(arguments.get("transaction_id") or ""))
-    if name == "ledger_query":
-        return {"items": store.query(arguments)}
-    if name == "ledger_summary":
-        return store.summary(arguments)
-    if name == "ledger_generate_chart":
-        return store.generate_chart(arguments)
-    if name == "ledger_export":
-        return store.export_portable()
-    if name == "ledger_verify_export":
-        path = store.share_dir / "current" / "kanhuwan-renovation-ledger.zip"
-        return store.verify_portable(path)
-    if name in {"ledger_import_inspect", "ledger_import_shadow"}:
-        reference = str(arguments.get("import_ref") or "")
-        if Path(reference).name != reference or not reference.endswith(".zip"):
-            raise LedgerError("import_invalid", "import_ref 非法")
-        path = store.import_dir / reference
-        return store.inspect_import(path) if name == "ledger_import_inspect" else store.import_shadow(path)
-    if isinstance(store, RenovationHubStore):
-        if name == "renovation_project_create":
-            return store.create_project(arguments, actor_hash=actor_hash)
-        if name == "renovation_project_update":
-            return store.update_project(arguments, actor_hash=actor_hash)
-        if name == "renovation_project_list":
-            return {"items": store.list_projects(arguments)}
-        if name == "renovation_stage_create":
-            return store.create_stage(arguments, actor_hash=actor_hash)
-        if name == "renovation_stage_update":
-            return store.update_stage(arguments, actor_hash=actor_hash)
-        if name == "renovation_stage_list":
-            return {"items": store.list_stages(str(arguments.get("project_id") or ""))}
-        if name == "renovation_area_create":
-            return store.create_area(arguments, actor_hash=actor_hash)
-        if name == "renovation_area_update":
-            return store.update_area(arguments, actor_hash=actor_hash)
-        if name == "renovation_area_list":
-            return {"items": store.list_areas(str(arguments.get("project_id") or ""))}
-        if name == "renovation_event_create":
-            return store.create_event(arguments, actor_hash=actor_hash)
-        if name == "renovation_event_update":
-            return store.update_event(arguments, actor_hash=actor_hash)
-        if name == "renovation_timeline":
-            return {"items": store.timeline(arguments)}
-        if name == "renovation_dashboard":
-            return store.dashboard(str(arguments.get("project_id") or ""))
-    raise LedgerError("unknown_tool", "工具不在允许清单", status=404)
+def dispatch_tool(
+    store: LedgerStore,
+    payload: dict[str, Any],
+    *,
+    media: Any | None = None,
+) -> dict[str, Any]:
+    """Compatibility wrapper around the single business-tool registry."""
+
+    return dispatch_business_tool(store, payload, media=media)
 
 
 def render_dashboard(status: dict[str, Any]) -> str:

@@ -399,6 +399,23 @@ class MediaService:
             if value:
                 clauses.append("EXISTS (SELECT 1 FROM media_links ml WHERE ml.media_id=media_assets.id AND ml.target_type=? AND ml.target_id=?)")
                 values.extend([target_type, value])
+        if filters.get("start"):
+            clauses.append("COALESCE(media_assets.captured_at,media_assets.uploaded_at)>=?")
+            values.append(_iso_datetime(filters["start"], "start"))
+        if filters.get("end"):
+            clauses.append("COALESCE(media_assets.captured_at,media_assets.uploaded_at)<=?")
+            values.append(_iso_datetime(filters["end"], "end"))
+        keyword = _text(filters.get("keyword"), "keyword", 100)
+        if keyword:
+            escaped = keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            clauses.append(
+                "(media_assets.original_filename LIKE ? ESCAPE '\\' "
+                "OR media_assets.media_type LIKE ? ESCAPE '\\' "
+                "OR media_assets.mime_type LIKE ? ESCAPE '\\' "
+                "OR media_assets.source LIKE ? ESCAPE '\\')"
+            )
+            values.extend([pattern, pattern, pattern, pattern])
         limit = filters.get("limit", 200)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 1000:
             raise LedgerError("invalid_input", "limit 必须为 1 到 1000")

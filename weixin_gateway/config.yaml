@@ -1,5 +1,5 @@
 name: Weixin Gateway
-version: "0.2.0"
+version: "0.2.1"
 slug: weixin_gateway
 description: "承载单一微信 iLink 身份、独立会话与安全多用户管理的最小网关。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"
@@ -44,6 +44,13 @@ options:
   notification_mqtt_tls: false
   notification_allowed_audiences:
     - "owner"
+  remote_work_enabled: false
+  remote_work_mqtt_host: ""
+  remote_work_mqtt_port: 1883
+  remote_work_mqtt_username: ""
+  remote_work_mqtt_password: ""
+  remote_work_mqtt_tls: false
+  remote_work_ttl_seconds: 1800
 schema:
   attachment_api_token: password
   poller_enabled: bool
@@ -68,3 +75,10 @@ schema:
   notification_mqtt_tls: bool
   notification_allowed_audiences:
     - str
+  remote_work_enabled: bool
+  remote_work_mqtt_host: str
+  remote_work_mqtt_port: "int(1,65535)"
+  remote_work_mqtt_username: "str?"
+  remote_work_mqtt_password: "password?"
+  remote_work_mqtt_tls: bool
+  remote_work_ttl_seconds: "int(60,3600)"

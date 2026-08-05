@@ -14,6 +14,8 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 - 浏览器上传使用创建会话、流式正文、完成校验三段式协议；前端分块计算 SHA-256，不把整文件读入内存。
 - Weixin Gateway 的一次性媒体引用由 Codex Controller 主进程流式转发，媒体正文、内部 bearer 和路径不进入模型或 app-server。
 - 页面与 Codex 工具复用同一业务层、幂等键、乐观版本、单 writer 和审计规则。
+- 30 个公开业务工具由 Hub 单一 registry 同时生成 MCP manifest 与确定性 dispatch；Controller 可在运行期发现新增工具，不需要维护第二份静态装修目录。
+- 统一搜索可同时检索账目、施工时间线和媒体；媒体 list/show 只返回业务元数据与受控内容 URL，不暴露存储文件名、来源摘要或私有路径。
 - 便携包导入不执行包内 `verify.py`，由 Hub 自身交叉核对 SQLite、JSON、CSV、JSONL、manifest、附件、退款、分类、标签、月份汇总和审计顺序。
 - v2 分组式多标签现已成为正式迁移后的原生主库格式：完整保留九个维度的 `维度:值` 标签、退款继承、`grouped_tags`、维度汇总、稳定导出 ID、附件和审计；v1 本地兼容语义继续保留。
 - 正式包只写入按来源 SHA-256 隔离的私有影子目录；原始快照、附件和 Hub 兼容数据库同时保留，重复导入会重新校验而不是盲信缓存报告。
@@ -27,7 +29,7 @@ Renovation Hub 是一个独立、确定性、单写入者的 Home Assistant Add-
 
 ## 当前阶段
 
-- 版本：`0.2.4`，实验候选。
+- 版本：`0.2.5`，实验候选。
 - 默认 `writer_mode=read_only`。
 - P1～P6 本地源码与合成验证已完成；最终完整门禁和 amd64/aarch64 镜像证据以当前交付报告为准，不复用旧候选结果。
 - 维护者 HAOS 已完成本地 Store 只读影子安装、Ingress、权限、真实未登录 Controller 路由和重启持久化验证；未创建 GitHub Release。
@@ -63,6 +65,7 @@ python3 -m unittest \
   tests.test_renovation_web \
   tests.test_renovation_media \
   tests.test_renovation_hub \
+  tests.test_renovation_dynamic_mcp \
   tests.test_renovation_ledger \
   tests.test_renovation_portable \
   tests.test_codex_controller \

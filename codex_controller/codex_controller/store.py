@@ -14,7 +14,12 @@ import sqlite3
 from typing import Any
 import uuid
 
-from .tool_catalog import ALL_TOOL_NAMES, TOOL_DEFINITIONS
+from .tool_catalog import (
+    BOOTSTRAP_HUB_DEFINITIONS,
+    OPERATION_DEFINITIONS,
+    TOOL_DEFINITIONS,
+    ToolDefinition,
+)
 
 
 CONVERSATION_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
@@ -153,6 +158,22 @@ class ControllerStore:
                     error_code TEXT,
                     observed_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS hub_manifest_state (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    document_json TEXT,
+                    catalog_digest TEXT,
+                    hub_revision INTEGER,
+                    synchronized_at TEXT,
+                    error_code TEXT,
+                    error_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS hub_tool_history (
+                    tool_name TEXT PRIMARY KEY,
+                    definition_json TEXT NOT NULL,
+                    retired INTEGER NOT NULL DEFAULT 0 CHECK(retired IN (0,1)),
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL
+                );
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
@@ -170,6 +191,15 @@ class ControllerStore:
                 connection.execute(
                     "INSERT INTO tool_policy_meta(id,catalog_revision,updated_at) VALUES (1,1,?)",
                     (now,),
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO hub_manifest_state(id) VALUES (1)"
+            )
+            for definition in BOOTSTRAP_HUB_DEFINITIONS:
+                connection.execute(
+                    "INSERT OR IGNORE INTO hub_tool_history(tool_name,definition_json,retired,first_seen_at,last_seen_at) "
+                    "VALUES (?,?,0,?,?)",
+                    (definition.name, canonical_json(definition.public_metadata()), now, now),
                 )
         os.chmod(self.database_path, 0o600)
 
@@ -526,6 +556,141 @@ class ControllerStore:
     def get_public_job(self, job_id: str) -> dict[str, Any]:
         return self.public_job(self.get_job(job_id))
 
+    @staticmethod
+    def _manifest_names(document: Any) -> frozenset[str]:
+        if not isinstance(document, dict) or not isinstance(document.get("tools"), list):
+            raise StoreError("hub_manifest_invalid", "Hub last-good manifest 损坏", status=503)
+        names: set[str] = set()
+        for tool in document["tools"]:
+            name = tool.get("name") if isinstance(tool, dict) else None
+            if not isinstance(name, str) or not re.fullmatch(r"(?:ledger|renovation)_[a-z0-9_]{1,79}", name):
+                raise StoreError("hub_manifest_invalid", "Hub last-good manifest 工具名损坏", status=503)
+            if name in names:
+                raise StoreError("hub_manifest_invalid", "Hub last-good manifest 工具重复", status=503)
+            names.add(name)
+        if not names:
+            raise StoreError("hub_manifest_invalid", "Hub last-good manifest 工具为空", status=503)
+        return frozenset(names)
+
+    def load_hub_manifest_document(self) -> dict[str, Any] | None:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT document_json FROM hub_manifest_state WHERE id=1"
+                ).fetchone()
+            if row is None or row["document_json"] is None:
+                return None
+            document = json.loads(row["document_json"])
+            self._manifest_names(document)
+            return document
+        except json.JSONDecodeError as exc:
+            raise StoreError("hub_manifest_invalid", "Hub last-good manifest JSON 损坏", status=503) from exc
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("hub_manifest_invalid", "Hub last-good manifest 读取失败", status=503) from exc
+
+    def active_tool_names(self) -> frozenset[str]:
+        document = self.load_hub_manifest_document()
+        hub_names = (
+            frozenset(definition.name for definition in BOOTSTRAP_HUB_DEFINITIONS)
+            if document is None
+            else self._manifest_names(document)
+        )
+        return hub_names | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
+
+    def historical_tool_names(self) -> frozenset[str]:
+        try:
+            with self._connect() as connection:
+                rows = connection.execute("SELECT tool_name FROM hub_tool_history").fetchall()
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("hub_manifest_invalid", "Hub 工具历史读取失败", status=503) from exc
+        hub_names = {row["tool_name"] for row in rows if isinstance(row["tool_name"], str)}
+        return frozenset(hub_names) | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
+
+    def apply_hub_manifest(self, document: dict[str, Any]) -> dict[str, Any]:
+        names = self._manifest_names(document)
+        digest = document.get("catalog_digest")
+        hub_revision = document.get("catalog_revision")
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise StoreError("hub_manifest_invalid", "Hub manifest digest 无效", status=503)
+        if not isinstance(hub_revision, int) or isinstance(hub_revision, bool) or hub_revision < 1:
+            raise StoreError("hub_manifest_invalid", "Hub manifest revision 无效", status=503)
+        serialized = canonical_json(document)
+        now = utc_now()
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = connection.execute(
+                    "SELECT catalog_digest FROM hub_manifest_state WHERE id=1"
+                ).fetchone()
+                current_digest = None if current is None else current["catalog_digest"]
+                changed = current_digest != digest
+                connection.execute(
+                    "INSERT INTO hub_manifest_state(id,document_json,catalog_digest,hub_revision,synchronized_at,error_code,error_at) "
+                    "VALUES (1,?,?,?,?,NULL,NULL) ON CONFLICT(id) DO UPDATE SET "
+                    "document_json=excluded.document_json,catalog_digest=excluded.catalog_digest,"
+                    "hub_revision=excluded.hub_revision,synchronized_at=excluded.synchronized_at,error_code=NULL,error_at=NULL",
+                    (serialized, digest, hub_revision, now),
+                )
+                connection.execute("UPDATE hub_tool_history SET retired=1")
+                by_name = {tool["name"]: tool for tool in document["tools"]}
+                for name in sorted(names):
+                    connection.execute(
+                        "INSERT INTO hub_tool_history(tool_name,definition_json,retired,first_seen_at,last_seen_at) "
+                        "VALUES (?,?,0,?,?) ON CONFLICT(tool_name) DO UPDATE SET "
+                        "definition_json=excluded.definition_json,retired=0,last_seen_at=excluded.last_seen_at",
+                        (name, canonical_json(by_name[name]), now, now),
+                    )
+                if changed:
+                    connection.execute(
+                        "UPDATE tool_policy_meta SET catalog_revision=catalog_revision+1,updated_at=? WHERE id=1",
+                        (now,),
+                    )
+                revision_row = connection.execute(
+                    "SELECT catalog_revision FROM tool_policy_meta WHERE id=1"
+                ).fetchone()
+                if revision_row is None or not isinstance(revision_row["catalog_revision"], int):
+                    raise StoreError("tool_policy_invalid", "工具策略元数据损坏", status=503)
+                return {
+                    "changed": changed,
+                    "revision": revision_row["catalog_revision"],
+                    "hub_revision": hub_revision,
+                    "catalog_digest": digest,
+                }
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("hub_manifest_invalid", "Hub manifest 保存失败", status=503) from exc
+
+    def record_hub_manifest_error(self, error_code: str) -> None:
+        bounded = error_code if isinstance(error_code, str) and re.fullmatch(r"[a-z0-9_]{1,64}", error_code) else "hub_manifest_sync_failed"
+        try:
+            with self._connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "INSERT INTO hub_manifest_state(id,error_code,error_at) VALUES (1,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET error_code=excluded.error_code,error_at=excluded.error_at",
+                    (bounded, utc_now()),
+                )
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("hub_manifest_invalid", "Hub manifest 错误状态保存失败", status=503) from exc
+
+    def hub_manifest_status(self) -> dict[str, Any]:
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT document_json,catalog_digest,hub_revision,synchronized_at,error_code,error_at "
+                    "FROM hub_manifest_state WHERE id=1"
+                ).fetchone()
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("hub_manifest_invalid", "Hub manifest 状态读取失败", status=503) from exc
+        last_good = row is not None and row["document_json"] is not None
+        return {
+            "source": "last_good" if last_good else "bootstrap",
+            "catalog_digest": row["catalog_digest"] if last_good else None,
+            "hub_revision": row["hub_revision"] if last_good else None,
+            "synchronized_at": row["synchronized_at"] if last_good else None,
+            "error_code": None if row is None else row["error_code"],
+            "error_at": None if row is None else row["error_at"],
+        }
+
     def tool_policy_snapshot(self) -> dict[str, Any]:
         try:
             with self._connect() as connection:
@@ -537,12 +702,14 @@ class ControllerStore:
                 revision = meta_rows[0]["catalog_revision"]
                 if revision < 1:
                     raise StoreError("tool_policy_invalid", "工具策略版本损坏", status=503)
-                enabled = set(ALL_TOOL_NAMES)
+                active_names = set(self.active_tool_names())
+                historical_names = set(self.historical_tool_names())
+                enabled = set(active_names)
                 rows = connection.execute(
                     "SELECT tool_name,enabled,revision FROM tool_policies ORDER BY tool_name"
                 ).fetchall()
                 for row in rows:
-                    if row["tool_name"] not in ALL_TOOL_NAMES:
+                    if row["tool_name"] not in historical_names:
                         raise StoreError("tool_policy_invalid", "工具策略包含未知工具", status=503)
                     if row["enabled"] not in (0, 1) or not isinstance(row["revision"], int):
                         raise StoreError("tool_policy_invalid", "工具策略值损坏", status=503)
@@ -565,7 +732,9 @@ class ControllerStore:
         revision: int,
         request_id: str,
     ) -> dict[str, Any]:
-        if tool_name not in ALL_TOOL_NAMES:
+        active_names = set(self.active_tool_names())
+        historical_names = set(self.historical_tool_names())
+        if tool_name not in active_names:
             raise StoreError("tool_not_found", "工具不存在", status=404)
         if not isinstance(enabled, bool):
             raise StoreError("invalid_tool_policy", "enabled 必须是布尔值")
@@ -600,7 +769,7 @@ class ControllerStore:
                 for row in connection.execute(
                     "SELECT tool_name,enabled,revision FROM tool_policies"
                 ):
-                    if row["tool_name"] not in ALL_TOOL_NAMES:
+                    if row["tool_name"] not in historical_names:
                         raise StoreError("tool_policy_invalid", "工具策略包含未知工具", status=503)
                     if row["enabled"] not in (0, 1) or not isinstance(row["revision"], int):
                         raise StoreError("tool_policy_invalid", "工具策略值损坏", status=503)
@@ -636,7 +805,8 @@ class ControllerStore:
     def record_mcp_catalog(self, revision: int | None, tools: list[str]) -> dict[str, Any]:
         if revision is not None and (not isinstance(revision, int) or isinstance(revision, bool) or revision < 1):
             raise StoreError("invalid_catalog_observation", "MCP 目录版本无效")
-        if not isinstance(tools, list) or any(name not in ALL_TOOL_NAMES for name in tools):
+        active_names = set(self.active_tool_names())
+        if not isinstance(tools, list) or any(name not in active_names for name in tools):
             raise StoreError("invalid_catalog_observation", "MCP 目录包含未知工具")
         normalized = sorted(set(tools)) if revision is not None else []
         error_code = None if revision is not None else "tool_policy_invalid"
@@ -660,7 +830,11 @@ class ControllerStore:
         error_code: str | None,
         duration_ms: int,
     ) -> None:
-        if tool_name not in ALL_TOOL_NAMES or outcome not in {"succeeded", "rejected", "failed"}:
+        try:
+            known_names = set(self.historical_tool_names())
+        except StoreError:
+            return
+        if tool_name not in known_names or outcome not in {"succeeded", "rejected", "failed"}:
             return
         bounded_error = None
         if isinstance(error_code, str) and re.fullmatch(r"[a-z0-9_]{1,64}", error_code):
@@ -679,8 +853,11 @@ class ControllerStore:
         self,
         configured_names: set[str] | frozenset[str],
         callable_names: set[str] | frozenset[str] | None = None,
+        definitions: tuple[ToolDefinition, ...] | list[ToolDefinition] | None = None,
     ) -> dict[str, Any]:
-        configured = set(configured_names) & set(ALL_TOOL_NAMES)
+        active_definitions = tuple(TOOL_DEFINITIONS if definitions is None else definitions)
+        definition_names = {definition.name for definition in active_definitions}
+        configured = set(configured_names) & definition_names
         route_ready = configured if callable_names is None else set(callable_names) & configured
         policy_error: str | None = None
         try:
@@ -717,7 +894,7 @@ class ControllerStore:
             observation_error = observation["error_code"]
             try:
                 decoded = json.loads(observation["published_tools_json"])
-                if isinstance(decoded, list) and all(name in ALL_TOOL_NAMES for name in decoded):
+                if isinstance(decoded, list) and all(name in definition_names for name in decoded):
                     published_names = set(decoded)
                 else:
                     observation_error = "catalog_observation_invalid"
@@ -725,7 +902,7 @@ class ControllerStore:
                 observation_error = "catalog_observation_invalid"
         observation_current = revision is not None and observed_revision == revision and observation_error is None
         tools = []
-        for definition in TOOL_DEFINITIONS:
+        for definition in active_definitions:
             is_configured = definition.name in configured
             is_enabled = policy_error is None and definition.name in enabled_names
             is_published = observation_current and definition.name in published_names
@@ -752,12 +929,13 @@ class ControllerStore:
                 "published_count": len(published_names) if observation_current else 0,
             },
             "summary": {
-                "known": len(TOOL_DEFINITIONS),
+                "known": len(active_definitions),
                 "configured": len(configured),
                 "enabled": len(enabled_names & configured),
                 "published": len(published_names & configured) if observation_current else 0,
                 "callable": len(enabled_names & route_ready),
             },
+            "hub_manifest": self.hub_manifest_status(),
             "tools": tools,
         }
 

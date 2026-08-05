@@ -15,6 +15,12 @@ from typing import Any
 from aiohttp import web
 
 from .api import dispatch_tool, render_dashboard
+from .business_tools import (
+    business_manifest,
+    get_business_tool,
+    search_business_data,
+    validate_public_business_actions,
+)
 from .hub import RenovationHubStore
 from .ledger import LedgerError
 from .media import MediaService
@@ -32,6 +38,31 @@ CUTOVER_TOKEN_KEY = _make_app_key("cutover_token", str)
 STATIC_DIR_KEY = _make_app_key("static_dir", object)
 CSRF_TOKEN_KEY = _make_app_key("csrf_token", str)
 PAGE_ACTOR = "sha256:renovation-hub-ingress-admin"
+BUSINESS_ROUTE_PREFIX = "business__"
+
+
+def _business_route_name(action_id: str) -> str:
+    return BUSINESS_ROUTE_PREFIX + action_id.replace(".", "__")
+
+
+def business_action_from_route_name(name: str | None) -> str | None:
+    if not name or not name.startswith(BUSINESS_ROUTE_PREFIX):
+        return None
+    return name[len(BUSINESS_ROUTE_PREFIX) :].replace("__", ".")
+
+
+def _add_business_route(
+    app: web.Application,
+    method: str,
+    path: str,
+    handler: Any,
+    action_id: str,
+) -> None:
+    name = _business_route_name(action_id)
+    if method == "GET":
+        app.router.add_get(path, handler, name=name)
+    else:
+        app.router.add_route(method, path, handler, name=name)
 
 
 def create_app(
@@ -56,37 +87,43 @@ def create_app(
 
     app.router.add_get("/healthz", health)
     app.router.add_get("/api/status", health)
-    app.router.add_get("/api/v1/session", page_session)
-    app.router.add_get("/api/v1/projects", projects)
-    app.router.add_post("/api/v1/projects", project_create)
-    app.router.add_patch("/api/v1/projects/{project_id}", project_update)
-    app.router.add_get("/api/v1/stages", stages)
-    app.router.add_post("/api/v1/stages", stage_create)
-    app.router.add_patch("/api/v1/stages/{stage_id}", stage_update)
-    app.router.add_get("/api/v1/areas", areas)
-    app.router.add_post("/api/v1/areas", area_create)
-    app.router.add_patch("/api/v1/areas/{area_id}", area_update)
-    app.router.add_get("/api/v1/events", timeline)
-    app.router.add_post("/api/v1/events", event_create)
-    app.router.add_patch("/api/v1/events/{event_id}", event_update)
-    app.router.add_get("/api/v1/timeline", timeline)
-    app.router.add_get("/api/v1/dashboard", dashboard)
-    app.router.add_get("/api/v1/ledger", ledger)
-    app.router.add_get("/api/v1/ledger/transactions", ledger)
-    app.router.add_post("/api/v1/ledger/transactions", ledger_create)
-    app.router.add_patch("/api/v1/ledger/transactions/{transaction_id}", ledger_update)
-    app.router.add_post("/api/v1/ledger/refunds", ledger_refund)
-    app.router.add_post("/api/v1/ledger/transactions/{transaction_id}/undo", ledger_undo)
-    app.router.add_get("/api/v1/reports/summary", report_summary)
-    app.router.add_get("/api/v1/search", search)
-    app.router.add_get("/api/v1/media", media_list)
-    app.router.add_get("/api/v1/media/{media_id}/content", media_content)
-    app.router.add_get("/api/v1/media/{media_id}/preview", media_preview)
-    app.router.add_post("/api/v1/uploads", upload_create)
-    app.router.add_put("/api/v1/uploads/{upload_id}/content", upload_content)
-    app.router.add_post("/api/v1/uploads/{upload_id}/complete", upload_complete)
+    business_routes = (
+        ("GET", "/api/v1/session", page_session, "session.read"),
+        ("GET", "/api/v1/projects", projects, "project.list"),
+        ("POST", "/api/v1/projects", project_create, "project.create"),
+        ("PATCH", "/api/v1/projects/{project_id}", project_update, "project.update"),
+        ("GET", "/api/v1/stages", stages, "stage.list"),
+        ("POST", "/api/v1/stages", stage_create, "stage.create"),
+        ("PATCH", "/api/v1/stages/{stage_id}", stage_update, "stage.update"),
+        ("GET", "/api/v1/areas", areas, "area.list"),
+        ("POST", "/api/v1/areas", area_create, "area.create"),
+        ("PATCH", "/api/v1/areas/{area_id}", area_update, "area.update"),
+        ("GET", "/api/v1/events", timeline, "event.list"),
+        ("POST", "/api/v1/events", event_create, "event.create"),
+        ("PATCH", "/api/v1/events/{event_id}", event_update, "event.update"),
+        ("GET", "/api/v1/timeline", timeline, "timeline.list"),
+        ("GET", "/api/v1/dashboard", dashboard, "dashboard.read"),
+        ("GET", "/api/v1/ledger", ledger, "ledger.collection.list"),
+        ("GET", "/api/v1/ledger/transactions", ledger, "ledger.transaction.list"),
+        ("POST", "/api/v1/ledger/transactions", ledger_create, "ledger.transaction.create"),
+        ("PATCH", "/api/v1/ledger/transactions/{transaction_id}", ledger_update, "ledger.transaction.update"),
+        ("POST", "/api/v1/ledger/refunds", ledger_refund, "ledger.refund.create"),
+        ("POST", "/api/v1/ledger/transactions/{transaction_id}/undo", ledger_undo, "ledger.transaction.undo"),
+        ("GET", "/api/v1/reports/summary", report_summary, "ledger.report.summary"),
+        ("GET", "/api/v1/search", search, "search.unified"),
+        ("GET", "/api/v1/media", media_list, "media.list"),
+        ("GET", "/api/v1/media/{media_id}/content", media_content, "media.content"),
+        ("GET", "/api/v1/media/{media_id}/preview", media_preview, "media.preview"),
+        ("POST", "/api/v1/uploads", upload_create, "upload.create"),
+        ("PUT", "/api/v1/uploads/{upload_id}/content", upload_content, "upload.content"),
+        ("POST", "/api/v1/uploads/{upload_id}/complete", upload_complete, "upload.complete"),
+    )
+    validate_public_business_actions(item[3] for item in business_routes)
+    for method, path, handler, action_id in business_routes:
+        _add_business_route(app, method, path, handler, action_id)
 
     app.router.add_get("/internal/v1/status", internal_status)
+    app.router.add_get("/internal/v1/mcp/manifest", mcp_manifest)
     app.router.add_post("/internal/v1/tools/call", tools_call)
     app.router.add_post("/internal/v1/admin/writer-mode", writer_mode)
     app.router.add_post("/internal/v1/admin/cutover/prepare", cutover_prepare)
@@ -321,14 +358,7 @@ async def report_summary(request: web.Request) -> web.Response:
 
 async def search(request: web.Request) -> web.Response:
     query = _query(request)
-    project_id = str(query.get("project_id") or "")
-    return _result(
-        {
-            "ledger": _store(request).query(query),
-            "timeline": _store(request).timeline(query),
-            "media": _media(request).list({**query, "project_id": project_id}),
-        }
-    )
+    return _result(search_business_data(_store(request), _media(request), query))
 
 
 async def media_list(request: web.Request) -> web.Response:
@@ -405,9 +435,18 @@ async def internal_status(request: web.Request) -> web.Response:
     return _result(_store(request).status())
 
 
+async def mcp_manifest(request: web.Request) -> web.Response:
+    _authorized(request)
+    manifest = business_manifest()
+    return web.json_response(
+        manifest,
+        headers={"ETag": f'"{manifest["catalog_digest"]}"'},
+    )
+
+
 async def tools_call(request: web.Request) -> web.Response:
     payload = await _json(request, internal=True)
-    return _result(dispatch_tool(_store(request), payload))
+    return _result(dispatch_tool(_store(request), payload, media=_media(request)))
 
 
 async def writer_mode(request: web.Request) -> web.Response:
@@ -500,6 +539,9 @@ def _decode_header(value: str, field: str, maximum: int) -> str:
 
 async def media_ingest(request: web.Request) -> web.Response:
     _authorized(request)
+    definition = get_business_tool("renovation_media_ingest")
+    if definition.transport != "gateway_media_stream":
+        raise LedgerError("registry_invalid", "媒体工具传输契约无效", status=500)
     filename = _decode_header(request.headers.get("X-Attachment-Filename", ""), "filename", 255)
     metadata_text = _decode_header(request.headers.get("X-Renovation-Metadata", ""), "metadata", 8192)
     try:

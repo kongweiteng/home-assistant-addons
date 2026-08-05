@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.2.1
+
+- 新增默认关闭的 owner-only `/work` Remote Work v1；精确 start/status/continue/cancel 与普通 Controller 聊天确定性分流，member、近似前缀、附件、未知项目和 deploy 均失败关闭。
+- 新增专用 `home/codex-work/v1/request|control|status|result|agent` MQTT v5 适配器，QoS 1、24 小时持久会话、入站持久化后 manual ack；配置和账户与主动通知隔离。
+- 新增 additive task/outbox/event/agent SQLite 状态，覆盖 TTL、幂等正文冲突、乱序序号、终态回退、结果待发送和 owner 变化后抑制回传。
+- 结果契约只允许摘要、分支、commit、测试摘要、变更路径数量、下一步和错误码，拒绝源码、完整 diff、raw JSONL、reasoning、提示词和完整日志。
+- 本候选不连接真实 EMQX、不安装 Mac Agent/LaunchAgent、不发送真实微信，也不执行 HAOS、生产数据、部署或不可逆动作。
+
 ## 0.2.0
 
 - 在一套 iLink 身份和一个 Poller 下新增唯一 owner、多 member 私有用户目录；每位用户拥有独立 conversation 和 Codex Thread 关联。

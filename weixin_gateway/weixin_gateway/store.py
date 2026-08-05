@@ -545,6 +545,67 @@ class GatewayStore:
                     response_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS remote_work_tasks (
+                    task_id TEXT PRIMARY KEY,
+                    source_message_id TEXT NOT NULL UNIQUE,
+                    sender_id TEXT NOT NULL,
+                    user_hash TEXT NOT NULL,
+                    project_alias TEXT NOT NULL,
+                    instruction_digest TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN (
+                        'waiting_mac','queued','running','awaiting_confirmation','completed',
+                        'failed','cancelled','expired','recovery_required'
+                    )),
+                    run_seq INTEGER NOT NULL DEFAULT 0,
+                    sequence INTEGER NOT NULL DEFAULT 0,
+                    stage TEXT,
+                    last_status_json TEXT,
+                    last_result_json TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_hash) REFERENCES weixin_users(user_hash)
+                );
+                CREATE INDEX IF NOT EXISTS remote_work_tasks_state_idx
+                    ON remote_work_tasks(state, updated_at);
+                CREATE TABLE IF NOT EXISTS remote_work_outbox (
+                    message_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('pending','published','failed')),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    published_at TEXT,
+                    FOREIGN KEY(task_id) REFERENCES remote_work_tasks(task_id)
+                );
+                CREATE INDEX IF NOT EXISTS remote_work_outbox_state_idx
+                    ON remote_work_outbox(state, created_at);
+                CREATE TABLE IF NOT EXISTS remote_work_events (
+                    event_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    run_seq INTEGER NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    reply_state TEXT NOT NULL CHECK(reply_state IN ('none','pending','sent','suppressed')),
+                    reply_error TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(task_id,topic,run_seq,sequence),
+                    FOREIGN KEY(task_id) REFERENCES remote_work_tasks(task_id)
+                );
+                CREATE INDEX IF NOT EXISTS remote_work_events_reply_idx
+                    ON remote_work_events(reply_state, created_at);
+                CREATE TABLE IF NOT EXISTS remote_work_agent (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    online INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -1209,6 +1270,310 @@ class GatewayStore:
     def message_exists(self, message_id: str) -> bool:
         with self._connect() as connection:
             return connection.execute("SELECT 1 FROM inbound_messages WHERE message_id=?", (message_id,)).fetchone() is not None
+
+    def enqueue_remote_work_command(
+        self,
+        *,
+        topic: str,
+        payload: dict[str, Any],
+        sender_id: str,
+        user_digest: str,
+    ) -> dict[str, Any]:
+        """Persist one request/control before MQTT publication."""
+        if topic not in {"home/codex-work/v1/request", "home/codex-work/v1/control"}:
+            raise StoreError("remote_work_topic_invalid", "Remote Work 出站主题无效")
+        identifier_name = "message_id" if topic.endswith("/request") else "control_id"
+        identifier = payload.get(identifier_name)
+        task_id = payload.get("task_id")
+        if not isinstance(identifier, str) or not isinstance(task_id, str):
+            raise StoreError("remote_work_payload_invalid", "Remote Work 出站标识无效")
+        payload_json = canonical_json(payload)
+        payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_digest FROM remote_work_outbox WHERE message_id=?",
+                (identifier,),
+            ).fetchone()
+            if existing is not None:
+                if hmac.compare_digest(existing["payload_digest"], payload_digest):
+                    task = connection.execute("SELECT * FROM remote_work_tasks WHERE task_id=?", (task_id,)).fetchone()
+                    assert task is not None
+                    result = self._remote_work_task_document(task)
+                    result["duplicate"] = True
+                    return result
+                raise StoreError("remote_work_idempotency_conflict", "Remote Work 消息 ID 正文冲突", status=409)
+
+            task = connection.execute("SELECT * FROM remote_work_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if topic.endswith("/request"):
+                if task is not None:
+                    raise StoreError("remote_work_task_conflict", "Remote Work task 已存在", status=409)
+                project_alias = str(payload.get("project_alias") or "")
+                instruction = str(payload.get("instruction") or "")
+                instruction_digest = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
+                connection.execute(
+                    """
+                    INSERT INTO remote_work_tasks(
+                        task_id,source_message_id,sender_id,user_hash,project_alias,instruction_digest,
+                        state,created_at,expires_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,'waiting_mac',?,?,?)
+                    """,
+                    (
+                        task_id,
+                        identifier,
+                        sender_id,
+                        user_digest,
+                        project_alias,
+                        instruction_digest,
+                        str(payload["created_at"]),
+                        str(payload["expires_at"]),
+                        now,
+                    ),
+                )
+            else:
+                if task is None:
+                    raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
+                if not hmac.compare_digest(str(task["user_hash"]), user_digest):
+                    raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
+            connection.execute(
+                """
+                INSERT INTO remote_work_outbox(
+                    message_id,task_id,topic,payload_json,payload_digest,state,created_at
+                ) VALUES (?,?,?,?,?,'pending',?)
+                """,
+                (identifier, task_id, topic, payload_json, payload_digest, now),
+            )
+            task = connection.execute("SELECT * FROM remote_work_tasks WHERE task_id=?", (task_id,)).fetchone()
+            assert task is not None
+            result = self._remote_work_task_document(task)
+            result["duplicate"] = False
+            return result
+
+    def remote_work_command_replay(
+        self,
+        message_id: str,
+        *,
+        task_id: str,
+        operation: str,
+        project_alias: str | None,
+        instruction: str | None,
+        user_digest: str,
+    ) -> dict[str, Any] | None:
+        """Return an exact semantic replay without regenerating time-dependent fields."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload_json,task_id FROM remote_work_outbox WHERE message_id=?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            payload = json.loads(row["payload_json"])
+            actual_operation = payload.get("operation", payload.get("action"))
+            semantic_match = (
+                row["task_id"] == task_id
+                and actual_operation == operation
+                and payload.get("project_alias") == project_alias
+                and payload.get("instruction") == instruction
+            )
+            task = connection.execute("SELECT * FROM remote_work_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task is None or not hmac.compare_digest(str(task["user_hash"]), user_digest):
+                raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
+            if not semantic_match:
+                raise StoreError("remote_work_idempotency_conflict", "Remote Work 消息 ID 正文冲突", status=409)
+            result = self._remote_work_task_document(task)
+            result["duplicate"] = True
+            return result
+
+    def remote_work_task(self, task_id: str, *, user_digest: str | None = None) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._expire_remote_work_tasks(connection)
+            row = connection.execute("SELECT * FROM remote_work_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if row is None or (user_digest is not None and not hmac.compare_digest(str(row["user_hash"]), user_digest)):
+                raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
+            return self._remote_work_task_document(row)
+
+    def remote_work_pending_outbox(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            self._expire_remote_work_tasks(connection)
+            rows = connection.execute(
+                """
+                SELECT o.* FROM remote_work_outbox o
+                JOIN remote_work_tasks t ON t.task_id=o.task_id
+                WHERE o.state IN ('pending','failed') AND t.state!='expired'
+                ORDER BY o.created_at LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_remote_work_outbox(self, message_id: str, *, success: bool, error_code: str | None = None) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE remote_work_outbox
+                SET state=?,attempts=attempts+1,last_error=?,published_at=?
+                WHERE message_id=?
+                """,
+                ("published" if success else "failed", error_code, utc_now() if success else None, message_id),
+            )
+
+    def record_remote_work_event(self, topic: str, payload: dict[str, Any]) -> dict[str, Any]:
+        payload_json = canonical_json(payload)
+        payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+        if topic == "home/codex-work/v1/agent":
+            with self._connect() as connection:
+                existing = connection.execute("SELECT payload_digest FROM remote_work_agent WHERE id=1").fetchone()
+                if existing is not None and hmac.compare_digest(existing["payload_digest"], payload_digest):
+                    return {"outcome": "duplicate"}
+                connection.execute(
+                    """
+                    INSERT INTO remote_work_agent(id,online,updated_at,payload_digest,payload_json)
+                    VALUES (1,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        online=excluded.online,updated_at=excluded.updated_at,
+                        payload_digest=excluded.payload_digest,payload_json=excluded.payload_json
+                    """,
+                    (1 if payload["online"] else 0, str(payload["updated_at"]), payload_digest, payload_json),
+                )
+            return {"outcome": "recorded", "agent": True}
+        if topic not in {"home/codex-work/v1/status", "home/codex-work/v1/result"}:
+            raise StoreError("remote_work_topic_invalid", "Remote Work 入站主题无效")
+
+        task_id = str(payload["task_id"])
+        run_seq = int(payload["run_seq"])
+        sequence = int(payload["sequence"])
+        event_id = hashlib.sha256(f"{topic}:{task_id}:{run_seq}:{sequence}".encode("utf-8")).hexdigest()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute("SELECT * FROM remote_work_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task is None:
+                raise StoreError("remote_work_task_unknown", "Remote Work 事件 task 未知", status=404)
+            existing = connection.execute(
+                "SELECT payload_digest FROM remote_work_events WHERE task_id=? AND topic=? AND run_seq=? AND sequence=?",
+                (task_id, topic, run_seq, sequence),
+            ).fetchone()
+            if existing is not None:
+                if hmac.compare_digest(existing["payload_digest"], payload_digest):
+                    return {"outcome": "duplicate", "task_id": task_id}
+                raise StoreError("remote_work_event_conflict", "Remote Work 事件序号正文冲突", status=409)
+            current_pair = (int(task["run_seq"]), int(task["sequence"]))
+            incoming_pair = (run_seq, sequence)
+            if incoming_pair < current_pair:
+                return {"outcome": "stale", "task_id": task_id}
+            if incoming_pair == current_pair and current_pair != (0, 0):
+                return {"outcome": "stale", "task_id": task_id}
+            state = str(payload["state"])
+            if str(task["state"]) in {"completed", "failed", "cancelled", "expired", "recovery_required"} and run_seq <= int(task["run_seq"]):
+                raise StoreError("remote_work_state_conflict", "Remote Work 终态不能回退", status=409)
+            reply_state = "pending" if topic.endswith("/result") else "none"
+            connection.execute(
+                """
+                INSERT INTO remote_work_events(
+                    event_id,task_id,topic,run_seq,sequence,payload_digest,payload_json,reply_state,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (event_id, task_id, topic, run_seq, sequence, payload_digest, payload_json, reply_state, utc_now()),
+            )
+            connection.execute(
+                """
+                UPDATE remote_work_tasks SET state=?,run_seq=?,sequence=?,stage=?,
+                    last_status_json=CASE WHEN ? LIKE '%/status' THEN ? ELSE last_status_json END,
+                    last_result_json=CASE WHEN ? LIKE '%/result' THEN ? ELSE last_result_json END,
+                    updated_at=? WHERE task_id=?
+                """,
+                (
+                    state,
+                    run_seq,
+                    sequence,
+                    payload.get("stage"),
+                    topic,
+                    payload_json,
+                    topic,
+                    payload_json,
+                    utc_now(),
+                    task_id,
+                ),
+            )
+        return {"outcome": "recorded", "task_id": task_id, "reply_pending": reply_state == "pending"}
+
+    def remote_work_pending_replies(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT e.event_id,e.payload_json,t.task_id,t.sender_id,t.user_hash
+                FROM remote_work_events e JOIN remote_work_tasks t ON t.task_id=e.task_id
+                WHERE e.reply_state='pending' ORDER BY e.created_at LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "event_id": row["event_id"],
+                    "payload": json.loads(row["payload_json"]),
+                    "task_id": row["task_id"],
+                    "sender_id": row["sender_id"],
+                    "user_hash": row["user_hash"],
+                }
+                for row in rows
+            ]
+
+    def mark_remote_work_reply(self, event_id: str, *, sent: bool, error_code: str | None = None) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE remote_work_events SET reply_state=?,reply_error=? WHERE event_id=? AND reply_state='pending'",
+                ("sent" if sent else "suppressed", error_code, event_id),
+            )
+
+    def remote_work_status(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._expire_remote_work_tasks(connection)
+            counts = {
+                row["state"]: int(row["count"])
+                for row in connection.execute("SELECT state,COUNT(*) AS count FROM remote_work_tasks GROUP BY state")
+            }
+            agent = connection.execute("SELECT * FROM remote_work_agent WHERE id=1").fetchone()
+            return {
+                "tasks": counts,
+                "pending_outbox": int(
+                    connection.execute("SELECT COUNT(*) FROM remote_work_outbox WHERE state IN ('pending','failed')").fetchone()[0]
+                ),
+                "pending_replies": int(
+                    connection.execute("SELECT COUNT(*) FROM remote_work_events WHERE reply_state='pending'").fetchone()[0]
+                ),
+                "agent": None if agent is None else json.loads(agent["payload_json"]),
+            }
+
+    def expire_remote_work_tasks(self) -> int:
+        with self._connect() as connection:
+            return self._expire_remote_work_tasks(connection)
+
+    @staticmethod
+    def _expire_remote_work_tasks(connection: sqlite3.Connection) -> int:
+        cursor = connection.execute(
+            """
+            UPDATE remote_work_tasks SET state='expired',updated_at=?
+            WHERE state IN ('waiting_mac','queued') AND expires_at<=?
+            """,
+            (utc_now(), utc_now()),
+        )
+        return int(cursor.rowcount)
+
+    @staticmethod
+    def _remote_work_task_document(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "task_id": row["task_id"],
+            "project_alias": row["project_alias"],
+            "state": row["state"],
+            "run_seq": int(row["run_seq"]),
+            "sequence": int(row["sequence"]),
+            "stage": row["stage"],
+            "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+            "updated_at": row["updated_at"],
+            "last_status": None if row["last_status_json"] is None else json.loads(row["last_status_json"]),
+            "last_result": None if row["last_result_json"] is None else json.loads(row["last_result_json"]),
+        }
 
     def store_message(
         self,

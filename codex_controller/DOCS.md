@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.2.0`。
+当前版本：`0.2.1`。
 
 ## 通用微信会话
 
@@ -10,7 +10,7 @@
 - 每次新建或恢复持久 Thread 都会重新注入当前 developer instructions、只读 sandbox 和 `approvalPolicy=never`。即使历史会话曾讨论 Mac 代理、Hermes 或旧迁移状态，当前能力也必须以本轮 MCP 工具目录和实际调用结果为准。
 - 微信 owner 发送无附件且文本精确为“打开新会话”或 `/new` 时，Controller 会在既有队列与幂等门禁内创建新 Thread，并返回确定性确认。近似文本或带附件消息不会触发重置；旧 Thread 不删除，下一条普通消息才进入新 Thread。
 - 新 Thread 在当前 app-server 进程中已经处于加载状态，下一条消息不会重复调用 `thread/resume`；Controller/app-server 重启后进程内状态清空，持久 Thread 才会重新执行一次安全恢复。
-- Ingress 的 MCP 工具控制台显示全部 32 个已知工具，并分别展示内部服务配置、管理员策略、MCP 进程真实 `tools/list` 发布状态和当前可调用状态；不会显示 URL、bearer、完整 Thread 或会话标识。
+- Ingress 的 MCP 工具控制台显示当前静态 Operations 工具与 Renovation Hub 动态 manifest 的并集，并分别展示内部服务配置、管理员策略、MCP 进程真实 `tools/list` 发布状态和当前可调用状态；不会显示 URL、bearer、完整 Thread 或会话标识。
 - 工具旁的自然语言意图只是能力示例，不是固定关键词。Codex 根据整句话语义和本轮目录决定是否调用；普通讨论仍可直接回答。
 - 管理员可逐工具开启或关闭。页面写请求必须同时携带短期 CSRF token、JSON、当前 catalog revision 和随机 request ID；并发旧 revision 会被拒绝，相同 request ID 的相同正文幂等返回原结果。
 - `/new` 确认和内部作业状态会返回稳定 `TH-*` 短标识，便于排查旧 Thread；完整 Thread、Turn 和 conversation key 不进入页面 DTO。
@@ -77,9 +77,11 @@ Controller 与本机 Codex 是两个独立会话。不要复制本机 Token、Co
 
 ## 工具代理
 
-app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把固定工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Ledger 或 Broker。
+app-server 只启动一个无秘密的本地 MCP 进程。MCP 通过 `/data/runtime/tool-proxy.sock` 把当前动态目录中的工具调用交给 Controller 主进程，再由主进程使用各自 bearer 访问 Renovation Hub 或 Broker。
 
-工具元数据只有一份事实源，统一定义 MCP Schema、中文名称、服务、风险类型和意图示例。SQLite 保存全局 catalog revision、逐工具开关、管理幂等、真实 MCP 目录心跳和最多 1000 条脱敏调用审计；审计只记录工具名、结果类型、错误码、耗时和时间，不保存参数、返回正文或凭据。
+Operations 工具继续由 Controller 本地定义；Renovation Hub 工具从受认证 `GET /internal/v1/mcp/manifest` 获取完整 Schema、中文名称、风险、transport 和 annotations。Controller 只接受固定 `service=renovation_hub`、`scope=business`、`ledger_*` / `renovation_*` 命名空间、封闭 Schema、允许的 transport 和正确 digest。SQLite 保存 last-good manifest、全局 catalog revision、逐工具开关、管理幂等、真实 MCP 目录心跳和最多 1000 条脱敏调用审计；审计不保存参数、返回正文或凭据。
+
+启动时先加载 last-good；不存在时使用内置 bootstrap。后台刷新取得新的合法 digest 后原子更新目录和 revision，并触发 `notifications/tools/list_changed`。Hub 暂时不可达、返回非法 digest/Schema/transport 或撤回工具时不会清空 last-good；撤回工具不再发布，既有关闭策略在其未来重新出现时仍保持关闭。
 
 MCP `tools/list` 只返回“内部服务已配置且策略开启”的交集，并把本次实际发布目录回报给主进程。策略 revision 变化后 MCP 发出标准 `notifications/tools/list_changed`；在 app-server 刷新目录前页面显示“等待 MCP 刷新”。无论目录是否刷新，`tools/call` 都会重新读取当前策略，关闭工具立即返回 `tool_disabled`。
 
@@ -87,7 +89,7 @@ MCP `tools/list` 只返回“内部服务已配置且策略开启”的交集，
 
 Gateway 作业缺少 `capability_profile` 时按旧版唯一 owner 兼容为 `owner_legacy`；新版 owner 使用 `owner`。`member_read_only` 只允许 `ledger_show`、`ledger_query`、`ledger_summary`、`renovation_dashboard`、`renovation_project_list`、`renovation_stage_list`、`renovation_area_list` 和 `renovation_timeline`，其他账本写入、导出、媒体和 Operations 在 Controller 服务端返回 `tool_not_allowed_for_profile`。
 
-私有 `config.toml` 为 Controller 定义的全部 32 个固定内部 MCP 工具写入单工具 `approval_mode="approve"`，同时 Thread/Turn 保持 `approvalPolicy=never`。这只消除微信无法响应的 Codex UI 审批步骤：`ledger_generate_chart`、`ledger_add_refund` 以及 Operations 工具都可进入真实服务端门禁，但不会因此获得额外业务权限。
+私有 `config.toml` 为当前目录中的每个内部 MCP 工具写入单工具 `approval_mode="approve"`，同时 Thread/Turn 保持 `approvalPolicy=never`。运行期新增合法 Hub 工具会在 app-server 重新 `tools/list` 后出现，无需重启；这只消除微信无法响应的 Codex UI 审批步骤，不会因此获得额外业务权限。
 
 账本只读工具仍带明确的只读、非破坏、幂等和封闭世界 annotations。写工具只允许当前 active owner 作业/Turn，Controller 生成稳定幂等键，Renovation Hub 继续执行字段校验、单 writer、审计和业务约束；member 即使看见同一 app-server 配置，也只能调用 8 个 allowlist 查询。
 

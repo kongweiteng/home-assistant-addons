@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.2.5
+
+- 新增 Renovation Hub 单一业务工具 registry，由同一事实源生成受认证 MCP manifest 与 `/internal/v1/tools/call` dispatch，当前覆盖 30 个公开账本、项目、阶段、空间、时间线、搜索和媒体动作。
+- 新增 manifest version/service/scope/revision/digest、完整 JSON Schema、风险与 transport 元数据；固定命名空间并拒绝任意 URL、SQL、文件、cutover、writer、恢复和清理等内部能力。
+- 新增统一 `renovation_search`、`renovation_media_list` 和 `renovation_media_show`，按项目、阶段、空间、时间、类型和关键词查询，同时隐藏内部存储名、来源摘要和私有路径。
+- 新增公开业务路由覆盖审计、manifest/digest/Schema/transport 反例和 registry/dispatch 单一事实源回归；不改变 writer generation、active lease、正式账本或媒体原件。
+
 ## 0.2.4
 
 - 修复 HA 局域网普通 HTTP Ingress 中 `crypto.randomUUID()` 不可用，导致项目、空间、阶段、时间线和账目保存请求在发送前失败的问题。

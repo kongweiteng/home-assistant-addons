@@ -92,6 +92,12 @@ class ControllerService:
         }
 
     def tool_status(self) -> dict[str, Any]:
+        if (
+            self.tool_context is not None
+            and getattr(self.tool_context, "store", None) is not None
+            and hasattr(self.tool_context, "tool_status")
+        ):
+            return self.tool_context.tool_status()
         configured = (
             self.tool_context.configured_tools()
             if self.tool_context is not None and hasattr(self.tool_context, "configured_tools")
@@ -112,6 +118,17 @@ class ControllerService:
         revision: int,
         request_id: str,
     ) -> dict[str, Any]:
+        if (
+            self.tool_context is not None
+            and getattr(self.tool_context, "store", None) is not None
+            and hasattr(self.tool_context, "update_tool_policy")
+        ):
+            return self.tool_context.update_tool_policy(
+                tool_name,
+                enabled=enabled,
+                revision=revision,
+                request_id=request_id,
+            )
         return self.store.update_tool_policy(
             tool_name,
             enabled=enabled,
@@ -162,7 +179,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.2.0",
+            "version": "0.2.1",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -192,6 +209,7 @@ class ControllerService:
                 "operations": any(name.startswith("ha_operations_") for name in effective_names),
                 "mcp": tool_status["mcp"],
                 "policy_error": tool_status["policy_error"],
+                "hub_manifest": tool_status.get("hub_manifest"),
             },
             "pending_login": self.pending_login,
             "queue": self.store.status(),
@@ -260,7 +278,18 @@ class ControllerService:
                 else []
             )
             if hasattr(self.app_server, "configure_developer_context"):
-                self.app_server.configure_developer_context(effective_tools, capability_profile)
+                if (
+                    getattr(self.app_server, "supports_dynamic_tool_definitions", False)
+                    and self.tool_context is not None
+                    and hasattr(self.tool_context, "tool_definitions_by_name")
+                ):
+                    self.app_server.configure_developer_context(
+                        effective_tools,
+                        capability_profile,
+                        self.tool_context.tool_definitions_by_name(),
+                    )
+                else:
+                    self.app_server.configure_developer_context(effective_tools, capability_profile)
             if is_new_thread_command(payload):
                 thread_id = self.app_server.start_thread()
                 thread_short = self.store.short_id("TH", thread_id)

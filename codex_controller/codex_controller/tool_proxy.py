@@ -1,4 +1,4 @@
-"""Secret-isolating Unix socket router for fixed Ledger and Broker tools."""
+"""Secret-isolating Unix socket router for dynamic Hub and fixed Broker tools."""
 
 from __future__ import annotations
 
@@ -17,15 +17,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from .hub_manifest import (
+    BOOTSTRAP_MANIFEST,
+    HubManifestError,
+    ValidatedHubManifest,
+    validate_hub_manifest,
+)
 from .store import ControllerStore, StoreError
 from .tool_catalog import (
-    ALL_TOOL_NAMES,
-    LEDGER_TOOLS,
-    LEDGER_WRITE_TOOLS,
     MEMBER_READ_ONLY_TOOL_NAMES,
-    OPERATIONS_TOOLS,
-    RENOVATION_TOOLS,
-    RENOVATION_WRITE_TOOLS,
+    OPERATION_DEFINITIONS,
+    ToolDefinition,
 )
 
 HOST_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,251}[a-z0-9])?$")
@@ -82,6 +84,7 @@ class ToolRouter:
         stream_media: Callable[..., dict[str, Any]] | None = None,
         max_media_bytes: int = DEFAULT_MAX_GATEWAY_MEDIA_BYTES,
         store: ControllerStore | None = None,
+        manifest_poll_interval: float = 30.0,
     ):
         self.ledger_base_url = validate_base_url(ledger_base_url)
         self.ledger_token = ledger_token
@@ -94,8 +97,15 @@ class ToolRouter:
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
         self.store = store
+        self.manifest_poll_interval = max(0.1, float(manifest_poll_interval))
         self._context_lock = threading.Lock()
         self._active_context: dict[str, str] | None = None
+        self._definition_lock = threading.RLock()
+        self._hub_manifest: ValidatedHubManifest = BOOTSTRAP_MANIFEST
+        self._fallback_revision = 1
+        self._manifest_stop = threading.Event()
+        self._manifest_thread: threading.Thread | None = None
+        self._load_last_good_manifest()
 
     def begin_job(self, job_id: str, message_id: str, capability_profile: str = "owner_legacy") -> None:
         if not job_id or not message_id:
@@ -128,24 +138,75 @@ class ToolRouter:
             if self._active_context is not None and self._active_context["job_id"] == job_id:
                 self._active_context = None
 
+    def _load_last_good_manifest(self) -> None:
+        if self.store is None:
+            return
+        try:
+            document = self.store.load_hub_manifest_document()
+        except StoreError:
+            return
+        if document is None:
+            return
+        try:
+            manifest = validate_hub_manifest(document)
+        except HubManifestError as exc:
+            try:
+                self.store.record_hub_manifest_error(exc.code)
+            except StoreError:
+                pass
+            return
+        with self._definition_lock:
+            self._hub_manifest = manifest
+
+    def tool_definitions(self) -> tuple[ToolDefinition, ...]:
+        with self._definition_lock:
+            hub_definitions = self._hub_manifest.definitions
+        return hub_definitions + OPERATION_DEFINITIONS
+
+    def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
+        return {definition.name: definition for definition in self.tool_definitions()}
+
+    def _tool_definition(self, name: str) -> ToolDefinition | None:
+        with self._definition_lock:
+            for definition in self._hub_manifest.definitions:
+                if definition.name == name:
+                    return definition
+        for definition in OPERATION_DEFINITIONS:
+            if definition.name == name:
+                return definition
+        return None
+
+    def _hub_configured(self) -> bool:
+        return bool(self.ledger_base_url and len(self.ledger_token) >= 32)
+
+    def _gateway_configured(self) -> bool:
+        return bool(self.gateway_base_url and len(self.gateway_token) >= 32)
+
     def configured_tools(self) -> frozenset[str]:
         tools: set[str] = set()
-        if self.ledger_base_url and len(self.ledger_token) >= 32:
-            ledger_tools = set(LEDGER_TOOLS)
-            renovation_tools = set(RENOVATION_TOOLS)
-            gateway_configured = bool(self.gateway_base_url and len(self.gateway_token) >= 32)
-            if not gateway_configured:
-                ledger_tools.discard("ledger_attach")
-            tools.update(ledger_tools)
-            tools.update(renovation_tools)
-        if self.operations_base_url and len(self.operations_token) >= 32:
-            tools.update(OPERATIONS_TOOLS)
+        hub_configured = self._hub_configured()
+        gateway_configured = self._gateway_configured()
+        for definition in self.tool_definitions():
+            if definition.service == "renovation_hub":
+                if not hub_configured:
+                    continue
+                if definition.transport == "gateway_attachment" and not gateway_configured:
+                    continue
+                tools.add(definition.name)
+            elif definition.service == "ha_operations_broker":
+                if self.operations_base_url and len(self.operations_token) >= 32:
+                    tools.add(definition.name)
         return frozenset(tools)
 
     def route_ready_tools(self) -> frozenset[str]:
         tools = set(self.configured_tools())
-        if not self.gateway_base_url or len(self.gateway_token) < 32:
-            tools.discard("renovation_media_ingest")
+        if not self._gateway_configured():
+            definitions = self.tool_definitions_by_name()
+            tools = {
+                name
+                for name in tools
+                if definitions[name].transport not in {"gateway_attachment", "gateway_media_stream"}
+            }
         return frozenset(tools)
 
     def available_tools(self, capability_profile: str | None = None) -> list[str]:
@@ -162,18 +223,37 @@ class ToolRouter:
         return sorted(configured)
 
     def catalog_payload(self) -> dict[str, Any]:
+        definitions = self.tool_definitions()
+        configured = set(self.configured_tools())
         if self.store is None:
-            return {"tools": self.available_tools(), "revision": 1, "policy_error": None}
+            enabled = set(self.available_tools())
+            return {
+                "tools": [
+                    definition.mcp_document()
+                    for definition in definitions
+                    if definition.name in enabled
+                ],
+                "revision": self._fallback_revision,
+                "policy_error": None,
+            }
         try:
             snapshot = self.store.tool_policy_snapshot()
         except StoreError as exc:
             return {"tools": [], "revision": None, "policy_error": exc.code}
-        enabled = set(snapshot["enabled"]) & set(self.configured_tools())
-        return {"tools": sorted(enabled), "revision": snapshot["revision"], "policy_error": None}
+        enabled = set(snapshot["enabled"]) & configured
+        return {
+            "tools": [
+                definition.mcp_document()
+                for definition in definitions
+                if definition.name in enabled
+            ],
+            "revision": snapshot["revision"],
+            "policy_error": None,
+        }
 
     def catalog_revision(self) -> dict[str, Any]:
         if self.store is None:
-            return {"revision": 1}
+            return {"revision": self._fallback_revision}
         try:
             return {"revision": self.store.tool_catalog_revision()}
         except StoreError as exc:
@@ -189,12 +269,128 @@ class ToolRouter:
         if not isinstance(tools, list) or any(not isinstance(name, str) for name in tools):
             raise ToolProxyError("invalid_catalog_observation", "MCP 目录工具无效")
         expected = self.catalog_payload()
-        if revision != expected["revision"] or sorted(set(tools)) != expected["tools"]:
+        expected_names = sorted(
+            tool["name"]
+            for tool in expected["tools"]
+            if isinstance(tool, dict) and isinstance(tool.get("name"), str)
+        )
+        if revision != expected["revision"] or sorted(set(tools)) != expected_names:
             raise ToolProxyError("catalog_observation_stale", "MCP 目录回报已过期")
         try:
             return self.store.record_mcp_catalog(revision, tools)
         except StoreError as exc:
             raise ToolProxyError(exc.code, str(exc)) from exc
+
+    def sync_hub_manifest(self) -> dict[str, Any]:
+        if not self._hub_configured():
+            raise ToolProxyError("hub_manifest_unconfigured", "Renovation Hub manifest 接口未配置")
+        try:
+            document = self.request_json(
+                "GET",
+                f"{self.ledger_base_url}/internal/v1/mcp/manifest",
+                self.ledger_token,
+                None,
+            )
+            manifest = validate_hub_manifest(document)
+            if self.store is None:
+                with self._definition_lock:
+                    changed = self._hub_manifest.digest != manifest.digest
+                    if changed:
+                        self._fallback_revision += 1
+                    revision = self._fallback_revision
+                    self._hub_manifest = manifest
+                return {
+                    "changed": changed,
+                    "revision": revision,
+                    "hub_revision": manifest.revision,
+                    "catalog_digest": manifest.digest,
+                }
+            with self._definition_lock:
+                result = self.store.apply_hub_manifest(manifest.document)
+                self._hub_manifest = manifest
+            return result
+        except HubManifestError as exc:
+            self._record_manifest_error(exc.code)
+            raise ToolProxyError(exc.code, "Renovation Hub manifest 无效") from exc
+        except StoreError as exc:
+            self._record_manifest_error("hub_manifest_store_failed")
+            raise ToolProxyError(exc.code, "Renovation Hub manifest 无法保存") from exc
+        except ToolProxyError as exc:
+            code = (
+                "hub_manifest_unavailable"
+                if exc.code.startswith("upstream_")
+                else exc.code
+            )
+            self._record_manifest_error(code)
+            raise
+        except Exception as exc:
+            self._record_manifest_error("hub_manifest_sync_failed")
+            raise ToolProxyError("hub_manifest_sync_failed", "Renovation Hub manifest 同步失败") from exc
+
+    def _record_manifest_error(self, code: str) -> None:
+        if self.store is None:
+            return
+        try:
+            self.store.record_hub_manifest_error(code)
+        except StoreError:
+            pass
+
+    def start_manifest_sync(self) -> None:
+        if not self._hub_configured():
+            return
+        if self._manifest_thread is not None and self._manifest_thread.is_alive():
+            return
+        self._manifest_stop.clear()
+
+        def synchronize() -> None:
+            while not self._manifest_stop.is_set():
+                try:
+                    self.sync_hub_manifest()
+                except ToolProxyError:
+                    pass
+                if self._manifest_stop.wait(self.manifest_poll_interval):
+                    break
+
+        self._manifest_thread = threading.Thread(
+            target=synchronize,
+            name="controller-hub-manifest-sync",
+            daemon=True,
+        )
+        self._manifest_thread.start()
+
+    def stop_manifest_sync(self) -> None:
+        self._manifest_stop.set()
+        if self._manifest_thread is not None:
+            self._manifest_thread.join(timeout=2)
+        self._manifest_thread = None
+
+    def tool_status(self) -> dict[str, Any]:
+        if self.store is None:
+            raise ToolProxyError("tool_policy_invalid", "工具策略存储未配置")
+        return self.store.tool_control_document(
+            self.configured_tools(),
+            self.route_ready_tools(),
+            definitions=self.tool_definitions(),
+        )
+
+    def update_tool_policy(
+        self,
+        tool_name: str,
+        *,
+        enabled: bool,
+        revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if self.store is None:
+            raise StoreError("tool_policy_invalid", "工具策略存储未配置", status=503)
+        if self._tool_definition(tool_name) is None:
+            raise StoreError("tool_not_found", "工具不存在", status=404)
+        return self.store.update_tool_policy(
+            tool_name,
+            enabled=enabled,
+            revision=revision,
+            request_id=request_id,
+        )
 
     def preview_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
         """Fetch a verified, non-consuming attachment preview for Codex input."""
@@ -214,8 +410,8 @@ class ToolRouter:
         outcome = "failed"
         error_code: str | None = None
         try:
-            self._authorize_tool(name)
-            result = self._call_authorized(name, arguments)
+            definition = self._authorize_tool(name)
+            result = self._call_authorized(definition, arguments)
             outcome = "succeeded"
             return result
         except ToolProxyError as exc:
@@ -229,7 +425,7 @@ class ToolRouter:
             } else "failed"
             raise
         finally:
-            if self.store is not None and name in ALL_TOOL_NAMES:
+            if self.store is not None:
                 try:
                     self.store.record_tool_invocation(
                         name,
@@ -240,11 +436,13 @@ class ToolRouter:
                 except (StoreError, sqlite3.DatabaseError, OSError):
                     pass
 
-    def _authorize_tool(self, name: str) -> None:
-        if name not in ALL_TOOL_NAMES:
+    def _authorize_tool(self, name: str) -> ToolDefinition:
+        definition = self._tool_definition(name)
+        if definition is None:
             raise ToolProxyError("unknown_tool", "工具不在允许清单")
         with self._context_lock:
-            profile = None if self._active_context is None else self._active_context.get("capability_profile")
+            context = None if self._active_context is None else dict(self._active_context)
+        profile = None if context is None else context.get("capability_profile")
         if profile == "member_read_only" and name not in MEMBER_READ_ONLY_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
         if name not in self.configured_tools():
@@ -256,11 +454,15 @@ class ToolRouter:
                 raise ToolProxyError("tool_policy_invalid", "工具策略不可用") from exc
             if name not in enabled:
                 raise ToolProxyError("tool_disabled", "工具已由管理员关闭")
+        if definition.requires_job_context and context is None:
+            raise ToolProxyError("tool_context_unavailable", "该工具只能在活动 Controller 作业中调用")
+        return definition
 
-    def _call_authorized(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _call_authorized(self, definition: ToolDefinition, arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")
-        if name == "renovation_media_ingest":
+        name = definition.name
+        if definition.service == "renovation_hub" and definition.transport == "gateway_media_stream":
             if not self.ledger_base_url or len(self.ledger_token) < 32:
                 raise ToolProxyError("ledger_unavailable", "Renovation Hub 媒体接口未配置")
             if not self.gateway_base_url or len(self.gateway_token) < 32:
@@ -268,7 +470,8 @@ class ToolRouter:
             reference = arguments.get("attachment_ref")
             if not isinstance(reference, str) or not ATTACHMENT_REF_RE.fullmatch(reference):
                 raise ToolProxyError("attachment_ref_invalid", "attachment_ref 无效")
-            arguments = self._with_deterministic_idempotency(name, arguments)
+            if definition.idempotent_write:
+                arguments = self._with_deterministic_idempotency(name, arguments)
             return self.stream_media(
                 self.gateway_base_url,
                 self.gateway_token,
@@ -278,15 +481,17 @@ class ToolRouter:
                 {key: value for key, value in arguments.items() if key != "attachment_ref"},
                 self.max_media_bytes,
             )
-        if name in LEDGER_TOOLS or name in RENOVATION_TOOLS:
+        if definition.service == "renovation_hub":
             if not self.ledger_base_url or len(self.ledger_token) < 32:
                 raise ToolProxyError("ledger_unavailable", "Renovation Hub 账本接口未配置")
-            if name == "ledger_attach" and (not self.gateway_base_url or len(self.gateway_token) < 32):
+            if definition.transport == "gateway_attachment" and not self._gateway_configured():
                 raise ToolProxyError("gateway_unavailable", "Weixin Gateway 附件接口未配置")
-            if name in LEDGER_WRITE_TOOLS or name in RENOVATION_WRITE_TOOLS:
+            if definition.transport not in {"json", "gateway_attachment"}:
+                raise ToolProxyError("tool_transport_invalid", "工具传输方式不受支持")
+            if definition.idempotent_write:
                 arguments = self._with_deterministic_idempotency(name, arguments)
             ledger_arguments = dict(arguments)
-            if name == "ledger_attach":
+            if definition.transport == "gateway_attachment":
                 ledger_arguments = self._resolve_gateway_attachment(arguments)
             return self.request_json(
                 "POST",

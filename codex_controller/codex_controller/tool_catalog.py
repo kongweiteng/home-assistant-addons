@@ -18,6 +18,10 @@ class ToolDefinition:
     description: str
     intent_examples: tuple[str, ...]
     input_schema: dict[str, Any] | None = None
+    transport: str = "json"
+    requires_job_context: bool = False
+    idempotent_write: bool = False
+    annotations: dict[str, bool] | None = None
 
     def __post_init__(self) -> None:
         if self.input_schema is None:
@@ -33,13 +37,16 @@ class ToolDefinition:
             "description": self.description,
             "inputSchema": self.input_schema,
         }
-        if self.read_only:
-            document["annotations"] = {
+        annotations = self.annotations
+        if annotations is None and self.read_only:
+            annotations = {
                 "readOnlyHint": True,
                 "destructiveHint": False,
                 "idempotentHint": True,
                 "openWorldHint": False,
             }
+        if annotations is not None:
+            document["annotations"] = dict(annotations)
         return document
 
     def public_metadata(self) -> dict[str, Any]:
@@ -49,6 +56,9 @@ class ToolDefinition:
             "service": self.service,
             "risk_type": self.risk_type,
             "intent_examples": list(self.intent_examples),
+            "transport": self.transport,
+            "requires_job_context": self.requires_job_context,
+            "idempotent_write": self.idempotent_write,
         }
 
 
@@ -58,7 +68,10 @@ def _hub(
     risk_type: str,
     description: str,
     *intent_examples: str,
+    input_schema: dict[str, Any] | None = None,
+    transport: str = "json",
 ) -> ToolDefinition:
+    read_only = risk_type == "read_only"
     return ToolDefinition(
         name=name,
         display_name=display_name,
@@ -66,6 +79,20 @@ def _hub(
         risk_type=risk_type,
         description=description,
         intent_examples=tuple(intent_examples),
+        input_schema=input_schema,
+        transport=transport,
+        requires_job_context=not read_only,
+        idempotent_write=not read_only,
+        annotations=(
+            {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            }
+            if read_only
+            else None
+        ),
     )
 
 
@@ -87,12 +114,12 @@ def _operation(
     )
 
 
-TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
+BOOTSTRAP_HUB_DEFINITIONS: tuple[ToolDefinition, ...] = (
     _hub("ledger_add_payment", "新增付款", "write", "向 Renovation Hub 装修账本新增付款；写操作受单 writer 和稳定幂等键约束。", "记一笔瓷砖付款", "新增装修支出"),
     _hub("ledger_add_refund", "新增退款", "write", "向 Renovation Hub 装修账本新增退款；写入受单 writer 和稳定幂等键约束。", "登记一笔退款", "记录商家返款"),
     _hub("ledger_correct_payment", "更正付款", "write", "更正既有装修付款；必须通过结构化工具并受服务端写入边界约束。", "把这笔付款金额改正", "更正付款分类"),
     _hub("ledger_undo", "撤销账本操作", "write", "撤销允许回退的既有账本操作；受服务端审计和幂等边界约束。", "撤销刚才那笔记账", "回退上一项账本修改"),
-    _hub("ledger_attach", "关联账本附件", "write", "把 Gateway 的一次性附件关联到既有账本记录；会消费受控附件引用。", "把这张发票附到付款", "给这笔记录添加附件"),
+    _hub("ledger_attach", "关联账本附件", "write", "把 Gateway 的一次性附件关联到既有账本记录；会消费受控附件引用。", "把这张发票附到付款", "给这笔记录添加附件", transport="gateway_attachment"),
     _hub("ledger_show", "查看单条流水", "read_only", "只读查看 Renovation Hub 装修账本的一条既有流水及附件元数据；不会创建、修改、消费或删除数据，无需 Passkey 或额外确认。", "查看这笔付款详情", "显示某条账本记录"),
     _hub("ledger_query", "查询账本明细", "read_only", "只读查询 Renovation Hub 装修账本明细和筛选结果；不会创建、修改或删除数据，无需 Passkey 或额外确认。", "查询本月装修支出明细", "看看门窗付款记录"),
     _hub("ledger_summary", "汇总装修账本", "read_only", "只读汇总 Renovation Hub 装修账本的净支出、交易数量和分类统计；不会创建、修改或删除数据，无需 Passkey 或额外确认。", "装修一共花了多少钱", "按分类汇总支出"),
@@ -114,7 +141,11 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     _hub("renovation_event_update", "更新装修事件", "write", "更新既有装修事件；受服务端写入边界和审计约束。", "修改昨天的施工记录", "补充验收说明"),
     _hub("renovation_timeline", "查询装修时间线", "read_only", "只读查询 Renovation Hub 装修时间线；不会创建、修改或删除数据，无需 Passkey 或额外确认。", "最近装修有什么进展", "查看装修时间线"),
     _hub("renovation_dashboard", "查看装修驾驶舱", "read_only", "只读返回 Renovation Hub 装修驾驶舱、进度和统计数据；不会修改项目或账本，无需 Passkey 或额外确认。", "装修整体进度怎么样", "查看装修概况"),
-    _hub("renovation_media_ingest", "归档装修媒体", "write", "把受控微信图片或视频流式归档到 Renovation Hub；会消费附件引用并受稳定幂等键约束。", "把这段施工视频归档", "保存这张现场照片"),
+    _hub("renovation_media_ingest", "归档装修媒体", "write", "把受控微信图片或视频流式归档到 Renovation Hub；会消费附件引用并受稳定幂等键约束。", "把这段施工视频归档", "保存这张现场照片", transport="gateway_media_stream"),
+)
+
+
+OPERATION_DEFINITIONS: tuple[ToolDefinition, ...] = (
     _operation(
         "ha_operations_propose_restart",
         "创建重启提案",
@@ -153,6 +184,9 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 
+TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = BOOTSTRAP_HUB_DEFINITIONS + OPERATION_DEFINITIONS
+
+
 TOOL_BY_NAME = {definition.name: definition for definition in TOOL_DEFINITIONS}
 ALL_TOOL_NAMES = frozenset(TOOL_BY_NAME)
 NATURAL_QUERY_READ_ONLY_TOOLS = frozenset(
@@ -182,3 +216,20 @@ RENOVATION_WRITE_TOOLS = frozenset(
 def mcp_tool_catalog(enabled_names: list[str] | tuple[str, ...] | set[str] | None = None) -> list[dict[str, Any]]:
     enabled = ALL_TOOL_NAMES if enabled_names is None else set(enabled_names)
     return [definition.mcp_document() for definition in TOOL_DEFINITIONS if definition.name in enabled]
+
+
+def tool_definition_from_manifest(document: dict[str, Any]) -> ToolDefinition:
+    """Convert one already-validated Hub manifest entry into Controller metadata."""
+    return ToolDefinition(
+        name=document["name"],
+        display_name=document["display_name"],
+        service="renovation_hub",
+        risk_type="read_only" if document["risk_type"] == "read" else "write",
+        description=document["description"],
+        intent_examples=tuple(document.get("intent_examples", ())),
+        input_schema=document["inputSchema"],
+        transport=document["transport"],
+        requires_job_context=document["requires_job_context"],
+        idempotent_write=document["idempotent_write"],
+        annotations=dict(document["annotations"]),
+    )

@@ -19,6 +19,11 @@
 | `notification_mqtt_username`、`notification_mqtt_password` | 主动通知专用 MQTT 凭据；启用时必填 |
 | `notification_mqtt_tls` | 是否使用 MQTT TLS |
 | `notification_allowed_audiences` | v1 固定只能为 `owner` |
+| `remote_work_enabled` | 是否启用 owner-only Remote Work MQTT 适配；默认关闭 |
+| `remote_work_mqtt_host`、`remote_work_mqtt_port` | 专用 Remote Work Broker 地址和端口；不得猜测或复用通知配置 |
+| `remote_work_mqtt_username`、`remote_work_mqtt_password` | Gateway Remote Work 专用最小 ACL 凭据；启用时必填 |
+| `remote_work_mqtt_tls` | 是否使用 MQTT TLS |
+| `remote_work_ttl_seconds` | 新 request/control 的 TTL，60～3600 秒，默认 1800 秒 |
 
 ## 单 poller 门禁
 
@@ -117,6 +122,31 @@
 
 切换顺序必须是：保持新适配器关闭安装并重启验证；停止旧 Hermes notification bridge consumer；确认 request 主题只有一个 consumer；再启用新适配器并执行文字、重复、过期、重启、MQTT 断线和 session-expired 真机验收。失败时关闭新适配器，保留当前有效的新 Gateway 身份。
 
+## Remote Work MQTT
+
+Remote Work 不经过 Codex Controller，也不会把 Gateway 变成远程终端。普通聊天保持原链路；只有以下精确 active-owner 命令会被确定性分流：
+
+- `/work renovation-hub <明确开发任务>`
+- `/work status <task_id>`
+- `/work continue <task_id> <补充要求>`
+- `/work cancel <task_id>`
+
+member、`/workx` 等近似前缀、未知项目、缺失参数、附件绑定和 `/work deploy` 均不会创建远程开发任务。V1 request/control 不接受路径、Shell、model、sandbox、Git ref、remote 或自定义 reply topic。
+
+固定 MQTT 主题为：
+
+- `home/codex-work/v1/request`
+- `home/codex-work/v1/control`
+- `home/codex-work/v1/status`
+- `home/codex-work/v1/result`
+- `home/codex-work/v1/agent`
+
+request/control/status/result 使用 MQTT v5、QoS 1、非 retained；Gateway 以 24 小时持久会话订阅 status/result/agent，并在把合法事件持久化后才 ACK。Agent 状态由 Mac Agent retained + LWT 发布。Gateway 专用账户只允许 publish request/control 和 subscribe status/result/agent，必须与主动通知账户分开。
+
+SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受限结果字段。status/result 按 `task_id + run_seq + sequence` 收敛；旧序号不能覆盖新状态，同序号不同正文返回 conflict。结果正文只允许摘要、分支、commit、测试摘要、变更路径数量、下一步和错误码；源码、完整 diff、raw JSONL、reasoning、系统提示和完整日志被拒绝。
+
+`remote_work_enabled=false` 时普通微信、Controller 和主动通知不受影响。正式启用必须另行完成专用 EMQX 用户/ACL、Mac Agent 安装、LaunchAgent、Gateway 升级、真实微信和睡眠/重启/TTL/断线验收；本地代码开发授权不包含这些动作。
+
 ## 回滚
 
 1. 关闭新 Gateway poller，等待当前长轮询退出并释放锁。
@@ -127,4 +157,4 @@
 
 真实凭据导入、停止 Hermes、启动新 poller 和微信端到端测试均属于独立 L3 人工闸门。
 
-回退到 `0.1.4` 时，新用户/邀请/会话表会被旧版本忽略；身份 `allowed_user_ids` 仍只有当前 owner，因此 member 自动失去入口，主动通知仍保持唯一 owner。回退不会删除 `0.2.0` 私有表，重新升级后可继续核对。
+回退到 `0.2.0` 时，Remote Work additive 表会被旧版本忽略，普通 Controller/通知/多用户链路继续运行；必须先保持 `remote_work_enabled=false`，并确认没有仍可能被 Mac Agent 接收的未过期 request。回退不会删除 task/worktree，状态未知任务保持人工核对。

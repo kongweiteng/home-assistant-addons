@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.2.1
+
+- Renovation Hub 工具目录改为读取受认证 business manifest；完整 Schema、中文元数据、风险、transport 和 annotations 不再依赖 Controller 静态复制。
+- 新增 bootstrap、SQLite last-good、digest/revision 校验、运行期刷新和 retired 工具处理；Hub 暂时不可达或返回非法 manifest 时不会清空已验证能力。
+- 合法 manifest 变化会更新 catalog revision、发送 `notifications/tools/list_changed`，并通过真实 Codex `0.146.0` app-server 在不重启的情况下刷新 `tools/list`。
+- owner/owner_legacy 自动获得当前全部合法 Hub 业务工具及单工具 `approval_mode=approve`；member 继续固定为 8 个服务端只读工具，未来新增工具不会扩展 member 权限。
+- 新增未知未来读写工具、last-good/restart、retired/disabled、旧 Thread、完整动态 Schema、真实双架构 app-server 和运行期调用回归；不改变 Hub writer、Operations Broker 或正式微信开关。
+
 ## 0.2.0
 
 - 新增全部 32 个 MCP 工具的唯一元数据事实源，统一中文名称、服务归属、只读/写入/受控类型、Schema 和自然语言意图示例；Ingress 明确意图示例不是固定关键词。

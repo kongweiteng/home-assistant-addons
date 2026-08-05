@@ -160,6 +160,7 @@ def write_codex_config(
         "[mcp_servers.home_assistant_tools]\n"
         f"command = {json.dumps(mcp_python, ensure_ascii=False)}\n"
         'args = ["-m", "codex_controller.mcp_proxy"]\n'
+        'default_tools_approval_mode = "approve"\n'
         "env = { "
         f"CONTROLLER_MCP_SOCKET = {json.dumps(str(socket_path), ensure_ascii=False)}, "
         f"PYTHONPATH = {json.dumps(mcp_pythonpath, ensure_ascii=False)}"
@@ -230,9 +231,11 @@ def main() -> None:
         operations_token=os.environ.get("CONTROLLER_OPERATIONS_API_TOKEN", ""),
         max_media_bytes=int(os.environ.get("CONTROLLER_MAX_MEDIA_BYTES", str(1024 * 1024 * 1024))),
         store=store,
+        manifest_poll_interval=float(os.environ.get("CONTROLLER_HUB_MANIFEST_POLL_SECONDS", "30")),
     )
     proxy = ToolProxyServer(socket_path, router)
     proxy.start()
+    router.start_manifest_sync()
 
     turn_media = TurnMediaManager(data_dir / "turn-media", router.preview_attachment)
 
@@ -266,6 +269,7 @@ def main() -> None:
         server.serve_forever()
     finally:
         service.stop()
+        router.stop_manifest_sync()
         proxy.stop()
 
 

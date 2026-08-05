@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
 from pathlib import Path
@@ -21,6 +22,13 @@ from .protocol import (
     RATE_LIMIT_ERRCODE,
     SESSION_EXPIRED_ERRCODE,
     extract_message,
+)
+from .remote_work import (
+    GatewayRemoteWorkRuntime,
+    WorkCommand,
+    WorkCommandError,
+    build_command_document,
+    parse_work_command,
 )
 from .store import GatewayStore, IdentityStore, StoreError, TokenLock, utc_now
 
@@ -142,6 +150,8 @@ class GatewayService:
         owner_pairing_enabled: bool,
         activation_confirmation: str,
         max_media_bytes: int,
+        remote_work_enabled: bool = False,
+        remote_work_ttl_seconds: int = 1800,
     ):
         self.identity_store = identity_store
         self.store = store
@@ -156,6 +166,9 @@ class GatewayService:
         self.owner_pairing_enabled = owner_pairing_enabled
         self.activation_confirmation = activation_confirmation
         self.max_media_bytes = max_media_bytes
+        self.remote_work_enabled = remote_work_enabled
+        self.remote_work_ttl_seconds = remote_work_ttl_seconds
+        self.remote_work_runtime: GatewayRemoteWorkRuntime | None = None
         self.client: IlinkClient | None = None
         self.token_lock: TokenLock | None = None
         self.poller_state = "disabled"
@@ -169,6 +182,9 @@ class GatewayService:
         self._stop = asyncio.Event()
         self._outbound_lock = asyncio.Lock()
         self._authorization_lock = asyncio.Lock()
+
+    def bind_remote_work_runtime(self, runtime: GatewayRemoteWorkRuntime) -> None:
+        self.remote_work_runtime = runtime
 
     async def start(self) -> None:
         await self.controller.start()
@@ -300,6 +316,33 @@ class GatewayService:
             return
         if message["context_token"]:
             self.identity_store.set_context(self.identity, sender_id, message["context_token"])
+        try:
+            work_command = parse_work_command(str(message.get("text") or ""))
+        except WorkCommandError as exc:
+            user = self.store.touch_user(sender_id) or user
+            await self._send_remote_work_text(message, user, str(exc), error_code=exc.code)
+            self.last_message_at = utc_now()
+            return
+        if work_command is not None:
+            user = self.store.touch_user(sender_id) or user
+            if message["media"]:
+                await self._send_remote_work_text(
+                    message,
+                    user,
+                    "Remote Work 命令不能携带附件；请把开发要求直接写在命令正文中。",
+                    error_code="work_attachments_unsupported",
+                )
+            elif user["role"] != "owner":
+                await self._send_remote_work_text(
+                    message,
+                    user,
+                    "当前账号没有 /work 权限。成员账号只允许普通讨论和装修只读查询。",
+                    error_code="work_owner_required",
+                )
+            else:
+                await self._handle_remote_work_command(message, user, work_command)
+            self.last_message_at = utc_now()
+            return
         media: list[tuple[dict[str, Any], bytes]] = []
         for spec in message["media"]:
             try:
@@ -319,6 +362,119 @@ class GatewayService:
             capability_profile="owner" if user["role"] == "owner" else "member_read_only",
         )
         self.last_message_at = utc_now()
+
+    async def _handle_remote_work_command(
+        self,
+        message: dict[str, Any],
+        user: dict[str, Any],
+        command: WorkCommand,
+    ) -> None:
+        if not self.remote_work_enabled:
+            await self._send_remote_work_text(
+                message,
+                user,
+                "Remote Work 适配器当前未启用；普通微信与装修业务链路不受影响。",
+                error_code="remote_work_disabled",
+            )
+            return
+        if command.operation == "status":
+            assert command.task_id is not None
+            try:
+                task = self.store.remote_work_task(command.task_id, user_digest=user["user_hash"])
+                text = self._remote_work_status_text(task)
+                error_code = "remote_work_status"
+            except StoreError as exc:
+                text = "没有找到可由当前 owner 查看或继续的 Remote Work task。"
+                error_code = exc.code
+            await self._send_remote_work_text(message, user, text, error_code=error_code)
+            return
+        if self.remote_work_runtime is None:
+            await self._send_remote_work_text(
+                message,
+                user,
+                "Remote Work MQTT 尚未就绪，本条命令未提交。",
+                error_code="remote_work_unavailable",
+            )
+            return
+
+        remote_message_id = self.store.short_id("RM", str(message["message_id"]))
+        task_id = command.task_id or self.store.short_id("RW", str(message["message_id"]))
+        try:
+            replay = self.store.remote_work_command_replay(
+                remote_message_id,
+                task_id=task_id,
+                operation=command.operation,
+                project_alias=command.project_alias,
+                instruction=command.instruction,
+                user_digest=user["user_hash"],
+            )
+        except StoreError as exc:
+            await self._send_remote_work_text(message, user, str(exc), error_code=exc.code)
+            return
+        if replay is not None:
+            await self._send_remote_work_text(
+                message,
+                user,
+                f"命令已处理过，沿用现有 task {task_id}，当前状态 {replay['state']}。",
+                error_code=f"remote_work_{command.operation}",
+            )
+            return
+        topic, document = build_command_document(
+            command,
+            message_id=remote_message_id,
+            task_id=task_id,
+            principal_hash=user["user_hash"],
+            now=dt.datetime.now().astimezone(),
+            ttl_seconds=self.remote_work_ttl_seconds,
+        )
+        try:
+            task = self.store.enqueue_remote_work_command(
+                topic=topic,
+                payload=document,
+                sender_id=message["sender_id"],
+                user_digest=user["user_hash"],
+            )
+            self.remote_work_runtime.publish_pending()
+        except StoreError as exc:
+            await self._send_remote_work_text(message, user, str(exc), error_code=exc.code)
+            return
+        if command.operation == "start":
+            text = f"已创建 Remote Work task {task_id}，当前状态 {task['state']}。Mac 离线时不会晚到执行。"
+        elif command.operation == "continue":
+            text = f"已为 {task_id} 提交补充要求；只会恢复该 task 已登记的 Codex Session。"
+        else:
+            text = f"已为 {task_id} 提交取消请求；停止进程不代表工作树已回滚。"
+        if task.get("duplicate"):
+            text = f"命令已处理过，沿用现有 task {task_id}，当前状态 {task['state']}。"
+        await self._send_remote_work_text(message, user, text, error_code=f"remote_work_{command.operation}")
+
+    async def _send_remote_work_text(
+        self,
+        message: dict[str, Any],
+        user: dict[str, Any],
+        text: str,
+        *,
+        error_code: str,
+    ) -> str | None:
+        outbound = {
+            "message_id": message["message_id"],
+            "sender_id": message["sender_id"],
+            "user_hash": user["user_hash"],
+            "capability_profile": "owner" if user["role"] == "owner" else "member_read_only",
+            "required_role": "owner" if user["role"] == "owner" else None,
+            "controller_job_id": f"gateway-{error_code}-{message['message_id']}",
+        }
+        return await self._send_result(outbound, text)
+
+    @staticmethod
+    def _remote_work_status_text(task: dict[str, Any]) -> str:
+        parts = [f"Remote Work task {task['task_id']}：{task['state']}"]
+        if task.get("stage"):
+            parts.append(f"阶段：{task['stage']}")
+        result = task.get("last_result")
+        if isinstance(result, dict) and result.get("summary"):
+            parts.append(str(result["summary"]))
+        return "\n".join(parts)
 
     async def _send_owner_pairing_confirmation(self, sender_id: str, context_token: str | None, message_id: str) -> None:
         if self.client is None:
@@ -370,6 +526,7 @@ class GatewayService:
     async def _delivery_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                await self._deliver_remote_work_replies()
                 if self.controller.configured:
                     for message in self.store.pending_controller():
                         payload = {
@@ -475,6 +632,42 @@ class GatewayService:
                 self.last_error = "delivery_failed"
                 await asyncio.sleep(5)
 
+    async def _deliver_remote_work_replies(self) -> None:
+        for event in self.store.remote_work_pending_replies():
+            payload = event["payload"]
+            text = self._remote_work_result_text(payload)
+            outbound = {
+                "message_id": f"remote-result-{event['event_id']}",
+                "sender_id": event["sender_id"],
+                "user_hash": event["user_hash"],
+                "capability_profile": "owner",
+                "required_role": "owner",
+                "controller_job_id": f"remote-result-{event['event_id']}",
+            }
+            suppression = await self._send_result(outbound, text)
+            self.store.mark_remote_work_reply(
+                event["event_id"],
+                sent=suppression is None,
+                error_code=suppression,
+            )
+
+    @staticmethod
+    def _remote_work_result_text(payload: dict[str, Any]) -> str:
+        parts = [f"Remote Work task {payload['task_id']}：{payload['state']}", str(payload.get("summary") or "")]
+        if payload.get("branch"):
+            parts.append(f"分支：{payload['branch']}")
+        commits = payload.get("commits") or []
+        if commits:
+            parts.append("提交：" + "、".join(str(value) for value in commits))
+        if payload.get("test_summary"):
+            parts.append("测试：" + str(payload["test_summary"]))
+        next_actions = payload.get("next_actions") or []
+        if next_actions:
+            parts.append("下一步：" + "；".join(str(value) for value in next_actions))
+        if payload.get("error_code"):
+            parts.append("错误码：" + str(payload["error_code"]))
+        return "\n".join(part for part in parts if part)
+
     async def _controller_supports_capability_profile(self) -> bool:
         callback = getattr(self.controller, "supports_capability", None)
         if callback is None:
@@ -505,6 +698,8 @@ class GatewayService:
                         if authorization["error_code"] == "message_user_inactive"
                         else "reply_suppressed_authorization_invalid"
                     )
+                if message.get("required_role") == "owner" and authorization.get("capability_profile") != "owner":
+                    return "reply_suppressed_owner_changed"
                 for index, chunk in enumerate(chunks):
                     if self.poller_state == "session_expired":
                         raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
@@ -569,6 +764,7 @@ class GatewayService:
         while not self._stop.is_set():
             try:
                 self.store.cleanup_spool()
+                self.store.expire_remote_work_tasks()
                 await asyncio.sleep(300)
             except asyncio.CancelledError:
                 return
@@ -765,7 +961,7 @@ class GatewayService:
         users = self.users()
         active_users = sum(1 for user in users["users"] if user["status"] == "active")
         return {
-            "version": "0.2.0",
+            "version": "0.2.1",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,
@@ -784,6 +980,10 @@ class GatewayService:
             "last_error": self.last_error,
             "qr": self.public_qr_state(),
             "queue": self.store.status(),
+            "remote_work": {
+                "enabled": self.remote_work_enabled,
+                **self.store.remote_work_status(),
+            },
         }
 
 

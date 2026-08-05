@@ -43,7 +43,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.4` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.5` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
@@ -118,11 +118,15 @@ Content-Type: application/json
 X-Cutover-Token: <独立 cutover token>
 ```
 
+`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、catalog revision/digest 和当前 30 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
+
+公开业务动作由测试逐项核对为“已映射 MCP”或“带原因排除”。统一 `renovation_search` 同时查询账目、时间线和媒体；`renovation_media_list` / `renovation_media_show` 返回脱敏业务元数据，不返回 `storage_name`、`preview_name`、`source_ref_hash` 或私有绝对路径。
+
 接口依次为 `/internal/v1/admin/cutover/prepare`、`freeze`、`seed`、`ready`、`activate` 和 `suspend`。激活确认串必须精确为 `ACTIVATE_PRIMARY_WRITER:<manifest-id>:<generation>`。旧 `/internal/v1/admin/writer-mode` 不再允许推进正式状态，只保留紧急暂停和只读状态确认。
 
 `seed` 会先保存数据库与附件 rollback baseline。若进程在数据库提交和附件目录替换之间中断，再次调用同一 manifest 的 `seed` 只会在主库、staging 和 baseline 可证明一致时完成恢复；无法证明时返回 `seed_recovery_required` 并保持停写，不会覆盖未知数据。
 
-兼容工具入口为 `POST /internal/v1/tools/call`。Ledger v1 工具名继续以 `contracts/renovation_ledger_tools_v1.json` 为准；原生分组标签输入以 `contracts/renovation_ledger_tools_v2.json` 为准；项目、阶段、空间、事件、驾驶舱和媒体工具以 `contracts/renovation_hub_tools_v1.json` 为准。
+兼容工具入口为 `POST /internal/v1/tools/call`。历史 contracts 继续作为兼容输入事实源；当前模型可见目录以受认证 manifest 为准，并由同一 registry 执行。
 
 `renovation_media_ingest` 只允许模型提交一次性 `attachment_ref` 和结构化元数据。Controller 主进程先检查 Hub 幂等结果，再从 Gateway 流式读取正文并转发到 `/internal/v1/media/ingest`；不会生成 Base64 JSON，也不会把 Gateway bearer、Hub bearer、内部路径或媒体正文交给模型。
 

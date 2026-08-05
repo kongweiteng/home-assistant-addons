@@ -10,6 +10,7 @@ import threading
 
 from .api import create_server
 from .notification import GatewayNotificationRuntime, NotificationConfig
+from .remote_work import GatewayRemoteWorkRuntime, RemoteWorkConfig
 from .service import ControllerClient, GatewayService
 from .store import GatewayStore, IdentityStore
 
@@ -54,10 +55,13 @@ async def async_main() -> None:
         owner_pairing_enabled=os.environ.get("WEIXIN_OWNER_PAIRING_ENABLED", "false").lower() == "true",
         activation_confirmation=os.environ.get("WEIXIN_ACTIVATION_CONFIRMATION", ""),
         max_media_bytes=int(os.environ.get("WEIXIN_MAX_MEDIA_BYTES", str(20 * 1024 * 1024))),
+        remote_work_enabled=os.environ.get("WEIXIN_REMOTE_WORK_ENABLED", "false").lower() == "true",
+        remote_work_ttl_seconds=int(os.environ.get("WEIXIN_REMOTE_WORK_TTL_SECONDS", "1800")),
     )
     await service.start()
     loop = asyncio.get_running_loop()
     notification_runtime: GatewayNotificationRuntime | None = None
+    remote_work_runtime: GatewayRemoteWorkRuntime | None = None
     server = None
     try:
         if os.environ.get("WEIXIN_NOTIFICATION_BRIDGE_ENABLED", "false").lower() == "true":
@@ -71,6 +75,16 @@ async def async_main() -> None:
                 loop=loop,
             )
             notification_runtime.start()
+        if os.environ.get("WEIXIN_REMOTE_WORK_ENABLED", "false").lower() == "true":
+            from paho.mqtt import client as mqtt
+
+            remote_work_runtime = GatewayRemoteWorkRuntime(
+                RemoteWorkConfig.from_env(),
+                mqtt,
+                store=gateway_store,
+            )
+            service.bind_remote_work_runtime(remote_work_runtime)
+            remote_work_runtime.start()
         server = create_server(
             "0.0.0.0",
             8103,
@@ -87,6 +101,8 @@ async def async_main() -> None:
             server.server_close()
         if notification_runtime is not None:
             await asyncio.to_thread(notification_runtime.stop)
+        if remote_work_runtime is not None:
+            await asyncio.to_thread(remote_work_runtime.stop)
         await service.stop()
 
 

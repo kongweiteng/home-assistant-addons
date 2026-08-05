@@ -1,4 +1,4 @@
-"""Minimal stdio MCP server that forwards only fixed tools over a Unix socket."""
+"""Minimal stdio MCP server that forwards the Controller's current tool catalog."""
 
 from __future__ import annotations
 
@@ -95,15 +95,20 @@ def main() -> None:
                     result = {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {"listChanged": True}},
-                        "serverInfo": {"name": "ha-controller-tools", "version": "0.2.0"},
+                        "serverInfo": {"name": "ha-controller-tools", "version": "0.2.1"},
                     }
                 elif method == "tools/list":
                     catalog_response = socket_call(socket_path, "__catalog__", {})
                     catalog = catalog_response.get("result") if catalog_response.get("ok") else None
-                    enabled = catalog.get("tools") if isinstance(catalog, dict) and isinstance(catalog.get("tools"), list) else []
+                    documents = catalog.get("tools") if isinstance(catalog, dict) and isinstance(catalog.get("tools"), list) else []
                     revision = catalog.get("revision") if isinstance(catalog, dict) else None
-                    published = [name for name in enabled if isinstance(name, str)]
-                    result = {"tools": tool_catalog(published)}
+                    published_documents = [
+                        document
+                        for document in documents
+                        if isinstance(document, dict) and isinstance(document.get("name"), str)
+                    ]
+                    published = [document["name"] for document in published_documents]
+                    result = {"tools": published_documents}
                     socket_call(
                         socket_path,
                         "__catalog_observed__",

@@ -11,7 +11,7 @@ import subprocess
 import threading
 from typing import Any, Callable
 
-from .tool_catalog import LEDGER_TOOLS, OPERATIONS_TOOLS, RENOVATION_TOOLS, TOOL_BY_NAME
+from .tool_catalog import TOOL_BY_NAME, ToolDefinition
 
 
 class AppServerError(RuntimeError):
@@ -26,6 +26,8 @@ class AppServerError(RuntimeError):
 
 class AppServerClient:
     """Owns one app-server process and its request/notification correlation."""
+
+    supports_dynamic_tool_definitions = True
 
     BASE_DEVELOPER_INSTRUCTIONS = (
         "你通过微信作为通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
@@ -89,8 +91,10 @@ class AppServerClient:
         cls,
         available_tools: list[str],
         capability_profile: str = "owner_legacy",
+        tool_definitions: dict[str, ToolDefinition] | None = None,
     ) -> str:
         enabled = set(available_tools)
+        definitions = TOOL_BY_NAME if tool_definitions is None else tool_definitions
         instructions = cls.BASE_DEVELOPER_INSTRUCTIONS
         if capability_profile == "member_read_only":
             instructions += (
@@ -99,9 +103,14 @@ class AppServerClient:
             )
         else:
             instructions += " 当前微信用户是所有者；写入和 Operations 仍必须遵守现有结构化工具、幂等、Passkey 和服务端门禁。"
-        hub_tools = sorted(enabled & set(LEDGER_TOOLS | RENOVATION_TOOLS))
-        hub_read_tools = sorted(name for name in hub_tools if TOOL_BY_NAME[name].read_only)
-        hub_write_tools = sorted(name for name in hub_tools if not TOOL_BY_NAME[name].read_only)
+        hub_tools = sorted(
+            name
+            for name in enabled
+            if definitions.get(name) is not None
+            and definitions[name].service == "renovation_hub"
+        )
+        hub_read_tools = sorted(name for name in hub_tools if definitions[name].read_only)
+        hub_write_tools = sorted(name for name in hub_tools if not definitions[name].read_only)
         if hub_tools:
             instructions += f" 当前会话已配置 Renovation Hub 工具：{', '.join(hub_tools)}。"
             if capability_profile != "member_read_only":
@@ -128,7 +137,12 @@ class AppServerClient:
             instructions += " 当前会话未配置 Renovation Hub 工具时，才可以明确说明装修账本工具目录不可用。"
         if hub_write_tools:
             instructions += f" 当前可用的装修写入工具是：{', '.join(hub_write_tools)}；写账、退款、修改、撤销或归档必须调用匹配的结构化工具并遵守服务端门禁。"
-        operation_tools = sorted(enabled & set(OPERATIONS_TOOLS))
+        operation_tools = sorted(
+            name
+            for name in enabled
+            if definitions.get(name) is not None
+            and definitions[name].service == "ha_operations_broker"
+        )
         if operation_tools:
             instructions += (
                 f" 当前会话已配置受控 Home Assistant Operations 工具：{', '.join(operation_tools)}。"
@@ -137,10 +151,19 @@ class AppServerClient:
             )
         return instructions
 
-    def configure_developer_context(self, available_tools: list[str], capability_profile: str) -> None:
+    def configure_developer_context(
+        self,
+        available_tools: list[str],
+        capability_profile: str,
+        tool_definitions: dict[str, ToolDefinition] | None = None,
+    ) -> None:
         if capability_profile not in {"owner_legacy", "owner", "member_read_only"}:
             raise AppServerError("invalid_capability_profile", "作业能力画像无效", definitive=True)
-        instructions = self.build_developer_instructions(available_tools, capability_profile)
+        instructions = self.build_developer_instructions(
+            available_tools,
+            capability_profile,
+            tool_definitions,
+        )
         with self._instruction_lock:
             self.developer_instructions = instructions
 
@@ -190,7 +213,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.0"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.2.1"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")

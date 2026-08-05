@@ -13,6 +13,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.2.0` 在保持一套 iLink 身份和一个 Poller 的前提下增加唯一 owner、多 member、一次性成员邀请码、独立会话/Thread 短标识和管理员 Ingress 用户控制面。
 - `0.2.1` 新增默认关闭的 `/work` Remote Work v1：只有精确 active owner 命令进入专用 MQTT，普通聊天仍进入 Controller，member、近似前缀、附件和 `/work deploy` 均失败关闭。
 - `0.2.2` 支持 Controller completed job 的安全图片 artifact：先预取并复核 MIME、大小和 SHA-256，再发送一条中文统计摘要和微信原生图片；成功时不发送链接，图片明确失败或状态未知时才发送 HA Ingress 短期下载链接。
+- `0.2.3` 将 Ingress 明确划分为全局机器人身份、条件式 Owner 初始化和用户级权限管理；首次扫码不增加确认，已有身份的替换才提示影响，Owner 已绑定后不再显示首次绑定操作。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。
 - 当前新 Gateway 是唯一真实 poller；旧 Hermes iLink 身份已失效，不能作为微信回滚目标。
 
@@ -44,6 +45,8 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 
 ## 多用户管理
 
+- 二维码登录只认证 Gateway 唯一的 iLink 机器人身份，不属于某个微信用户；Owner/Member 共用这一机器人和 Poller。
+- 新身份首次绑定不在页面预选用户；第一个发送正确绑定码的私聊用户原子成为 Owner。绑定完成后页面只显示当前 Owner 摘要，后续更换通过用户列表的 Owner 转移完成。
 - 管理员在 HA Ingress 生成 128 bit 高熵成员邀请码；明文只返回一次，私有 SQLite 仅保存随机盐和摘要，默认 15 分钟过期。
 - 两个用户并发领取同一邀请码时最多一人成功；领取消息不会进入 Codex。
 - 每位用户拥有独立 conversation key、`CV-*` 和 Controller Thread；页面不会返回原始微信 ID、完整 conversation key、Thread/job ID 或邀请码历史。

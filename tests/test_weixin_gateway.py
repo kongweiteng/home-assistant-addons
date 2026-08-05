@@ -192,7 +192,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.2.2"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.2.3"', api_source)
 
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
@@ -279,6 +279,16 @@ class ProtocolTests(unittest.TestCase):
     def test_dashboard_exposes_admin_pairing_without_unsafe_html_rendering(self) -> None:
         self.assertIn("api/owner-pairing/start", DASHBOARD_JS)
         self.assertIn("绑定消息不会进入 Codex", DASHBOARD_HTML)
+        self.assertIn("全局机器人", DASHBOARD_HTML)
+        self.assertIn("用户级权限", DASHBOARD_HTML)
+        self.assertIn("第一个在机器人私聊中发送正确绑定码的微信用户将成为 Owner", DASHBOARD_HTML)
+        self.assertIn('id="ownerSetupPanel"', DASHBOARD_HTML)
+        self.assertIn('id="currentOwnerPanel" hidden', DASHBOARD_HTML)
+        self.assertIn("q('ownerSetupPanel').hidden=bound", DASHBOARD_JS)
+        self.assertIn("q('currentOwnerPanel').hidden=!bound", DASHBOARD_JS)
+        self.assertIn("q('inviteStart').disabled=!userManagementReady", DASHBOARD_JS)
+        self.assertIn("if(currentIdentityPresent&&!confirm", DASHBOARD_JS)
+        self.assertLess(DASHBOARD_HTML.index("全局机器人"), DASHBOARD_HTML.index("用户级权限"))
         self.assertIn("api/users/invitations", DASHBOARD_JS)
         self.assertIn("api/owner-transfer", DASHBOARD_JS)
         self.assertIn("X-CSRF-Token", DASHBOARD_JS)

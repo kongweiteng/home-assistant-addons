@@ -1239,7 +1239,7 @@ class GatewayService:
         users = self.users()
         active_users = sum(1 for user in users["users"] if user["status"] == "active")
         return {
-            "version": "0.2.2",
+            "version": "0.2.3",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,

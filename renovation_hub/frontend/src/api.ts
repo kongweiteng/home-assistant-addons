@@ -53,7 +53,19 @@ async function get<T>(path: string): Promise<T> {
 }
 
 function idempotencyKey(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+  const cryptoApi = globalThis.crypto as Crypto | undefined;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return `${prefix}-${cryptoApi.randomUUID()}`;
+  }
+  if (typeof cryptoApi?.getRandomValues !== "function") {
+    throw new ApiError("当前浏览器不支持安全随机数，无法安全保存", "secure_random_unavailable", 0);
+  }
+  const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return `${prefix}-${uuid}`;
 }
 
 async function write<T>(method: string, path: string, body: unknown, prefix: string): Promise<T> {

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.2.4
+
+- 修复 HA 局域网普通 HTTP Ingress 中 `crypto.randomUUID()` 不可用，导致项目、空间、阶段、时间线和账目保存请求在发送前失败的问题。
+- 安全上下文继续使用原生 UUID；非安全上下文改用 `crypto.getRandomValues()` 生成 RFC 4122 UUID v4 幂等键，不使用 `Math.random()`，不改变服务端幂等、CSRF、writer 或账本契约。
+- 新增前端 API 回归测试，覆盖原生与 HTTP 回退路径、UUID version/variant 位和 `Idempotency-Key` 请求头。
+
 ## 0.2.3
 
 - 修复 canonical v2 付款因 `main_category` 按契约为空而在资金账目页全部显示成“退款”的问题。

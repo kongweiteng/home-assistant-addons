@@ -23,6 +23,8 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 - **装修阶段**：维护阶段名称、状态、颜色、计划/实际时间；同一项目最多一个进行中阶段。
 - **设置**：维护项目与空间，查看 writer、导出和媒体存储状态。
 
+页面保存会为每次写请求生成 UUID v4 幂等键。在 HTTPS/安全上下文中优先使用浏览器原生 `crypto.randomUUID()`；在 HA 局域网普通 HTTP Ingress 中自动回退到 `crypto.getRandomValues()`，无需更改现有访问地址。
+
 页面写请求必须同时满足管理员 Ingress、CSRF、`Idempotency-Key`、writer 状态和对象版本要求。旧版本写入返回 `409 version_conflict`，不会覆盖较新数据。
 
 ## 数据位置
@@ -41,7 +43,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.3` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.4` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。

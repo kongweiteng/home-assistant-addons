@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 import datetime as dt
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -16,8 +18,6 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from .protocol import (
-    EP_GET_BOT_QR,
-    EP_GET_QR_STATUS,
     IlinkClient,
     ProtocolError,
     RATE_LIMIT_ERRCODE,
@@ -31,7 +31,15 @@ from .remote_work import (
     build_command_document,
     parse_work_command,
 )
-from .store import GatewayStore, IdentityStore, StoreError, TokenLock, utc_now
+from .store import (
+    GatewayStore,
+    IdentityStore,
+    StoreError,
+    TokenLock,
+    account_hash,
+    routed_message_id,
+    utc_now,
+)
 
 
 def validate_controller_url(value: str) -> str:
@@ -221,6 +229,24 @@ class ControllerClient:
             raise StoreError("controller_unavailable", "Codex Controller 不可用", status=503) from exc
 
 
+@dataclass
+class IdentityRuntime:
+    identity: dict[str, Any]
+    client: IlinkClient
+    token_lock: TokenLock | None = None
+    poller_state: str = "disabled"
+    last_error: str | None = None
+    last_poll_at: str | None = None
+    last_message_at: str | None = None
+    pairing_session_id: str | None = None
+    outbound_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    poll_task: asyncio.Task[Any] | None = None
+
+    @property
+    def identity_id(self) -> str:
+        return str(self.identity["identity_id"])
+
+
 class GatewayService:
     def __init__(
         self,
@@ -236,6 +262,7 @@ class GatewayService:
         controller_ingress_base_url: str = "",
         remote_work_enabled: bool = False,
         remote_work_ttl_seconds: int = 1800,
+        max_active_identities: int = 5,
     ):
         self.identity_store = identity_store
         self.store = store
@@ -246,6 +273,10 @@ class GatewayService:
             owner_private_id = migration.get("owner_private_id")
             if isinstance(owner_private_id, str) and self.identity.get("allowed_user_ids") != [owner_private_id]:
                 self.identity_store.mirror_owner(self.identity, owner_private_id)
+            self.store.migrate_legacy_identity(
+                identity_identifier=self.identity["identity_id"],
+                account_digest=account_hash(self.identity["account_id"]),
+            )
         self.poller_enabled = poller_enabled
         self.owner_pairing_enabled = owner_pairing_enabled
         self.activation_confirmation = activation_confirmation
@@ -255,6 +286,9 @@ class GatewayService:
         )
         self.remote_work_enabled = remote_work_enabled
         self.remote_work_ttl_seconds = remote_work_ttl_seconds
+        if not isinstance(max_active_identities, int) or isinstance(max_active_identities, bool) or not 1 <= max_active_identities <= 32:
+            raise StoreError("identity_limit_invalid", "活动 ClawBot 上限无效")
+        self.max_active_identities = max_active_identities
         self.remote_work_runtime: GatewayRemoteWorkRuntime | None = None
         self.client: IlinkClient | None = None
         self.token_lock: TokenLock | None = None
@@ -264,11 +298,19 @@ class GatewayService:
         self.last_message_at: str | None = None
         self.qr_state: dict[str, Any] | None = None
         self.qr_image_path = identity_store.data_dir / "qr" / "current.png"
+        self.member_qr_state: dict[str, Any] | None = None
+        self.member_qr_image_path = identity_store.data_dir / "qr" / "member-current.png"
+        self._qr_task: asyncio.Task[Any] | None = None
+        self._member_qr_task: asyncio.Task[Any] | None = None
         self._tasks: list[asyncio.Task[Any]] = []
         self._status_lock = threading.Lock()
         self._stop = asyncio.Event()
         self._outbound_lock = asyncio.Lock()
         self._authorization_lock = asyncio.Lock()
+        self._runtimes: dict[str, IdentityRuntime] = {}
+        self._refresh_client()
+        self._ensure_owner_runtime()
+        self._load_secondary_runtimes()
 
     def bind_remote_work_runtime(self, runtime: GatewayRemoteWorkRuntime) -> None:
         self.remote_work_runtime = runtime
@@ -276,17 +318,37 @@ class GatewayService:
     async def start(self) -> None:
         await self.controller.start()
         self._refresh_client()
+        self._ensure_owner_runtime()
         if self.poller_enabled:
             if self.activation_confirmation != "HERMES_POLLER_STOPPED":
                 raise StoreError("activation_confirmation_required", "未确认 Hermes poller 已停止", status=409)
-            if self.identity is None or self.client is None:
+            if self.identity is None or self.client is None or not self._runtimes:
                 raise StoreError("credential_missing", "缺少完整 iLink 身份", status=409)
             if not self.identity.get("allowed_user_ids") and not self.owner_pairing_enabled:
                 raise StoreError("owner_binding_required", "新身份必须先启用一次性 owner 绑定", status=409)
-            self.token_lock = self.identity_store.acquire_token_lock(self.identity["token"])
-            self.token_lock.acquire()
-            self.poller_state = "polling" if self.identity.get("allowed_user_ids") else "pairing"
-            self._tasks.append(asyncio.create_task(self._poll_loop(), name="weixin-poller"))
+            for runtime in list(self._runtimes.values()):
+                record = self.store.identity_record(runtime.identity_id)
+                if record["state"] not in {"active", "pending_pairing"}:
+                    continue
+                runtime.token_lock = self.identity_store.acquire_token_lock(runtime.identity["token"])
+                try:
+                    runtime.token_lock.acquire()
+                except StoreError as exc:
+                    self._set_runtime_state(
+                        runtime,
+                        "token_conflict",
+                        error_code=exc.code,
+                    )
+                    continue
+                if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
+                    self.token_lock = runtime.token_lock
+                state = "pairing" if record["state"] == "pending_pairing" or not runtime.identity.get("allowed_user_ids") else "polling"
+                self._set_runtime_state(runtime, state)
+                runtime.poll_task = asyncio.create_task(
+                    self._poll_loop(runtime),
+                    name=f"weixin-poller-{runtime.identity_id[-8:]}",
+                )
+                self._tasks.append(runtime.poll_task)
         self._tasks.append(asyncio.create_task(self._delivery_loop(), name="weixin-controller-delivery"))
         self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="weixin-spool-cleanup"))
 
@@ -295,11 +357,17 @@ class GatewayService:
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self.client is not None:
-            await self.client.close()
+        closed_clients: set[int] = set()
+        for runtime in self._runtimes.values():
+            if id(runtime.client) not in closed_clients:
+                await runtime.client.close()
+                closed_clients.add(id(runtime.client))
+            if runtime.token_lock is not None:
+                runtime.token_lock.release()
+                runtime.token_lock = None
+            self._set_runtime_state(runtime, "stopped")
         await self.controller.close()
-        if self.token_lock is not None:
-            self.token_lock.release()
+        self.token_lock = None
         self.poller_state = "stopped"
 
     def _refresh_client(self) -> None:
@@ -313,14 +381,169 @@ class GatewayService:
             max_media_bytes=self.max_media_bytes,
         )
 
-    async def _poll_loop(self) -> None:
-        assert self.identity is not None and self.client is not None
-        cursor = self.identity_store.cursor(self.identity)
+        runtime = self._runtimes.get(self.identity["identity_id"])
+        if runtime is None:
+            runtime = IdentityRuntime(
+                identity=self.identity,
+                client=self.client,
+                outbound_lock=self._outbound_lock,
+            )
+            self._runtimes[runtime.identity_id] = runtime
+        else:
+            runtime.identity = self.identity
+            runtime.client = self.client
+            runtime.outbound_lock = self._outbound_lock
+
+    def _ensure_owner_runtime(self) -> None:
+        if self.identity is None or self.client is None:
+            return
+        identity_identifier = self.identity["identity_id"]
+        runtime = self._runtimes.get(identity_identifier)
+        if runtime is None:
+            self._runtimes[identity_identifier] = IdentityRuntime(
+                identity=self.identity,
+                client=self.client,
+                outbound_lock=self._outbound_lock,
+            )
+            return
+        runtime.identity = self.identity
+        runtime.client = self.client
+        runtime.outbound_lock = self._outbound_lock
+
+    def _load_secondary_runtimes(self) -> None:
+        owner_identity_id = None if self.identity is None else self.identity["identity_id"]
+        records = {record["account_hash"]: record for record in self.store.identity_records()}
+        for identity in self.identity_store.load_all_identities():
+            identity_identifier = identity["identity_id"]
+            if identity_identifier == owner_identity_id or identity_identifier in self._runtimes:
+                continue
+            record = records.get(account_hash(identity["account_id"]))
+            if record is None or record["state"] not in {"active", "pending_pairing", "paused", "session_expired"}:
+                continue
+            runtime = IdentityRuntime(
+                identity=identity,
+                client=IlinkClient(
+                    base_url=identity["base_url"],
+                    cdn_base_url=identity["cdn_base_url"],
+                    token=identity["token"],
+                    max_media_bytes=self.max_media_bytes,
+                ),
+                poller_state=str(record["runtime_state"] or "stopped"),
+                last_error=record["last_error"],
+            )
+            if record["state"] == "pending_pairing":
+                onboarding = self.store.pending_onboarding_for_identity(identity_identifier)
+                runtime.pairing_session_id = None if onboarding is None else str(onboarding["session_id"])
+            self._runtimes[identity_identifier] = runtime
+
+    def _runtime_for_identity(self, identity_identifier: str | None) -> IdentityRuntime:
+        if identity_identifier is None and self.identity is not None:
+            identity_identifier = self.identity["identity_id"]
+        runtime = None if identity_identifier is None else self._runtimes.get(identity_identifier)
+        if runtime is None:
+            raise StoreError("identity_runtime_unavailable", "ClawBot 运行时不可用", status=503)
+        if self.identity is not None and identity_identifier == self.identity["identity_id"]:
+            if self.client is None:
+                raise StoreError("credential_missing", "无法回传微信消息", status=503)
+            runtime.identity = self.identity
+            runtime.client = self.client
+            runtime.token_lock = self.token_lock
+            runtime.poller_state = self.poller_state
+            runtime.last_error = self.last_error
+            runtime.last_poll_at = self.last_poll_at
+            runtime.last_message_at = self.last_message_at
+        return runtime
+
+    def _set_runtime_state(
+        self,
+        runtime: IdentityRuntime,
+        poller_state: str,
+        *,
+        error_code: str | None = None,
+        identity_state: str | None = None,
+    ) -> None:
+        runtime.poller_state = poller_state
+        runtime.last_error = error_code
+        if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
+            self.poller_state = poller_state
+            self.last_error = error_code
+        try:
+            self.store.set_identity_runtime_state(
+                runtime.identity_id,
+                poller_state,
+                error_code=error_code,
+                identity_state=identity_state,
+            )
+        except StoreError as exc:
+            if exc.code != "identity_not_found":
+                raise
+
+    def _touch_runtime_message(self, runtime: IdentityRuntime) -> None:
+        runtime.last_message_at = utc_now()
+        if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
+            self.last_message_at = runtime.last_message_at
+
+    async def _stop_identity_runtime(self, runtime: IdentityRuntime) -> None:
+        if runtime.poll_task is not None:
+            runtime.poll_task.cancel()
+            await asyncio.gather(runtime.poll_task, return_exceptions=True)
+            runtime.poll_task = None
+        if runtime.token_lock is not None:
+            runtime.token_lock.release()
+            runtime.token_lock = None
+        self._set_runtime_state(runtime, "stopped")
+
+    async def _resume_identity_runtime(self, runtime: IdentityRuntime) -> None:
+        if not self.poller_enabled:
+            self._set_runtime_state(runtime, "stopped")
+            return
+        if runtime.poll_task is not None and not runtime.poll_task.done():
+            return
+        runtime.token_lock = self.identity_store.acquire_token_lock(runtime.identity["token"])
+        try:
+            runtime.token_lock.acquire()
+        except StoreError as exc:
+            self._set_runtime_state(runtime, "token_conflict", error_code=exc.code)
+            return
+        record = self.store.identity_record(runtime.identity_id)
+        pairing = record["state"] == "pending_pairing"
+        self._set_runtime_state(
+            runtime,
+            "pairing" if pairing else "polling",
+            identity_state="pending_pairing" if pairing else "active",
+        )
+        runtime.poll_task = asyncio.create_task(
+            self._poll_loop(runtime),
+            name=f"weixin-poller-{runtime.identity_id[-8:]}",
+        )
+        self._tasks.append(runtime.poll_task)
+
+    async def _remove_identity_runtime(self, runtime: IdentityRuntime) -> None:
+        await self._stop_identity_runtime(runtime)
+        await runtime.client.close()
+        self._runtimes.pop(runtime.identity_id, None)
+
+    async def _discard_identity_runtime(self, runtime: IdentityRuntime) -> None:
+        """Stop a non-owner runtime and remove credentials that must not survive a terminal revoke."""
+        if runtime.poll_task is not None and runtime.poll_task is not asyncio.current_task():
+            runtime.poll_task.cancel()
+            await asyncio.gather(runtime.poll_task, return_exceptions=True)
+        runtime.poll_task = None
+        if runtime.token_lock is not None:
+            runtime.token_lock.release()
+            runtime.token_lock = None
+        await runtime.client.close()
+        self._runtimes.pop(runtime.identity_id, None)
+        self.identity_store.remove_identity(runtime.identity)
+
+    async def _poll_loop(self, runtime: IdentityRuntime | None = None) -> None:
+        current = runtime or self._runtime_for_identity(None)
+        cursor = self.identity_store.cursor(current.identity)
         timeout_ms = 35000
         failures = 0
         while not self._stop.is_set():
             try:
-                response = await self.client.get_updates(cursor, timeout_ms=timeout_ms)
+                response = await current.client.get_updates(cursor, timeout_ms=timeout_ms)
                 suggested = response.get("longpolling_timeout_ms")
                 if isinstance(suggested, int) and suggested > 0:
                     timeout_ms = min(suggested, 120000)
@@ -331,87 +554,170 @@ class GatewayService:
                         (ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE)
                         and str(response.get("errmsg") or "").lower() == "unknown error"
                     ):
-                        self.poller_state = "session_expired"
-                        self.last_error = "session_expired"
+                        self._set_runtime_state(
+                            current,
+                            "session_expired",
+                            error_code="session_expired",
+                            identity_state="session_expired",
+                        )
                         return
                     failures += 1
-                    self.last_error = "poll_failed"
+                    current.last_error = "poll_failed"
+                    if self.identity is not None and current.identity_id == self.identity["identity_id"]:
+                        self.last_error = "poll_failed"
                     await asyncio.sleep(30 if failures >= 3 else 2)
                     if failures >= 3:
                         failures = 0
                     continue
                 failures = 0
-                self.last_poll_at = utc_now()
+                current.last_poll_at = utc_now()
+                if self.identity is not None and current.identity_id == self.identity["identity_id"]:
+                    self.last_poll_at = current.last_poll_at
+                self.store.set_identity_runtime_state(current.identity_id, current.poller_state)
                 for raw_message in response.get("msgs") or []:
                     if isinstance(raw_message, dict):
-                        await self._ingest(raw_message)
+                        await self._ingest(raw_message, current)
+                        if self.store.identity_record(current.identity_id)["state"] == "revoked":
+                            return
                 new_cursor = str(response.get("get_updates_buf") or "")
                 if new_cursor and new_cursor != cursor:
-                    self.identity_store.set_cursor(self.identity, new_cursor)
+                    self.identity_store.set_cursor(current.identity, new_cursor)
                     cursor = new_cursor
             except asyncio.CancelledError:
                 return
             except ProtocolError as exc:
                 failures += 1
-                self.last_error = exc.code
+                current.last_error = exc.code
+                if self.identity is not None and current.identity_id == self.identity["identity_id"]:
+                    self.last_error = exc.code
                 await asyncio.sleep(30 if failures >= 3 else 2)
             except Exception:
                 failures += 1
-                self.last_error = "poll_failed"
+                current.last_error = "poll_failed"
+                if self.identity is not None and current.identity_id == self.identity["identity_id"]:
+                    self.last_error = "poll_failed"
                 await asyncio.sleep(30 if failures >= 3 else 2)
 
-    async def _ingest(self, raw_message: dict[str, Any]) -> None:
-        assert self.identity is not None and self.client is not None
-        message = extract_message(raw_message, self.identity["account_id"])
+    async def _ingest(self, raw_message: dict[str, Any], runtime: IdentityRuntime | None = None) -> None:
+        current = runtime or self._runtime_for_identity(None)
+        message = extract_message(raw_message, current.identity["account_id"])
         if message is None or message["is_group"]:
             return
         sender_id = message["sender_id"]
-        allowed_user_ids = set(self.identity.get("allowed_user_ids", []))
+        owner_runtime = self.identity is not None and current.identity_id == self.identity["identity_id"]
+        allowed_user_ids = set(current.identity.get("allowed_user_ids", []))
+        if not owner_runtime and current.poller_state == "pairing":
+            claimed = self.store.claim_onboarding(
+                identity_identifier=current.identity_id,
+                private_user_id=sender_id,
+                text=str(message.get("text") or ""),
+            )
+            if claimed is not None:
+                updated = dict(current.identity)
+                updated["allowed_user_ids"] = [sender_id]
+                if message["context_token"]:
+                    contexts = dict(updated.get("context_tokens", {}))
+                    contexts[sender_id] = message["context_token"]
+                    updated["context_tokens"] = contexts
+                self.identity_store.save_identity(updated, make_active=False)
+                current.identity.clear()
+                current.identity.update(updated)
+                self._set_runtime_state(current, "polling", identity_state="active")
+                if (
+                    current.pairing_session_id
+                    and self.member_qr_state is not None
+                    and self.member_qr_state.get("session_id") == current.pairing_session_id
+                ):
+                    self.member_qr_state["state"] = "active"
+                    self.member_qr_state["has_image"] = False
+                self._touch_runtime_message(current)
+                await self._send_member_pairing_confirmation(
+                    sender_id,
+                    str(message.get("context_token") or "") or None,
+                    message["message_id"],
+                    claimed,
+                    runtime=current,
+                )
+            elif current.pairing_session_id:
+                session = self.store.onboarding_session_by_id(current.pairing_session_id)
+                if session is not None and session["state"] == "failed":
+                    self._set_runtime_state(
+                        current,
+                        "error",
+                        error_code="pairing_attempts_exceeded",
+                        identity_state="revoked",
+                    )
+                    await self._discard_identity_runtime(current)
+            return
         if not allowed_user_ids:
-            if self.owner_pairing_enabled and self.identity_store.claim_owner(
-                self.identity,
+            if owner_runtime and self.owner_pairing_enabled and self.identity_store.claim_owner(
+                current.identity,
                 user_id=sender_id,
                 text=str(message.get("text") or ""),
                 context_token=str(message.get("context_token") or "") or None,
             ):
                 self.identity = self.identity_store.load_identity()
                 self.store.register_paired_owner(sender_id)
-                self.poller_state = "polling"
-                self.last_message_at = utc_now()
-                await self._send_owner_pairing_confirmation(sender_id, str(message.get("context_token") or "") or None, message["message_id"])
+                assert self.identity is not None
+                current.identity = self.identity
+                self.store.migrate_legacy_identity(
+                    identity_identifier=current.identity_id,
+                    account_digest=account_hash(current.identity["account_id"]),
+                )
+                self._set_runtime_state(current, "polling", identity_state="active")
+                self._touch_runtime_message(current)
+                await self._send_owner_pairing_confirmation(
+                    sender_id,
+                    str(message.get("context_token") or "") or None,
+                    message["message_id"],
+                    runtime=current,
+                )
             return
-        user = self.store.user_by_private_id(sender_id)
+        user = self.store.user_by_identity_sender(current.identity_id, sender_id)
         if user is None:
+            if not owner_runtime:
+                return
             claimed = self.store.claim_member_invitation(
                 user_id=sender_id,
                 text=str(message.get("text") or ""),
             )
             if claimed is not None:
                 if message["context_token"]:
-                    self.identity_store.set_context(self.identity, sender_id, message["context_token"])
-                self.last_message_at = utc_now()
+                    self.identity_store.set_context(current.identity, sender_id, message["context_token"])
+                self._touch_runtime_message(current)
                 await self._send_member_pairing_confirmation(
                     sender_id,
                     str(message.get("context_token") or "") or None,
                     message["message_id"],
                     claimed,
+                    runtime=current,
                 )
             return
         if user["status"] != "active":
             return
-        if self.store.message_exists(message["message_id"]):
+        upstream_message_id = message["message_id"]
+        storage_message_id = (
+            upstream_message_id
+            if owner_runtime
+            else routed_message_id(current.identity_id, upstream_message_id)
+        )
+        if self.store.message_exists(storage_message_id):
             return
+        message["upstream_message_id"] = upstream_message_id
+        message["message_id"] = storage_message_id
+        message["identity_id"] = current.identity_id
+        message["principal_id"] = user["principal_id"]
         if message["context_token"]:
-            self.identity_store.set_context(self.identity, sender_id, message["context_token"])
+            self.identity_store.set_context(current.identity, sender_id, message["context_token"])
         try:
             work_command = parse_work_command(str(message.get("text") or ""))
         except WorkCommandError as exc:
-            user = self.store.touch_user(sender_id) or user
+            user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
             await self._send_remote_work_text(message, user, str(exc), error_code=exc.code)
-            self.last_message_at = utc_now()
+            self._touch_runtime_message(current)
             return
         if work_command is not None:
-            user = self.store.touch_user(sender_id) or user
+            user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
             if message["media"]:
                 await self._send_remote_work_text(
                     message,
@@ -428,19 +734,24 @@ class GatewayService:
                 )
             else:
                 await self._handle_remote_work_command(message, user, work_command)
-            self.last_message_at = utc_now()
+            self._touch_runtime_message(current)
             return
         media: list[tuple[dict[str, Any], bytes]] = []
         for spec in message["media"]:
             try:
-                media.append((spec, await self.client.download_media(spec)))
+                media.append((spec, await current.client.download_media(spec)))
             except ProtocolError as exc:
-                self.last_error = exc.code
+                current.last_error = exc.code
+                if owner_runtime:
+                    self.last_error = exc.code
         if not message["text"] and not media:
             return
-        user = self.store.touch_user(sender_id) or user
+        user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
         self.store.store_message(
             message_id=message["message_id"],
+            upstream_message_id=upstream_message_id,
+            identity_identifier=current.identity_id,
+            principal_id_value=user["principal_id"],
             sender_id=sender_id,
             conversation_key=user["conversation_key"],
             text=message["text"],
@@ -448,7 +759,7 @@ class GatewayService:
             user_digest=user["user_hash"],
             capability_profile="owner" if user["role"] == "owner" else "member_read_only",
         )
-        self.last_message_at = utc_now()
+        self._touch_runtime_message(current)
 
     async def _handle_remote_work_command(
         self,
@@ -520,6 +831,8 @@ class GatewayService:
                 payload=document,
                 sender_id=message["sender_id"],
                 user_digest=user["user_hash"],
+                identity_identifier=message.get("identity_id"),
+                principal_id_value=user.get("principal_id"),
             )
             self.remote_work_runtime.publish_pending()
         except StoreError as exc:
@@ -547,6 +860,8 @@ class GatewayService:
             "message_id": message["message_id"],
             "sender_id": message["sender_id"],
             "user_hash": user["user_hash"],
+            "identity_id": message.get("identity_id"),
+            "principal_id": user.get("principal_id"),
             "capability_profile": "owner" if user["role"] == "owner" else "member_read_only",
             "required_role": "owner" if user["role"] == "owner" else None,
             "controller_job_id": f"gateway-{error_code}-{message['message_id']}",
@@ -563,21 +878,31 @@ class GatewayService:
             parts.append(str(result["summary"]))
         return "\n".join(parts)
 
-    async def _send_owner_pairing_confirmation(self, sender_id: str, context_token: str | None, message_id: str) -> None:
-        if self.client is None:
-            return
+    async def _send_owner_pairing_confirmation(
+        self,
+        sender_id: str,
+        context_token: str | None,
+        message_id: str,
+        *,
+        runtime: IdentityRuntime | None = None,
+    ) -> None:
+        current = runtime or self._runtime_for_identity(None)
         client_id = "codex-weixin-pairing-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
         try:
-            async with self._outbound_lock:
-                response = await self.client.send_text(
+            async with current.outbound_lock:
+                response = await current.client.send_text(
                     sender_id,
                     "微信 owner 绑定成功。现在可以直接和通用 Codex 助手交流。",
                     context_token,
                     client_id,
-                )
+            )
             if response.get("ret", 0) == SESSION_EXPIRED_ERRCODE or response.get("errcode", 0) == SESSION_EXPIRED_ERRCODE:
-                self.poller_state = "session_expired"
-                self.last_error = "session_expired"
+                self._set_runtime_state(
+                    current,
+                    "session_expired",
+                    error_code="session_expired",
+                    identity_state="session_expired",
+                )
                 return
             if response.get("ret", 0) not in {0, None} or response.get("errcode", 0) not in {0, None}:
                 self.last_error = "owner_pairing_confirmation_failed"
@@ -590,21 +915,26 @@ class GatewayService:
         context_token: str | None,
         message_id: str,
         user: dict[str, Any],
+        *,
+        runtime: IdentityRuntime | None = None,
     ) -> None:
-        if self.client is None:
-            return
+        current = runtime or self._runtime_for_identity(None)
         client_id = "codex-weixin-member-pairing-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
         try:
-            async with self._outbound_lock:
-                response = await self.client.send_text(
+            async with current.outbound_lock:
+                response = await current.client.send_text(
                     sender_id,
                     "微信成员绑定成功。当前账号只允许普通讨论和已批准的装修只读查询。",
                     context_token,
                     client_id,
-                )
+            )
             if response.get("ret", 0) == SESSION_EXPIRED_ERRCODE or response.get("errcode", 0) == SESSION_EXPIRED_ERRCODE:
-                self.poller_state = "session_expired"
-                self.last_error = "session_expired"
+                self._set_runtime_state(
+                    current,
+                    "session_expired",
+                    error_code="session_expired",
+                    identity_state="session_expired",
+                )
             elif response.get("ret", 0) not in {0, None} or response.get("errcode", 0) not in {0, None}:
                 self.last_error = "member_pairing_confirmation_failed"
         except Exception:
@@ -674,8 +1004,6 @@ class GatewayService:
                             self.last_error = exc.code
                             break
                         if job["state"] == "completed":
-                            if self.poller_state == "session_expired":
-                                break
                             self.store.update_conversation_link(
                                 message.get("user_hash"),
                                 thread_short=job.get("thread_short"),
@@ -683,7 +1011,12 @@ class GatewayService:
                             )
                             outbound = dict(message)
                             outbound["thread_short"] = job.get("thread_short")
-                            suppression = await self._send_completed_job(outbound, job)
+                            try:
+                                suppression = await self._send_completed_job(outbound, job)
+                            except StoreError as exc:
+                                if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
+                                    continue
+                                raise
                             if suppression:
                                 self.store.mark_finished(
                                     message["message_id"],
@@ -693,12 +1026,15 @@ class GatewayService:
                                 continue
                             self.store.mark_finished(message["message_id"], success=True)
                         elif job["state"] in {"failed", "cancelled", "recovery_required"}:
-                            if self.poller_state == "session_expired":
-                                break
                             text = "任务状态需要人工核对，请在 Codex Controller 页面查看。" if job["state"] == "recovery_required" else "任务未完成，请在 Codex Controller 页面查看错误状态。"
                             outbound = dict(message)
                             outbound["thread_short"] = job.get("thread_short")
-                            suppression = await self._send_result(outbound, text)
+                            try:
+                                suppression = await self._send_result(outbound, text)
+                            except StoreError as exc:
+                                if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
+                                    continue
+                                raise
                             if suppression:
                                 self.store.mark_finished(
                                     message["message_id"],
@@ -725,11 +1061,18 @@ class GatewayService:
                 "message_id": f"remote-result-{event['event_id']}",
                 "sender_id": event["sender_id"],
                 "user_hash": event["user_hash"],
+                "identity_id": event.get("identity_id"),
+                "principal_id": event.get("principal_id"),
                 "capability_profile": "owner",
                 "required_role": "owner",
                 "controller_job_id": f"remote-result-{event['event_id']}",
             }
-            suppression = await self._send_result(outbound, text)
+            try:
+                suppression = await self._send_result(outbound, text)
+            except StoreError as exc:
+                if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
+                    continue
+                raise
             self.store.mark_remote_work_reply(
                 event["event_id"],
                 sent=suppression is None,
@@ -818,16 +1161,15 @@ class GatewayService:
         summary: str,
         prepared: list[dict[str, Any]],
     ) -> str | None:
-        if self.poller_state == "session_expired":
+        current = self._runtime_for_identity(message.get("identity_id"))
+        if current.poller_state == "session_expired":
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-        if self.identity is None or self.client is None:
-            raise StoreError("credential_missing", "无法回传微信消息", status=503)
-        async with self._outbound_lock:
+        async with current.outbound_lock:
             async with self._authorization_lock:
                 suppression = self._authorization_suppression(message)
                 if suppression:
                     return suppression
-                await self._send_text_locked(message, summary)
+                await self._send_text_locked(message, summary, current)
                 for item in prepared:
                     artifact = item["artifact"]
                     state = item["state"]
@@ -844,9 +1186,9 @@ class GatewayService:
                             )
                             state = self.store.prepare_artifact(message["controller_job_id"], artifact)
                         else:
-                            context = self.identity_store.context(self.identity, message["sender_id"])
+                            context = self.identity_store.context(current.identity, message["sender_id"])
                             try:
-                                await self.client.send_media(
+                                await current.client.send_media(
                                     message["sender_id"],
                                     path,
                                     context,
@@ -854,8 +1196,12 @@ class GatewayService:
                                 )
                             except ProtocolError as exc:
                                 if exc.code == "session_expired":
-                                    self.poller_state = "session_expired"
-                                    self.last_error = "session_expired"
+                                    self._set_runtime_state(
+                                        current,
+                                        "session_expired",
+                                        error_code="session_expired",
+                                        identity_state="session_expired",
+                                    )
                                     raise StoreError(
                                         "session_expired",
                                         "iLink 会话已过期，停止微信出站",
@@ -882,6 +1228,7 @@ class GatewayService:
                         message,
                         artifact,
                         state,
+                        current,
                     )
                     if fallback_error:
                         return fallback_error
@@ -892,6 +1239,7 @@ class GatewayService:
         message: dict[str, Any],
         artifact: dict[str, Any],
         state: dict[str, Any],
+        runtime: IdentityRuntime,
     ) -> str | None:
         if state["fallback_state"] == "sent":
             return None
@@ -910,8 +1258,8 @@ class GatewayService:
             if state.get("error_code") == "delivery_state_unknown"
             else "图片发送失败，可在 24 小时内下载："
         )
-        context = self.identity_store.context(self.identity, message["sender_id"])
-        response = await self.client.send_text(
+        context = self.identity_store.context(runtime.identity, message["sender_id"])
+        response = await runtime.client.send_text(
             message["sender_id"],
             f"{prefix}{fallback_url}",
             context,
@@ -920,8 +1268,12 @@ class GatewayService:
         ret = response.get("ret", 0)
         errcode = response.get("errcode", 0)
         if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
-            self.poller_state = "session_expired"
-            self.last_error = "session_expired"
+            self._set_runtime_state(
+                runtime,
+                "session_expired",
+                error_code="session_expired",
+                identity_state="session_expired",
+            )
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         if ret not in {0, None} or errcode not in {0, None}:
             code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
@@ -948,16 +1300,15 @@ class GatewayService:
         return f"{self.controller_ingress_base_url}{path}"
 
     async def _send_result(self, message: dict[str, Any], text: str) -> str | None:
-        if self.poller_state == "session_expired":
+        current = self._runtime_for_identity(message.get("identity_id"))
+        if current.poller_state == "session_expired":
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-        if self.identity is None or self.client is None:
-            raise StoreError("credential_missing", "无法回传微信消息", status=503)
-        async with self._outbound_lock:
+        async with current.outbound_lock:
             async with self._authorization_lock:
                 suppression = self._authorization_suppression(message)
                 if suppression:
                     return suppression
-                await self._send_text_locked(message, text)
+                await self._send_text_locked(message, text, current)
         return None
 
     def _authorization_suppression(self, message: dict[str, Any]) -> str | None:
@@ -973,24 +1324,41 @@ class GatewayService:
             )
         if message.get("required_role") == "owner" and authorization.get("capability_profile") != "owner":
             return "reply_suppressed_owner_changed"
+        if message.get("identity_id") or message.get("principal_id"):
+            route = self.store.identity_route_for_principal(str(message.get("principal_id") or ""))
+            if (
+                route is None
+                or route["identity_id"] != message.get("identity_id")
+                or route["state"] != "active"
+            ):
+                return "reply_suppressed_identity_unavailable"
         return None
 
-    async def _send_text_locked(self, message: dict[str, Any], text: str) -> None:
+    async def _send_text_locked(
+        self,
+        message: dict[str, Any],
+        text: str,
+        runtime: IdentityRuntime,
+    ) -> None:
         text = with_thread_short(text, message.get("thread_short"))
         chunks = split_text(text, 4000)
         for index, chunk in enumerate(chunks):
-            if self.poller_state == "session_expired":
+            if runtime.poller_state == "session_expired":
                 raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
             client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
             if already_sent:
                 continue
-            context = self.identity_store.context(self.identity, message["sender_id"])
-            response = await self.client.send_text(message["sender_id"], chunk, context, client_id)
+            context = self.identity_store.context(runtime.identity, message["sender_id"])
+            response = await runtime.client.send_text(message["sender_id"], chunk, context, client_id)
             ret = response.get("ret", 0)
             errcode = response.get("errcode", 0)
             if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
-                self.poller_state = "session_expired"
-                self.last_error = "session_expired"
+                self._set_runtime_state(
+                    runtime,
+                    "session_expired",
+                    error_code="session_expired",
+                    identity_state="session_expired",
+                )
                 raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
             if ret not in {0, None} or errcode not in {0, None}:
                 code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
@@ -1002,22 +1370,25 @@ class GatewayService:
 
     async def send_notification(self, message_id: str, text: str) -> None:
         """Send one deterministic notification to the single bound owner."""
-        if self.poller_state == "session_expired":
+        runtime, owner_id, context = self._notification_owner_delivery()
+        if runtime.poller_state == "session_expired":
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-        if self.identity is None or self.client is None:
-            raise StoreError("credential_missing", "无法发送微信通知", status=503)
         client_id = "codex-weixin-notification-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
-        async with self._outbound_lock:
+        async with runtime.outbound_lock:
             async with self._authorization_lock:
-                if self.poller_state == "session_expired":
+                if runtime.poller_state == "session_expired":
                     raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-                owner_id, context = self.notification_owner_context()
-                response = await self.client.send_text(owner_id, text, context, client_id)
+                runtime, owner_id, context = self._notification_owner_delivery()
+                response = await runtime.client.send_text(owner_id, text, context, client_id)
         ret = response.get("ret", 0)
         errcode = response.get("errcode", 0)
         if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
-            self.poller_state = "session_expired"
-            self.last_error = "session_expired"
+            self._set_runtime_state(
+                runtime,
+                "session_expired",
+                error_code="session_expired",
+                identity_state="session_expired",
+            )
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         if ret not in {0, None} or errcode not in {0, None}:
             code = "send_rate_limited" if ret == RATE_LIMIT_ERRCODE or errcode == RATE_LIMIT_ERRCODE else "send_failed"
@@ -1025,17 +1396,19 @@ class GatewayService:
 
     def notification_owner_context(self) -> tuple[str, str]:
         """Return the only authorized notification target or fail closed."""
-        if self.identity is None:
-            raise StoreError("credential_missing", "无法发送微信通知", status=503)
-        owner = self.store.active_owner()
-        owner_id = owner["private_user_id"]
-        owners = self.identity.get("allowed_user_ids", [])
-        if owners != [owner_id]:
+        _runtime, owner_id, context = self._notification_owner_delivery()
+        return owner_id, context
+
+    def _notification_owner_delivery(self) -> tuple[IdentityRuntime, str, str]:
+        route = self.store.owner_identity_route()
+        runtime = self._runtime_for_identity(route["identity_id"])
+        owner_id = str(route["private_user_id"])
+        if runtime.identity.get("allowed_user_ids") != [owner_id]:
             raise StoreError("notification_owner_mirror_invalid", "微信 owner 镜像不一致", status=409)
-        context = self.identity_store.context(self.identity, owner_id)
+        context = self.identity_store.context(runtime.identity, owner_id)
         if not context:
             raise StoreError("notification_context_missing", "微信 owner 缺少当前会话上下文", status=409)
-        return owner_id, context
+        return runtime, owner_id, context
 
     async def _cleanup_loop(self) -> None:
         while not self._stop.is_set():
@@ -1043,92 +1416,464 @@ class GatewayService:
                 self.store.cleanup_spool()
                 self.store.cleanup_outbound_artifacts()
                 self.store.expire_remote_work_tasks()
+                for identity_identifier in self.store.expire_onboarding_sessions():
+                    runtime = self._runtimes.get(identity_identifier)
+                    if runtime is not None:
+                        await self._discard_identity_runtime(runtime)
                 await asyncio.sleep(300)
             except asyncio.CancelledError:
                 return
             except Exception:
                 await asyncio.sleep(60)
 
-    async def start_qr_login(self) -> dict[str, Any]:
-        if self.poller_state not in {"disabled", "stopped"}:
-            raise StoreError("poller_active", "真实 Poller 运行时不能替换 iLink 身份", status=409)
-        if self.qr_state and self.qr_state.get("state") in {"waiting", "scanned"}:
-            return self.public_qr_state()
-        client = IlinkClient(base_url="https://ilinkai.weixin.qq.com", cdn_base_url="https://novac2c.cdn.weixin.qq.com/c2c", token="", max_media_bytes=self.max_media_bytes)
-        await client.start()
-        response = await client.api_get(f"{EP_GET_BOT_QR}?bot_type=3")
-        qrcode_value = str(response.get("qrcode") or "")
-        qrcode_content = str(response.get("qrcode_img_content") or qrcode_value)
-        if not qrcode_value:
-            await client.close()
-            raise ProtocolError("qr_invalid", "iLink 未返回二维码")
-        self.qr_image_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    def _new_qr_client(self) -> IlinkClient:
+        return IlinkClient(
+            base_url="https://ilinkai.weixin.qq.com",
+            cdn_base_url="https://novac2c.cdn.weixin.qq.com/c2c",
+            token="",
+            max_media_bytes=self.max_media_bytes,
+        )
+
+    @staticmethod
+    def _validate_verify_code(value: str) -> str:
+        code = value.strip()
+        if not re.fullmatch(r"[0-9]{1,12}", code):
+            raise StoreError("verify_code_invalid", "请输入微信显示的数字验证码")
+        return code
+
+    def _render_qr_image(self, target: Path, content: str) -> None:
+        target.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         try:
             import qrcode
 
-            image = qrcode.make(qrcode_content)
-            image.save(self.qr_image_path)
-            self.qr_image_path.chmod(0o600)
+            image = qrcode.make(content)
+            image.save(target)
+            target.chmod(0o600)
         except Exception as exc:
-            await client.close()
             raise ProtocolError("qr_render_failed", "二维码生成失败") from exc
-        self.qr_state = {"state": "waiting", "qrcode": qrcode_value, "has_image": True, "base_url": "https://ilinkai.weixin.qq.com"}
-        self._tasks.append(asyncio.create_task(self._poll_qr(client), name="weixin-qr-login"))
+
+    async def _refresh_qr(self, client: IlinkClient, state: dict[str, Any], image_path: Path) -> None:
+        response = await client.create_bot_qr(self.identity_store.recent_tokens())
+        qrcode_value = str(response.get("qrcode") or "")
+        qrcode_content = str(response.get("qrcode_img_content") or qrcode_value)
+        if not qrcode_value or not qrcode_content:
+            raise ProtocolError("qr_invalid", "iLink 未返回二维码")
+        self._render_qr_image(image_path, qrcode_content)
+        state.update(
+            {
+                "state": "waiting",
+                "qrcode": qrcode_value,
+                "has_image": True,
+                "base_url": "https://ilinkai.weixin.qq.com",
+                "verify_code": None,
+            }
+        )
+
+    async def start_qr_login(self) -> dict[str, Any]:
+        if self.poller_state not in {"disabled", "stopped"}:
+            raise StoreError("poller_active", "真实 Poller 运行时不能重新认证 Owner ClawBot", status=409)
+        if self.qr_state and self.qr_state.get("state") in {
+            "waiting",
+            "scanned",
+            "need_verifycode",
+            "redirecting",
+        }:
+            return self.public_qr_state()
+        client = self._new_qr_client()
+        await client.start()
+        state: dict[str, Any] = {"refresh_count": 0}
+        try:
+            await self._refresh_qr(client, state, self.qr_image_path)
+        except Exception:
+            await client.close()
+            raise
+        self.qr_state = state
+        self._qr_task = asyncio.create_task(self._poll_qr(client), name="weixin-owner-qr-login")
+        self._tasks.append(self._qr_task)
         return self.public_qr_state()
+
+    def submit_qr_verify_code(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.qr_state is None or self.qr_state.get("state") != "need_verifycode":
+            raise StoreError("verify_code_not_requested", "当前二维码不需要验证码", status=409)
+        self.qr_state["verify_code"] = self._validate_verify_code(str(payload.get("verify_code") or ""))
+        self.qr_state["state"] = "verifying"
+        return self.public_qr_state()
+
+    async def _refresh_qr_after_terminal_status(
+        self,
+        client: IlinkClient,
+        state: dict[str, Any],
+        image_path: Path,
+    ) -> bool:
+        state["refresh_count"] = int(state.get("refresh_count") or 0) + 1
+        if state["refresh_count"] > 3:
+            return False
+        await self._refresh_qr(client, state, image_path)
+        return True
 
     async def _poll_qr(self, client: IlinkClient) -> None:
         try:
             for _ in range(480):
-                if self.qr_state is None:
+                state = self.qr_state
+                if state is None:
                     return
-                response = await client.api_get(
-                    f"{EP_GET_QR_STATUS}?qrcode={self.qr_state['qrcode']}", base_url=self.qr_state["base_url"]
+                if state.get("state") == "need_verifycode" and not state.get("verify_code"):
+                    await asyncio.sleep(1)
+                    continue
+                response = await client.get_bot_qr_status(
+                    str(state["qrcode"]),
+                    base_url=str(state["base_url"]),
+                    verify_code=state.get("verify_code"),
                 )
-                state = str(response.get("status") or "wait")
-                if state == "scaned":
-                    self.qr_state["state"] = "scanned"
-                elif state == "scaned_but_redirect" and response.get("redirect_host"):
-                    self.qr_state["base_url"] = f"https://{response['redirect_host']}"
-                elif state == "expired":
-                    self.qr_state["state"] = "expired"
+                status = str(response.get("status") or "wait")
+                if status == "wait":
+                    pass
+                elif status == "scaned":
+                    state["verify_code"] = None
+                    state["state"] = "scanned"
+                elif status == "need_verifycode":
+                    state["verify_code"] = None
+                    state["state"] = "need_verifycode"
+                elif status == "scaned_but_redirect":
+                    redirect_host = str(response.get("redirect_host") or "").strip()
+                    if redirect_host:
+                        state["base_url"] = f"https://{redirect_host}"
+                    state["state"] = "redirecting"
+                elif status in {"expired", "verify_code_blocked"}:
+                    if not await self._refresh_qr_after_terminal_status(client, state, self.qr_image_path):
+                        state["state"] = status
+                        return
+                elif status == "binded_redirect":
+                    state["state"] = "already_connected"
                     return
-                elif state == "confirmed":
-                    async with self._authorization_lock:
-                        self.identity_store.clear_owner_pairing()
-                        previous_account = None if self.identity is None else self.identity.get("account_id")
-                        identity = {
-                            "account_id": str(response.get("ilink_bot_id") or ""),
-                            "token": str(response.get("bot_token") or ""),
-                            "base_url": str(response.get("baseurl") or "https://ilinkai.weixin.qq.com"),
-                            "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
-                            "user_id": str(response.get("ilink_user_id") or ""),
-                            "allowed_user_ids": [],
-                            "get_updates_buf": "",
-                            "context_tokens": {},
-                        }
-                        if self.identity is not None and self.identity.get("account_id") != identity["account_id"]:
-                            self.store.reset_access_directory_for_identity_replacement()
-                        self.identity_store.save_identity(identity)
-                        self.identity = self.identity_store.load_identity()
-                        if previous_account is not None and previous_account == identity["account_id"]:
-                            migration = self.store.migrate_identity_allowlist([])
-                            owner_private_id = migration.get("owner_private_id")
-                            if isinstance(owner_private_id, str) and self.identity is not None:
-                                self.identity_store.mirror_owner(self.identity, owner_private_id)
-                        self._refresh_client()
-                        self.qr_state["state"] = "credential_ready"
+                elif status == "confirmed":
+                    await self._accept_owner_qr(response)
+                    state["state"] = "credential_ready"
                     return
                 await asyncio.sleep(1)
-        except (ProtocolError, StoreError, asyncio.CancelledError):
-            if self.qr_state is not None and self.qr_state.get("state") not in {"credential_ready", "expired"}:
+            if self.qr_state is not None:
+                self.qr_state["state"] = "expired"
+        except asyncio.CancelledError:
+            raise
+        except (ProtocolError, StoreError) as exc:
+            if self.qr_state is not None and self.qr_state.get("state") not in {
+                "credential_ready",
+                "expired",
+                "already_connected",
+            }:
                 self.qr_state["state"] = "failed"
+                self.qr_state["error_code"] = exc.code
         finally:
             await client.close()
+
+    async def _accept_owner_qr(self, response: dict[str, Any]) -> None:
+        account_id_value = str(response.get("ilink_bot_id") or "")
+        token = str(response.get("bot_token") or "")
+        scanner_id = str(response.get("ilink_user_id") or "")
+        if not account_id_value or not token or not scanner_id:
+            raise ProtocolError("qr_credentials_missing", "iLink 未返回完整身份凭据")
+        async with self._authorization_lock:
+            previous = self.identity
+            owner: dict[str, Any] | None = None
+            try:
+                owner = self.store.active_owner()
+            except StoreError as exc:
+                if exc.code != "notification_owner_unavailable":
+                    raise
+            if previous is not None and previous.get("account_id") != account_id_value:
+                raise StoreError(
+                    "owner_identity_mismatch",
+                    "Owner 二维码只允许重新认证同一个 ClawBot；新成员请使用成员接入流程。",
+                    status=409,
+                )
+            if owner is not None and not hmac.compare_digest(owner["private_user_id"], scanner_id):
+                raise StoreError("owner_reauth_user_mismatch", "扫码者不是当前 Owner", status=409)
+            identity = {
+                "account_id": account_id_value,
+                "token": token,
+                "base_url": str(response.get("baseurl") or "https://ilinkai.weixin.qq.com"),
+                "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+                "user_id": scanner_id,
+                "allowed_user_ids": [] if owner is None else [owner["private_user_id"]],
+                "get_updates_buf": "" if previous is None else previous.get("get_updates_buf", ""),
+                "context_tokens": {} if previous is None else dict(previous.get("context_tokens", {})),
+            }
+            self.identity_store.save_identity(identity)
+            self.identity = self.identity_store.load_identity()
+            assert self.identity is not None
+            self.identity_store.clear_owner_pairing()
+            self.store.migrate_legacy_identity(
+                identity_identifier=self.identity["identity_id"],
+                account_digest=account_hash(self.identity["account_id"]),
+            )
+            self._refresh_client()
+            self._ensure_owner_runtime()
 
     def public_qr_state(self) -> dict[str, Any]:
         if self.qr_state is None:
             return {"state": "idle", "has_image": False}
-        return {"state": self.qr_state["state"], "has_image": bool(self.qr_state.get("has_image"))}
+        return {
+            "state": self.qr_state["state"],
+            "has_image": bool(self.qr_state.get("has_image")),
+            "error_code": self.qr_state.get("error_code"),
+        }
+
+    async def start_member_onboarding(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.poller_enabled:
+            raise StoreError("poller_disabled", "成员接入要求 Gateway Poller 已启用", status=409)
+        created = self.store.create_onboarding_session(
+            expected_revision=payload.get("revision"),
+            request_id=payload.get("request_id"),
+            alias=str(payload.get("alias") or ""),
+            target_wx_short=(str(payload.get("target_wx_short") or "") or None),
+            ttl_seconds=payload.get("ttl_seconds", 15 * 60),
+            max_active_identities=self.max_active_identities,
+        )
+        if "session_id" not in created:
+            return {
+                **created,
+                "qr": self.public_member_qr_state(),
+            }
+        client = self._new_qr_client()
+        await client.start()
+        state: dict[str, Any] = {
+            "session_id": created["session_id"],
+            "session_short": created["session_short"],
+            "expires_at": created["expires_at"],
+            "refresh_count": 0,
+        }
+        try:
+            await self._refresh_qr(client, state, self.member_qr_image_path)
+            self.store.set_onboarding_qr_state(
+                session_id=created["session_id"],
+                qr_state="waiting",
+            )
+        except Exception as exc:
+            code = exc.code if isinstance(exc, (StoreError, ProtocolError)) else "qr_start_failed"
+            self.store.set_onboarding_qr_state(
+                session_id=created["session_id"],
+                qr_state="failed",
+                error_code=code,
+                terminal_state="failed",
+            )
+            await client.close()
+            raise
+        self.member_qr_state = state
+        self._member_qr_task = asyncio.create_task(
+            self._poll_member_qr(client),
+            name=f"weixin-member-qr-{created['session_short'][-6:]}",
+        )
+        self._tasks.append(self._member_qr_task)
+        return {
+            "state": created["state"],
+            "session_short": created["session_short"],
+            "expires_at": created["expires_at"],
+            "revision": created["revision"],
+            "code": created["code"],
+            "qr": self.public_member_qr_state(),
+        }
+
+    def submit_member_onboarding_verify_code(
+        self,
+        session_short: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = self.member_qr_state
+        if (
+            state is None
+            or state.get("session_short") != session_short
+            or state.get("state") != "need_verifycode"
+        ):
+            raise StoreError("verify_code_not_requested", "当前成员二维码不需要验证码", status=409)
+        state["verify_code"] = self._validate_verify_code(str(payload.get("verify_code") or ""))
+        state["state"] = "verifying"
+        return self.public_member_qr_state()
+
+    async def _poll_member_qr(self, client: IlinkClient) -> None:
+        try:
+            for _ in range(480):
+                state = self.member_qr_state
+                if state is None:
+                    return
+                session_id = str(state["session_id"])
+                if state.get("state") == "need_verifycode" and not state.get("verify_code"):
+                    await asyncio.sleep(1)
+                    continue
+                response = await client.get_bot_qr_status(
+                    str(state["qrcode"]),
+                    base_url=str(state["base_url"]),
+                    verify_code=state.get("verify_code"),
+                )
+                status = str(response.get("status") or "wait")
+                if status == "wait":
+                    pass
+                elif status == "scaned":
+                    state["verify_code"] = None
+                    state["state"] = "scanned"
+                    self.store.set_onboarding_qr_state(session_id=session_id, qr_state="scanned")
+                elif status == "need_verifycode":
+                    state["verify_code"] = None
+                    state["state"] = "need_verifycode"
+                    self.store.set_onboarding_qr_state(
+                        session_id=session_id,
+                        qr_state="need_verifycode",
+                        error_code="verify_code_required",
+                    )
+                elif status == "scaned_but_redirect":
+                    redirect_host = str(response.get("redirect_host") or "").strip()
+                    if redirect_host:
+                        state["base_url"] = f"https://{redirect_host}"
+                    state["state"] = "redirecting"
+                    self.store.set_onboarding_qr_state(session_id=session_id, qr_state="redirecting")
+                elif status in {"expired", "verify_code_blocked"}:
+                    self.store.set_onboarding_qr_state(
+                        session_id=session_id,
+                        qr_state=status,
+                        error_code=status,
+                    )
+                    if not await self._refresh_qr_after_terminal_status(
+                        client,
+                        state,
+                        self.member_qr_image_path,
+                    ):
+                        state["state"] = status
+                        self.store.set_onboarding_qr_state(
+                            session_id=session_id,
+                            qr_state=status,
+                            error_code=status,
+                            terminal_state="expired" if status == "expired" else "failed",
+                        )
+                        return
+                    self.store.set_onboarding_qr_state(session_id=session_id, qr_state="waiting")
+                elif status == "binded_redirect":
+                    state["state"] = "already_bound"
+                    self.store.set_onboarding_qr_state(
+                        session_id=session_id,
+                        qr_state="already_bound",
+                        error_code="identity_already_bound",
+                        terminal_state="already_bound",
+                    )
+                    return
+                elif status == "confirmed":
+                    await self._accept_member_qr(response, state)
+                    state["state"] = "pending_pairing"
+                    state["has_image"] = False
+                    return
+                await asyncio.sleep(1)
+            if self.member_qr_state is not None:
+                self.member_qr_state["state"] = "expired"
+                self.store.set_onboarding_qr_state(
+                    session_id=str(self.member_qr_state["session_id"]),
+                    qr_state="expired",
+                    error_code="qr_timeout",
+                    terminal_state="expired",
+                )
+        except asyncio.CancelledError:
+            raise
+        except (ProtocolError, StoreError) as exc:
+            state = self.member_qr_state
+            if state is not None and state.get("state") not in {
+                "pending_pairing",
+                "expired",
+                "cancelled",
+                "already_bound",
+            }:
+                state["state"] = "failed"
+                state["error_code"] = exc.code
+                self.store.set_onboarding_qr_state(
+                    session_id=str(state["session_id"]),
+                    qr_state="failed",
+                    error_code=exc.code,
+                    terminal_state="failed",
+                )
+        finally:
+            await client.close()
+
+    async def _accept_member_qr(self, response: dict[str, Any], state: dict[str, Any]) -> None:
+        account_id_value = str(response.get("ilink_bot_id") or "")
+        token = str(response.get("bot_token") or "")
+        scanner_id = str(response.get("ilink_user_id") or "")
+        if not account_id_value or not token or not scanner_id:
+            raise ProtocolError("qr_credentials_missing", "iLink 未返回完整成员身份凭据")
+        identity = {
+            "account_id": account_id_value,
+            "token": token,
+            "base_url": str(response.get("baseurl") or "https://ilinkai.weixin.qq.com"),
+            "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+            "user_id": scanner_id,
+            "allowed_user_ids": [],
+            "get_updates_buf": "",
+            "context_tokens": {},
+        }
+        normalized = self.identity_store.validate_identity(identity)
+        self.identity_store.save_identity(normalized, make_active=False)
+        self.store.attach_onboarding_identity(
+            session_id=str(state["session_id"]),
+            identity_identifier=normalized["identity_id"],
+            account_digest=account_hash(normalized["account_id"]),
+            scanned_private_user_id=scanner_id,
+        )
+        runtime = IdentityRuntime(
+            identity=normalized,
+            client=IlinkClient(
+                base_url=normalized["base_url"],
+                cdn_base_url=normalized["cdn_base_url"],
+                token=normalized["token"],
+                max_media_bytes=self.max_media_bytes,
+            ),
+            poller_state="stopped",
+            pairing_session_id=str(state["session_id"]),
+        )
+        self._runtimes[runtime.identity_id] = runtime
+        await self._resume_identity_runtime(runtime)
+
+    async def cancel_member_onboarding(
+        self,
+        session_short: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self.store.onboarding_session(session_short)
+        async with self._authorization_lock:
+            result = self.store.cancel_onboarding_session(
+                session_short=session_short,
+                expected_revision=payload.get("revision"),
+                request_id=payload.get("request_id"),
+            )
+            state = self.member_qr_state
+            if state is not None and state.get("session_short") == session_short:
+                state["state"] = "cancelled"
+                state["has_image"] = False
+                if self._member_qr_task is not None and self._member_qr_task is not asyncio.current_task():
+                    self._member_qr_task.cancel()
+                    await asyncio.gather(self._member_qr_task, return_exceptions=True)
+                    self._member_qr_task = None
+            identity_identifier = session.get("identity_id")
+            runtime = None if not identity_identifier else self._runtimes.get(identity_identifier)
+            if runtime is not None:
+                await self._discard_identity_runtime(runtime)
+            if self.member_qr_image_path.is_file() and not self.member_qr_image_path.is_symlink():
+                self.member_qr_image_path.unlink()
+            return result
+
+    def public_member_qr_state(self) -> dict[str, Any]:
+        state = self.member_qr_state
+        if state is None:
+            return {"state": "idle", "has_image": False}
+        active = state.get("state") in {
+            "waiting",
+            "scanned",
+            "need_verifycode",
+            "verifying",
+            "redirecting",
+            "pending_pairing",
+        }
+        return {
+            "state": state.get("state", "idle"),
+            "has_image": bool(state.get("has_image")),
+            "session_short": state.get("session_short") if active else None,
+            "expires_at": state.get("expires_at"),
+            "error_code": state.get("error_code"),
+        }
 
     def inspect_migration(self, reference: str) -> dict[str, Any]:
         return self.identity_store.inspect_migration(reference)
@@ -1136,19 +1881,33 @@ class GatewayService:
     def import_migration(self, reference: str, key: str) -> dict[str, Any]:
         if self.poller_state not in {"disabled", "stopped"}:
             raise StoreError("poller_active", "真实 Poller 运行时不能导入 iLink 身份", status=409)
-        self.identity_store.clear_owner_pairing()
         previous_account = None if self.identity is None else self.identity.get("account_id")
-        result = self.identity_store.import_migration(reference, key)
+        result = self.identity_store.import_migration(
+            reference,
+            key,
+            make_active=False,
+            expected_account_id=previous_account,
+        )
+        imported_account_hash = str(result.get("account_hash") or "")
+        imported = self.identity_store.load_identity_by_hash(imported_account_hash)
+        if imported is None:
+            raise StoreError("migration_invalid", "迁移身份未能安全保存", status=500)
+        self.identity_store.set_active_identity(imported)
         self.identity = self.identity_store.load_identity()
+        self.identity_store.clear_owner_pairing()
         if self.identity is not None:
-            if previous_account is not None and previous_account != self.identity.get("account_id"):
-                self.store.reset_access_directory_for_identity_replacement()
             migration = self.store.migrate_identity_allowlist(list(self.identity.get("allowed_user_ids", [])))
             owner_private_id = migration.get("owner_private_id")
             if isinstance(owner_private_id, str) and self.identity.get("allowed_user_ids") != [owner_private_id]:
                 self.identity_store.mirror_owner(self.identity, owner_private_id)
         self._refresh_client()
-        return result
+        return {
+            "state": result["state"],
+            "identity_short": self.store.short_id("CB", imported["identity_id"]),
+            "allowed_user_count": result["allowed_user_count"],
+            "has_cursor": result["has_cursor"],
+            "context_count": result["context_count"],
+        }
 
     def start_owner_pairing(self) -> dict[str, Any]:
         if not self.owner_pairing_enabled:
@@ -1161,14 +1920,22 @@ class GatewayService:
 
     def users(self) -> dict[str, Any]:
         document = self.store.list_users()
-        contexts = {} if self.identity is None else self.identity.get("context_tokens", {})
         private_by_short = {
-            self.store.short_id("WX", user["user_hash"]): user["private_user_id"]
+            self.store.short_id("WX", user["user_hash"]): user
             for user in self._private_users()
         }
         for user in document["users"]:
-            private_id = private_by_short.get(user["wx_short"])
-            user["has_context"] = bool(private_id and contexts.get(private_id))
+            private = private_by_short.get(user["wx_short"])
+            if private is None:
+                user["has_context"] = False
+                continue
+            route = self.store.identity_route_for_principal(private["principal_id"])
+            runtime = None if route is None else self._runtimes.get(route["identity_id"])
+            user["has_context"] = bool(
+                route
+                and runtime
+                and runtime.identity.get("context_tokens", {}).get(route["private_user_id"])
+            )
         return document
 
     def conversations(self) -> dict[str, Any]:
@@ -1198,17 +1965,35 @@ class GatewayService:
 
     async def change_user_state(self, wx_short: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._authorization_lock:
-            return self.store.change_user_state(
+            private = self.store.user_by_short(wx_short)
+            route = self.store.identity_route_for_principal(
+                private["principal_id"],
+                include_inactive=True,
+            )
+            result = self.store.change_user_state(
                 wx_short=wx_short,
                 action=action,
                 expected_revision=payload.get("revision"),
                 request_id=payload.get("request_id"),
             )
+            if route is not None and route["binding_type"] == "primary":
+                runtime = self._runtimes.get(route["identity_id"])
+                if runtime is not None:
+                    if action in {"suspend", "revoke"}:
+                        if action == "revoke":
+                            await self._discard_identity_runtime(runtime)
+                        else:
+                            await self._stop_identity_runtime(runtime)
+                    elif action == "resume":
+                        await self._resume_identity_runtime(runtime)
+            return result
 
     async def transfer_owner(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.identity is None:
             raise StoreError("credential_missing", "缺少完整 iLink 身份", status=409)
         async with self._authorization_lock:
+            previous_route = self.store.owner_identity_route()
+            previous_runtime = self._runtime_for_identity(previous_route["identity_id"])
             result = self.store.transfer_owner(
                 target_wx_short=str(payload.get("target_wx_short") or ""),
                 expected_revision=payload.get("revision"),
@@ -1217,16 +2002,49 @@ class GatewayService:
             )
             if result.pop("replayed", False):
                 return result
-            target_private_id = result.pop("owner_private_id")
-            previous_private_id = result.pop("previous_owner_private_id")
+            result.pop("owner_private_id", None)
+            result.pop("previous_owner_private_id", None)
+            target_principal_id = result.pop("owner_principal_id")
+            previous_principal_id = result.pop("previous_owner_principal_id")
             try:
-                self.identity_store.mirror_owner(self.identity, target_private_id)
+                target_route = self.store.identity_route_for_principal(target_principal_id)
+                if target_route is None or target_route["state"] != "active":
+                    raise StoreError(
+                        "owner_identity_unavailable",
+                        "目标 Owner 的 ClawBot 身份不可用",
+                        status=409,
+                    )
+                target_runtime = self._runtime_for_identity(target_route["identity_id"])
+                self.identity_store.mirror_owner(
+                    target_runtime.identity,
+                    target_route["private_user_id"],
+                )
+                self.identity = target_runtime.identity
+                self.client = target_runtime.client
+                self.token_lock = target_runtime.token_lock
+                self.poller_state = target_runtime.poller_state
+                self.last_error = target_runtime.last_error
+                self.last_poll_at = target_runtime.last_poll_at
+                self.last_message_at = target_runtime.last_message_at
+                self._outbound_lock = target_runtime.outbound_lock
             except Exception as exc:
                 self.store.restore_owner_after_mirror_failure(
-                    previous_private_id,
-                    target_private_id,
+                    previous_principal_id,
+                    target_principal_id,
                     str(payload.get("request_id") or ""),
                 )
+                try:
+                    self.identity_store.mirror_owner(
+                        previous_runtime.identity,
+                        previous_route["private_user_id"],
+                    )
+                    self.identity = previous_runtime.identity
+                    self.client = previous_runtime.client
+                    self.token_lock = previous_runtime.token_lock
+                    self.poller_state = previous_runtime.poller_state
+                    self._outbound_lock = previous_runtime.outbound_lock
+                except Exception:
+                    pass
                 raise StoreError("owner_identity_mirror_failed", "Owner 转移未能同步身份镜像", status=500) from exc
             return result
 
@@ -1235,14 +2053,21 @@ class GatewayService:
             return [self.store._private_user_document(row) for row in connection.execute("SELECT * FROM weixin_users")]
 
     def status(self) -> dict[str, Any]:
-        identity = None if self.identity is None else self.identity_store.public_summary(self.identity)
+        identity = None
+        if self.identity is not None:
+            identity = self.identity_store.public_summary(self.identity)
+            identity.pop("account_hash", None)
+            identity["identity_short"] = self.store.short_id("CB", self.identity["identity_id"])
         users = self.users()
         active_users = sum(1 for user in users["users"] if user["status"] == "active")
+        identities = self.store.list_identities()
+        identities["limits"]["max_active_identities"] = self.max_active_identities
         return {
-            "version": "0.2.3",
+            "version": "0.3.0",
             "poller_enabled": self.poller_enabled,
             "poller_state": self.poller_state,
             "identity": identity,
+            "identities": identities,
             "owner_pairing": self.identity_store.owner_pairing_summary(self.identity),
             "controller_configured": self.controller.configured,
             "controller_capability_state": getattr(self.controller, "capability_state", "unknown"),
@@ -1257,6 +2082,10 @@ class GatewayService:
             "last_message_at": self.last_message_at,
             "last_error": self.last_error,
             "qr": self.public_qr_state(),
+            "onboarding": {
+                **self.store.onboarding_summary(),
+                "qr": self.public_member_qr_state(),
+            },
             "queue": self.store.status(),
             "remote_work": {
                 "enabled": self.remote_work_enabled,

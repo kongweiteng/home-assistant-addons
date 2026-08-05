@@ -1,6 +1,6 @@
 # Weixin Gateway 微信网关
 
-Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输层。它承载当前有效的 ClawBot/iLink 身份，只负责长轮询、访问控制、游标、`context_token`、消息去重、媒体加解密、Codex Controller 异步作业，以及默认关闭的 owner-only Remote Work 消息适配；不包含模型、Shell、插件或 Home Assistant 权限。
+Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输层。它可以在同一 Add-on 进程中承载多个 ClawBot/iLink 身份，只负责每身份长轮询、访问控制、游标、`context_token`、消息去重、媒体加解密、Codex Controller 异步作业，以及默认关闭的 owner-only Remote Work 消息适配；不包含模型、Shell、插件或 Home Assistant 权限。
 
 ## 当前阶段
 
@@ -14,19 +14,21 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.2.1` 新增默认关闭的 `/work` Remote Work v1：只有精确 active owner 命令进入专用 MQTT，普通聊天仍进入 Controller，member、近似前缀、附件和 `/work deploy` 均失败关闭。
 - `0.2.2` 支持 Controller completed job 的安全图片 artifact：先预取并复核 MIME、大小和 SHA-256，再发送一条中文统计摘要和微信原生图片；成功时不发送链接，图片明确失败或状态未知时才发送 HA Ingress 短期下载链接。
 - `0.2.3` 将 Ingress 明确划分为全局机器人身份、条件式 Owner 初始化和用户级权限管理；首次扫码不增加确认，已有身份的替换才提示影响，Owner 已绑定后不再显示首次绑定操作。
+- `0.3.0` 升级为“一人一个 ClawBot”：每个 Owner/Member 使用独立 iLink 身份、Token 锁、Poller、游标、上下文和发送锁，但继续共享同一 Controller/Codex 与全局单活动 Turn。
+- 新成员由 Owner 在 Ingress 生成独立二维码和一次性接入码；扫码微信与发送接入码的微信必须一致，绑定消息不会进入 Controller。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。
 - 当前新 Gateway 是唯一真实 poller；旧 Hermes iLink 身份已失效，不能作为微信回滚目标。
 
 ## 安全边界
 
 - 不申请 Home Assistant、Supervisor、Docker、host network、设备或 `/share` 权限；仅在主动通知显式启用时作为受限 MQTT 客户端连接既有 Broker。
-- 群聊固定关闭；私聊只允许私有用户目录中的 active owner/member。身份文件的 `allowed_user_ids` 始终只镜像唯一 owner，不能用来添加成员。
+- 群聊固定关闭；私聊只允许与该 ClawBot 一对一绑定的 active owner/member。每份身份文件的 `allowed_user_ids` 只镜像本身份绑定用户；SQLite principal/identity binding 才是权限与路由事实源。
 - 新身份没有 owner 时必须显式启用配对 Poller；绑定码不落明文磁盘、15 分钟过期且只能绑定第一个正确发送者。
-- 原始微信 ID、token、同步游标、`context_token` 和媒体明文只保留在 Add-on 私有 `/data`。
+- 原始微信 ID、token、同步游标、`context_token` 和媒体明文只保留在 Add-on 私有 `/data`；页面和管理 API 不返回账号哈希或完整内部身份标识。
 - 传给 Controller 的会话标识为域分隔 SHA-256，不包含原始微信 ID。
 - 页面只展示私有 HMAC 生成的 `WX-*`、`CV-*`、`TH-*` 短标识；短标识只用于排障，不参与授权。
 - member 必须先完成 Controller `job_capability_profile_v1` 能力协商，只能提交 `member_read_only`；旧 Controller 下成员消息失败关闭，owner 仍按旧契约兼容。
-- 同一 token 由本地文件锁保护；正式切换仍必须人工确认 Hermes poller 已停止。
+- 同一 token 由独立本地文件锁保护，第二个运行时进入 `token_conflict` 而不影响其他身份；正式切换仍必须人工确认外部旧 poller 已停止。
 - 媒体仅允许固定微信 CDN、HTTPS、大小上限、AES-128-ECB 和短期私有 spool；预览与消费都重新校验正文摘要，只有正式消费接口会标记引用已消费。
 - 主动通知默认关闭，只允许 `owner` audience；通知正文只存在于 MQTT payload 和进程内存，不写 SQLite、身份文件或日志。
 - Remote Work 默认关闭并使用独立 MQTT 账户；请求只包含项目别名、最小任务说明和脱敏 owner hash，不接受 path、Shell、model、sandbox、Git ref、remote 或 reply topic。
@@ -41,17 +43,18 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - 支持 `message_id` 幂等、`dedupe_key`、TTL、来源/全局限流、有限重试和 `delivery_state_unknown` 故障语义。
 - MQTT Broker host 默认留空，启用时必须显式填写实际 Broker；iLink 发送结果超时属于投递状态未知，不会自动重试。
 - 启用前必须先停止旧 Hermes notification bridge，避免两个不同 client ID 同时消费 request。
-- 无论存在多少 member，主动通知始终只读取唯一 active owner；owner 转移会同步更新身份兼容镜像，member 不进入通知 audience。
+- 无论存在多少 member，主动通知始终解析当前 active owner 的独立身份；owner 转移会原子切换 `active.json` 兼容镜像，member 不进入通知 audience。
 
-## 多用户管理
+## 多身份与多用户管理
 
-- 二维码登录只认证 Gateway 唯一的 iLink 机器人身份，不属于某个微信用户；Owner/Member 共用这一机器人和 Poller。
-- 新身份首次绑定不在页面预选用户；第一个发送正确绑定码的私聊用户原子成为 Owner。绑定完成后页面只显示当前 Owner 摘要，后续更换通过用户列表的 Owner 转移完成。
-- 管理员在 HA Ingress 生成 128 bit 高熵成员邀请码；明文只返回一次，私有 SQLite 仅保存随机盐和摘要，默认 15 分钟过期。
-- 两个用户并发领取同一邀请码时最多一人成功；领取消息不会进入 Codex。
+- Owner 二维码只用于首次建立 Owner ClawBot，或在 Poller 安全停止后重新认证同一 ClawBot；已有 Owner 时必须由当前 Owner 扫码，不能借机更换账号或人员。
+- Owner 在 HA Ingress 为成员生成独立 ClawBot 二维码与 128 bit 高熵一次性接入码；明文只返回一次，私有 SQLite 仅保存随机盐和摘要，默认 15 分钟过期。
+- 扫码确认后，新身份只运行 pairing-only Poller。只有扫码用户本人发送正确接入码才会原子建立 Member principal/binding；错误用户、错误码、过期、取消、重复身份和验证码阻断均失败关闭。
+- 每身份独立 client、TokenLock、Poller、cursor、context、发送锁和故障状态；相同上游消息 ID 会按身份域分隔，不会互相去重或串回复。
 - 每位用户拥有独立 conversation key、`CV-*` 和 Controller Thread；页面不会返回原始微信 ID、完整 conversation key、Thread/job ID 或邀请码历史。
-- owner 不可暂停或移除。active member 可暂停、恢复、移除、改名，或使用精确确认词 `TRANSFER_OWNER` 原子转为新 owner。
+- owner 不可暂停或移除。active member 可暂停、恢复、移除、改名，或在其独立 ClawBot 可用时使用精确确认词 `TRANSFER_OWNER` 原子转为新 owner。
 - suspended/revoked 用户的新消息立即拒绝；已提交作业不会盲目取消，但最终微信发送前会复核状态并抑制未发送结果。
+- 暂停只停止该成员 Poller；移除、接入取消、接入过期或尝试超限会释放 Token 锁并清理不再允许恢复的成员凭据，不影响其他身份。
 - 0.1.x 遗留排队消息会在迁移时固化旧 owner 哈希和权限画像；owner 转移后重新授权只能保持或降低权限，不能让旧消息继承新 owner 权限。
 - 暂停/移除、owner 转移、主动通知目标选择和分片出站在同一事件循环中线性化，固定锁顺序为出站锁后授权锁，避免死锁或发送给过期角色。
 
@@ -62,7 +65,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - Gateway 账户只 publish request/control、subscribe status/result/agent；不得复用主动通知账户或 superuser。
 - status/result 使用 `task_id + run_seq + sequence` 收敛乱序和重投；未知 task、旧序号和同序号不同正文均失败关闭。
 - 结果发送前再次核对发起者仍是 active owner；owner 已转移、暂停或撤销时抑制回传。
-- 此版本只提供默认关闭的本地代码候选，不连接真实 EMQX、不安装 Mac Agent、不发送真实微信，也不授权 HAOS、生产数据或部署动作。
+- `0.3.0` 代码候选不代表真实多人微信已验收；真实二维码、多个手机、长期多 Poller、通知、媒体和 Remote Work 仍需独立 HAOS 发布与真机验收。
 
 ## 本地验证
 

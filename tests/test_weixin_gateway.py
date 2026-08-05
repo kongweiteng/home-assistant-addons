@@ -17,6 +17,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from weixin_gateway.protocol import (
+    EP_GET_BOT_QR,
     EP_GET_UPLOAD_URL,
     EP_SEND_MESSAGE,
     IlinkClient,
@@ -39,8 +40,12 @@ from weixin_gateway.service import (
 from weixin_gateway.store import (
     GatewayStore,
     IdentityStore,
+    MAX_ONBOARDING_ATTEMPTS,
     StoreError,
+    account_hash,
     conversation_key,
+    identity_id,
+    routed_message_id,
     user_hash,
     utc_now,
 )
@@ -192,7 +197,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.2.3"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.3.0"', api_source)
 
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
@@ -276,23 +281,56 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(sent_message["client_id"], client_id)
         self.assertEqual(sent_message["context_token"], "fixture-context")
 
+    def test_qr_creation_uses_official_post_body_and_latest_ten_local_tokens(self) -> None:
+        class QrSession:
+            closed = False
+
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def post(self, url: str, **kwargs: object) -> StubHttpResponse:
+                self.calls.append({"url": url, **kwargs})
+                return StubHttpResponse(
+                    {"qrcode": "fixture-qr", "qrcode_img_content": "https://example.invalid/qr"}
+                )
+
+        session = QrSession()
+        client = IlinkClient(
+            base_url="https://ilinkai.weixin.qq.com",
+            cdn_base_url="https://novac2c.cdn.weixin.qq.com/c2c",
+            token="",
+            max_media_bytes=1024,
+            session=session,  # type: ignore[arg-type]
+        )
+        tokens = [f"token-{index:02d}-" + "x" * 16 for index in range(12)]
+        result = asyncio.run(client.create_bot_qr(tokens))
+        self.assertEqual(result["qrcode"], "fixture-qr")
+        self.assertEqual(len(session.calls), 1)
+        call = session.calls[0]
+        self.assertTrue(str(call["url"]).endswith(f"/{EP_GET_BOT_QR}?bot_type=3"))
+        body = json.loads(str(call["data"]))
+        self.assertEqual(body, {"local_token_list": tokens[:10]})
+        self.assertNotIn("base_info", body)
+        self.assertNotIn("Authorization", call["headers"])
+
     def test_dashboard_exposes_admin_pairing_without_unsafe_html_rendering(self) -> None:
         self.assertIn("api/owner-pairing/start", DASHBOARD_JS)
         self.assertIn("绑定消息不会进入 Codex", DASHBOARD_HTML)
-        self.assertIn("全局机器人", DASHBOARD_HTML)
+        self.assertIn("一人一个 ClawBot", DASHBOARD_HTML)
+        self.assertIn("添加成员 ClawBot", DASHBOARD_HTML)
         self.assertIn("用户级权限", DASHBOARD_HTML)
-        self.assertIn("第一个在机器人私聊中发送正确绑定码的微信用户将成为 Owner", DASHBOARD_HTML)
+        self.assertIn("第一个向 Owner ClawBot 私聊发送正确绑定码的微信用户成为 Owner", DASHBOARD_HTML)
         self.assertIn('id="ownerSetupPanel"', DASHBOARD_HTML)
         self.assertIn('id="currentOwnerPanel" hidden', DASHBOARD_HTML)
         self.assertIn("q('ownerSetupPanel').hidden=bound", DASHBOARD_JS)
         self.assertIn("q('currentOwnerPanel').hidden=!bound", DASHBOARD_JS)
-        self.assertIn("q('inviteStart').disabled=!userManagementReady", DASHBOARD_JS)
         self.assertIn("if(currentIdentityPresent&&!confirm", DASHBOARD_JS)
-        self.assertLess(DASHBOARD_HTML.index("全局机器人"), DASHBOARD_HTML.index("用户级权限"))
-        self.assertIn("api/users/invitations", DASHBOARD_JS)
+        self.assertLess(DASHBOARD_HTML.index("Owner 身份"), DASHBOARD_HTML.index("用户级权限"))
+        self.assertIn("api/onboarding/start", DASHBOARD_JS)
+        self.assertIn("api/onboarding/qr/image", DASHBOARD_JS)
         self.assertIn("api/owner-transfer", DASHBOARD_JS)
         self.assertIn("X-CSRF-Token", DASHBOARD_JS)
-        self.assertIn("HMAC 短标识", DASHBOARD_HTML)
+        self.assertIn("脱敏短标识", DASHBOARD_HTML)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
 
 
@@ -330,6 +368,235 @@ class StoreTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "user_limit_reached")
         self.assertEqual(context.exception.status, 409)
+
+    def test_identity_store_keeps_owner_pointer_when_secondary_identity_changes(self) -> None:
+        owner = self.identity_store.load_identity()
+        assert owner is not None
+        self.assertEqual(owner["identity_id"], identity_id("fixture-account"))
+        owner_hash = account_hash(owner["account_id"])
+
+        secondary = fixture_identity()
+        secondary.update(
+            {
+                "account_id": "fixture-secondary-account",
+                "token": "fixture-secondary-token-000000000000",
+                "user_id": "fixture-secondary-bot",
+                "allowed_user_ids": [],
+            }
+        )
+        self.identity_store.save_identity(secondary, make_active=False)
+        loaded_secondary = self.identity_store.load_identity_by_hash(account_hash(secondary["account_id"]))
+        assert loaded_secondary is not None
+        self.identity_store.set_cursor(loaded_secondary, "secondary-cursor")
+        self.identity_store.set_context(loaded_secondary, "secondary-user", "secondary-context")
+
+        self.assertEqual(self.identity_store.active_account_hash(), owner_hash)
+        self.assertEqual(self.identity_store.load_identity()["account_id"], "fixture-account")  # type: ignore[index]
+        self.assertEqual(loaded_secondary["get_updates_buf"], "secondary-cursor")
+        with self.assertRaises(StoreError) as context:
+            self.identity_store.save_identity(
+                {**secondary, "identity_id": identity_id("different-account")},
+                make_active=False,
+            )
+        self.assertEqual(context.exception.code, "identity_invalid")
+
+    def test_identity_store_returns_newest_ten_unique_tokens_for_qr_creation(self) -> None:
+        for index in range(12):
+            identity = fixture_identity(allowed=[])
+            identity.update(
+                {
+                    "account_id": f"fixture-token-account-{index:02d}",
+                    "token": f"fixture-token-{index:02d}-" + "x" * 24,
+                    "saved_at": f"2099-08-05T00:{index:02d}:00+00:00",
+                }
+            )
+            self.identity_store.save_identity(identity, make_active=False)
+        tokens = self.identity_store.recent_tokens()
+        self.assertEqual(len(tokens), 10)
+        self.assertEqual(tokens[0], "fixture-token-11-" + "x" * 24)
+        self.assertEqual(tokens[-1], "fixture-token-02-" + "x" * 24)
+
+    def test_legacy_identity_migration_preserves_conversation_and_allows_member_upgrade(self) -> None:
+        owner_before = self.store.user_by_private_id("fixture-owner")
+        assert owner_before is not None
+        invitation = self.store.create_member_invitation(
+            expected_revision=self.store.users_revision(),
+            request_id="legacy-shared-member-invite",
+        )
+        member = self.store.claim_member_invitation(
+            user_id="fixture-legacy-member",
+            text=invitation["code"],
+        )
+        assert member is not None
+
+        owner_identity = identity_id("fixture-account")
+        migrated = self.store.migrate_legacy_identity(
+            identity_identifier=owner_identity,
+            account_digest=account_hash("fixture-account"),
+        )
+        self.assertEqual(migrated["bound_principals"], 2)
+        self.assertEqual(
+            self.store.user_by_private_id("fixture-owner")["conversation_key"],  # type: ignore[index]
+            owner_before["conversation_key"],
+        )
+        self.assertEqual(self.store.owner_identity_route()["identity_id"], owner_identity)
+
+        public_member = next(user for user in self.store.list_users()["users"] if user["role"] == "member")
+        self.assertEqual(public_member["binding_type"], "legacy_shared")
+        self.assertEqual(public_member["identity_state"], "active")
+        onboarding = self.store.create_onboarding_session(
+            expected_revision=self.store.users_revision(),
+            request_id="upgrade-legacy-member-onboarding",
+            alias="ignored-for-existing-member",
+            target_wx_short=public_member["wx_short"],
+        )
+        member_identity = identity_id("fixture-member-account")
+        attached = self.store.attach_onboarding_identity(
+            session_id=onboarding["session_id"],
+            identity_identifier=member_identity,
+            account_digest=account_hash("fixture-member-account"),
+            scanned_private_user_id="fixture-legacy-member",
+        )
+        self.assertEqual(attached["state"], "pending_pairing")
+
+        def claim() -> dict | None:
+            return self.store.claim_onboarding(
+                identity_identifier=member_identity,
+                private_user_id="fixture-legacy-member",
+                text=onboarding["code"],
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = [future.result() for future in (executor.submit(claim), executor.submit(claim))]
+        claimed = [result for result in results if result is not None]
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0]["principal_id"], member["principal_id"])
+        route = self.store.identity_route_for_principal(member["principal_id"])
+        assert route is not None
+        self.assertEqual(route["identity_id"], member_identity)
+        self.assertEqual(route["binding_type"], "primary")
+        self.assertEqual(self.store.owner_identity_route()["identity_id"], owner_identity)
+
+    def test_identity_scoped_message_dedup_and_remote_work_reply_route(self) -> None:
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        owner_identity = identity_id("fixture-account")
+        self.store.migrate_legacy_identity(
+            identity_identifier=owner_identity,
+            account_digest=account_hash("fixture-account"),
+        )
+        upstream_message_id = "same-upstream-message"
+        first = self.store.store_message(
+            message_id=routed_message_id(owner_identity, upstream_message_id),
+            upstream_message_id=upstream_message_id,
+            identity_identifier=owner_identity,
+            principal_id_value=owner["principal_id"],
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="第一身份",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+
+        secondary_identity = identity_id("fixture-secondary-account")
+        self.store.register_pending_identity(
+            identity_identifier=secondary_identity,
+            account_digest=account_hash("fixture-secondary-account"),
+        )
+        with self.store._connect() as connection:
+            now = utc_now()
+            secondary_principal = "PR-" + "b" * 32
+            secondary_user_hash = user_hash("secondary-sender")
+            connection.execute(
+                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at,principal_id) "
+                "VALUES (?,?,?,?,?,'active',?,?,?,?,?)",
+                (
+                    secondary_user_hash,
+                    "secondary-sender",
+                    "sha256:" + "c" * 64,
+                    "第二成员",
+                    "member",
+                    self.store.users_revision(connection),
+                    now,
+                    now,
+                    now,
+                    secondary_principal,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO conversation_links(user_hash,conversation_short,last_seen_at) VALUES (?,?,?)",
+                (secondary_user_hash, self.store.short_id("CV", "sha256:" + "c" * 64), now),
+            )
+            connection.execute(
+                "INSERT INTO identity_bindings(identity_id,principal_id,private_user_id,binding_type,state,created_at,updated_at) "
+                "VALUES (?,?,?,'primary','active',?,?)",
+                (secondary_identity, secondary_principal, "secondary-sender", now, now),
+            )
+            connection.execute(
+                "UPDATE ilink_identities SET state='active',runtime_state='polling' WHERE identity_id=?",
+                (secondary_identity,),
+            )
+        second = self.store.store_message(
+            message_id=routed_message_id(secondary_identity, upstream_message_id),
+            upstream_message_id=upstream_message_id,
+            identity_identifier=secondary_identity,
+            principal_id_value=secondary_principal,
+            sender_id="secondary-sender",
+            conversation_key="sha256:" + "c" * 64,
+            text="第二身份",
+            media=[],
+            user_digest=secondary_user_hash,
+            capability_profile="member_read_only",
+        )
+        duplicate = self.store.store_message(
+            message_id=routed_message_id(owner_identity, upstream_message_id) + "-ignored",
+            upstream_message_id=upstream_message_id,
+            identity_identifier=owner_identity,
+            principal_id_value=owner["principal_id"],
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="重复正文不覆盖",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        self.assertNotEqual(first["message_id"], second["message_id"])
+        self.assertEqual(duplicate["message_id"], first["message_id"])
+
+        payload = {
+            "version": 1,
+            "message_id": "RM-ABCDEFGHIJ",
+            "task_id": "RW-ABCDEFGHIJ",
+            "operation": "start",
+            "project_alias": "fixture",
+            "instruction": "只读检查",
+            "created_at": utc_now(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        }
+        task = self.store.enqueue_remote_work_command(
+            topic="home/codex-work/v1/request",
+            payload=payload,
+            sender_id="fixture-owner",
+            user_digest=owner["user_hash"],
+            identity_identifier=owner_identity,
+            principal_id_value=owner["principal_id"],
+        )
+        self.assertEqual(task["identity_id"], owner_identity)
+        self.store.record_remote_work_event(
+            "home/codex-work/v1/result",
+            {
+                "version": 1,
+                "task_id": payload["task_id"],
+                "run_seq": 1,
+                "sequence": 1,
+                "state": "completed",
+                "summary": "完成",
+            },
+        )
+        reply = self.store.remote_work_pending_replies()[0]
+        self.assertEqual(reply["identity_id"], owner_identity)
+        self.assertEqual(reply["principal_id"], owner["principal_id"])
 
     def test_message_dedup_attachment_path_digest_expiry_and_one_time_consumption(self) -> None:
         content = b"synthetic-receipt"
@@ -719,7 +986,7 @@ class StoreTests(unittest.TestCase):
         final = self.store.list_users()["users"]
         self.assertEqual(sum(user["role"] == "owner" and user["status"] == "active" for user in final), 1)
 
-    def test_identity_replacement_resets_principals_and_fails_pending_messages_closed(self) -> None:
+    def test_identity_replacement_cannot_clear_principals_or_pending_messages(self) -> None:
         owner = self.store.user_by_private_id("fixture-owner")
         assert owner is not None
         self.store.store_message(
@@ -731,11 +998,13 @@ class StoreTests(unittest.TestCase):
             user_digest=owner["user_hash"],
             capability_profile="owner",
         )
-        self.store.reset_access_directory_for_identity_replacement()
-        self.assertFalse(self.store.list_users()["users"])
+        with self.assertRaises(StoreError) as context:
+            self.store.reset_access_directory_for_identity_replacement()
+        self.assertEqual(context.exception.code, "identity_replacement_forbidden")
+        self.assertEqual(len(self.store.list_users()["users"]), 1)
         message = self.store.get_message("identity-replacement-pending")
-        self.assertEqual(message["state"], "failed")
-        self.assertEqual(message["error_code"], "identity_replaced")
+        self.assertEqual(message["state"], "pending_controller")
+        self.assertIsNone(message["error_code"])
 
     def test_outbound_artifact_state_and_client_ids_survive_restart(self) -> None:
         artifact = {
@@ -802,6 +1071,288 @@ class ServiceTests(unittest.TestCase):
         service.client = StubIlinkClient()  # type: ignore[assignment]
         return service
 
+    def independent_member_service(self) -> tuple[GatewayService, str, dict]:
+        self.service()
+        onboarding = self.store.create_onboarding_session(
+            expected_revision=self.store.users_revision(),
+            request_id="service-independent-member-create",
+            alias="独立成员",
+        )
+        secondary = fixture_identity(allowed=[])
+        secondary.update(
+            {
+                "account_id": "fixture-independent-account",
+                "token": "fixture-independent-token-000000000000",
+                "user_id": "fixture-independent-bot",
+            }
+        )
+        secondary_identity = identity_id(secondary["account_id"])
+        self.identity_store.save_identity(secondary, make_active=False)
+        self.store.attach_onboarding_identity(
+            session_id=onboarding["session_id"],
+            identity_identifier=secondary_identity,
+            account_digest=account_hash(secondary["account_id"]),
+            scanned_private_user_id="fixture-independent-member",
+        )
+        member = self.store.claim_onboarding(
+            identity_identifier=secondary_identity,
+            private_user_id="fixture-independent-member",
+            text=onboarding["code"],
+        )
+        assert member is not None
+        stored_secondary = self.identity_store.load_identity_by_hash(account_hash(secondary["account_id"]))
+        assert stored_secondary is not None
+        stored_secondary["allowed_user_ids"] = ["fixture-independent-member"]
+        stored_secondary["context_tokens"] = {"fixture-independent-member": "independent-context"}
+        self.identity_store.save_identity(stored_secondary, make_active=False)
+        service = self.service()
+        return service, secondary_identity, member
+
+    def test_two_identity_ingest_and_replies_stay_on_original_runtime(self) -> None:
+        service, secondary_identity, member = self.independent_member_service()
+        owner_client = StubIlinkClient()
+        secondary_client = StubIlinkClient()
+        service.client = owner_client  # type: ignore[assignment]
+        secondary_runtime = service._runtime_for_identity(secondary_identity)
+        secondary_runtime.client = secondary_client  # type: ignore[assignment]
+        secondary_runtime.poller_state = "polling"
+
+        owner_raw = fixture_update()["msgs"][0]
+        secondary_raw = json.loads(json.dumps(owner_raw))
+        secondary_raw["from_user_id"] = "fixture-independent-member"
+        secondary_raw["context_token"] = "independent-context"
+
+        async def exercise() -> None:
+            await service._ingest(owner_raw)
+            await service._ingest(secondary_raw, secondary_runtime)
+            messages = self.store.pending_controller()
+            self.assertEqual(len(messages), 2)
+            owner_message = next(message for message in messages if message["identity_id"] != secondary_identity)
+            member_message = next(message for message in messages if message["identity_id"] == secondary_identity)
+            self.assertEqual(owner_message["message_id"], owner_raw["message_id"])
+            self.assertEqual(
+                member_message["message_id"],
+                routed_message_id(secondary_identity, owner_raw["message_id"]),
+            )
+            await service._send_result(
+                {**owner_message, "controller_job_id": "owner-route-job"},
+                "Owner 回复",
+            )
+            await service._send_result(
+                {**member_message, "controller_job_id": "member-route-job"},
+                "成员回复",
+            )
+
+        self.run_async(exercise())
+        self.assertEqual([item["to_user_id"] for item in owner_client.sent], ["fixture-owner"])
+        self.assertEqual(
+            [item["to_user_id"] for item in secondary_client.sent],
+            ["fixture-independent-member"],
+        )
+        self.assertEqual(secondary_client.sent[0]["context_token"], "independent-context")
+        self.assertEqual(member["role"], "member")
+
+    def test_secondary_session_expiry_does_not_block_owner_reply(self) -> None:
+        service, secondary_identity, member = self.independent_member_service()
+        owner_client = StubIlinkClient()
+
+        class ExpiredSecondaryClient(StubIlinkClient):
+            async def send_text(
+                self,
+                to_user_id: str,
+                text: str,
+                context_token: str | None,
+                client_id: str,
+            ) -> dict:
+                await super().send_text(to_user_id, text, context_token, client_id)
+                return {"errcode": SESSION_EXPIRED_ERRCODE}
+
+        service.client = owner_client  # type: ignore[assignment]
+        secondary_runtime = service._runtime_for_identity(secondary_identity)
+        secondary_runtime.client = ExpiredSecondaryClient()  # type: ignore[assignment]
+        secondary_runtime.poller_state = "polling"
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        owner_route = self.store.owner_identity_route()
+
+        async def exercise() -> None:
+            with self.assertRaises(StoreError) as expired:
+                await service._send_result(
+                    {
+                        "message_id": "secondary-expiry-message",
+                        "sender_id": "fixture-independent-member",
+                        "user_hash": member["user_hash"],
+                        "principal_id": member["principal_id"],
+                        "identity_id": secondary_identity,
+                        "capability_profile": "member_read_only",
+                        "controller_job_id": "secondary-expiry-job",
+                    },
+                    "成员回复",
+                )
+            self.assertEqual(expired.exception.code, "session_expired")
+            await service._send_result(
+                {
+                    "message_id": "owner-after-secondary-expiry",
+                    "sender_id": "fixture-owner",
+                    "user_hash": owner["user_hash"],
+                    "principal_id": owner["principal_id"],
+                    "identity_id": owner_route["identity_id"],
+                    "capability_profile": "owner",
+                    "controller_job_id": "owner-after-secondary-expiry-job",
+                },
+                "Owner 仍可回复",
+            )
+
+        self.run_async(exercise())
+        self.assertEqual(secondary_runtime.poller_state, "session_expired")
+        self.assertEqual(service.poller_state, "disabled")
+        self.assertEqual(owner_client.sent[-1]["to_user_id"], "fixture-owner")
+
+    def test_owner_transfer_between_independent_identities_switches_active_mirror(self) -> None:
+        service, secondary_identity, member = self.independent_member_service()
+        public_member = next(user for user in service.users()["users"] if user["role"] == "member")
+
+        async def exercise() -> None:
+            result = await service.transfer_owner(
+                {
+                    "target_wx_short": public_member["wx_short"],
+                    "revision": self.store.users_revision(),
+                    "request_id": "independent-owner-transfer",
+                    "confirmation": "TRANSFER_OWNER",
+                }
+            )
+            self.assertEqual(result["owner"]["wx_short"], public_member["wx_short"])
+
+        self.run_async(exercise())
+        active = self.identity_store.load_identity()
+        assert active is not None
+        self.assertEqual(active["identity_id"], secondary_identity)
+        self.assertEqual(active["allowed_user_ids"], ["fixture-independent-member"])
+        self.assertEqual(self.store.owner_identity_route()["identity_id"], secondary_identity)
+        owner_id, context = service.notification_owner_context()
+        self.assertEqual(owner_id, "fixture-independent-member")
+        self.assertEqual(context, "independent-context")
+        self.assertEqual(member["conversation_key"], self.store.active_owner()["conversation_key"])
+
+    def test_primary_member_suspend_resume_and_revoke_control_only_its_runtime(self) -> None:
+        service, secondary_identity, _member = self.independent_member_service()
+        service.poller_enabled = True
+        runtime = service._runtime_for_identity(secondary_identity)
+
+        class PollingClient(StubIlinkClient):
+            async def get_updates(self, _cursor: str, *, timeout_ms: int) -> dict:
+                await asyncio.sleep(60)
+                return {"ret": 0, "msgs": [], "get_updates_buf": ""}
+
+        runtime.client = PollingClient()  # type: ignore[assignment]
+        public_member = next(user for user in service.users()["users"] if user["role"] == "member")
+
+        async def exercise() -> None:
+            await service._resume_identity_runtime(runtime)
+            self.assertEqual(runtime.poller_state, "polling")
+            self.assertIsNotNone(runtime.token_lock)
+            self.assertIsNotNone(runtime.poll_task)
+            await service.change_user_state(
+                public_member["wx_short"],
+                "suspend",
+                {"revision": self.store.users_revision(), "request_id": "runtime-suspend-01"},
+            )
+            self.assertEqual(self.store.identity_record(secondary_identity)["state"], "paused")
+            self.assertIsNone(runtime.token_lock)
+            self.assertIsNone(runtime.poll_task)
+            await service.change_user_state(
+                public_member["wx_short"],
+                "resume",
+                {"revision": self.store.users_revision(), "request_id": "runtime-resume-01"},
+            )
+            self.assertEqual(runtime.poller_state, "polling")
+            self.assertIsNotNone(runtime.token_lock)
+            await service.change_user_state(
+                public_member["wx_short"],
+                "revoke",
+                {"revision": self.store.users_revision(), "request_id": "runtime-revoke-01"},
+            )
+            self.assertNotIn(secondary_identity, service._runtimes)
+            self.assertEqual(self.store.identity_record(secondary_identity)["state"], "revoked")
+            self.assertIsNone(
+                self.identity_store.load_identity_by_hash(account_hash("fixture-independent-account"))
+            )
+
+        self.run_async(exercise())
+
+    def test_token_conflict_isolated_to_the_conflicting_identity(self) -> None:
+        service, secondary_identity, _member = self.independent_member_service()
+        service.poller_enabled = True
+        owner_runtime = service._runtime_for_identity(None)
+        secondary_runtime = service._runtime_for_identity(secondary_identity)
+        secondary_runtime.identity["token"] = owner_runtime.identity["token"]
+
+        class PollingClient(StubIlinkClient):
+            async def get_updates(self, _cursor: str, *, timeout_ms: int) -> dict:
+                await asyncio.sleep(60)
+                return {"ret": 0, "msgs": [], "get_updates_buf": ""}
+
+        owner_runtime.client = PollingClient()  # type: ignore[assignment]
+        secondary_runtime.client = PollingClient()  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            await service._resume_identity_runtime(owner_runtime)
+            await service._resume_identity_runtime(secondary_runtime)
+            self.assertEqual(owner_runtime.poller_state, "polling")
+            self.assertEqual(secondary_runtime.poller_state, "token_conflict")
+            self.assertEqual(service.poller_state, "polling")
+            await service._stop_identity_runtime(owner_runtime)
+
+        self.run_async(exercise())
+
+    def test_delivery_loop_skips_expired_identity_and_continues_other_identity(self) -> None:
+        service, secondary_identity, member = self.independent_member_service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        owner_route = self.store.owner_identity_route()
+        secondary_message = self.store.store_message(
+            message_id=routed_message_id(secondary_identity, "delivery-secondary"),
+            upstream_message_id="delivery-secondary",
+            identity_identifier=secondary_identity,
+            principal_id_value=member["principal_id"],
+            sender_id="fixture-independent-member",
+            conversation_key=member["conversation_key"],
+            text="成员任务",
+            media=[],
+            user_digest=member["user_hash"],
+            capability_profile="member_read_only",
+        )
+        owner_message = self.store.store_message(
+            message_id="delivery-owner",
+            upstream_message_id="delivery-owner",
+            identity_identifier=owner_route["identity_id"],
+            principal_id_value=owner["principal_id"],
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="Owner 任务",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        self.store.mark_submitted(secondary_message["message_id"], "delivery-secondary-job")
+        self.store.mark_submitted(owner_message["message_id"], "delivery-owner-job")
+        service.controller = CompletedController()  # type: ignore[assignment]
+        owner_client = StubIlinkClient()
+        service.client = owner_client  # type: ignore[assignment]
+        service._runtime_for_identity(secondary_identity).poller_state = "session_expired"
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertEqual(self.store.get_message(secondary_message["message_id"])["state"], "controller_submitted")
+        self.assertEqual(self.store.get_message(owner_message["message_id"])["state"], "completed")
+        self.assertEqual([item["to_user_id"] for item in owner_client.sent], ["fixture-owner"])
+
     def test_allowlist_accepts_owner_and_rejects_group_and_unknown_sender(self) -> None:
         raw = fixture_update()["msgs"][0]
 
@@ -853,13 +1404,19 @@ class ServiceTests(unittest.TestCase):
         }
 
         class ConfirmedQrClient(StubIlinkClient):
-            async def api_get(self, _path: str, *, base_url: str | None = None) -> dict:
+            async def get_bot_qr_status(
+                self,
+                _qrcode: str,
+                *,
+                base_url: str | None = None,
+                verify_code: str | None = None,
+            ) -> dict:
                 return {
                     "status": "confirmed",
                     "ilink_bot_id": "fixture-account",
                     "bot_token": "refreshed-ilink-token-000000000000",
                     "baseurl": base_url or "https://ilinkai.weixin.qq.com",
-                    "ilink_user_id": "fixture-bot-user",
+                    "ilink_user_id": "fixture-owner",
                 }
 
         self.run_async(service._poll_qr(ConfirmedQrClient()))
@@ -869,7 +1426,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(identity["allowed_user_ids"], ["fixture-owner"])
         self.assertEqual(self.store.active_owner()["private_user_id"], "fixture-owner")
 
-    def test_different_account_qr_refresh_clears_old_access_directory(self) -> None:
+    def test_different_account_owner_qr_is_rejected_without_clearing_access_directory(self) -> None:
         service = self.service()
         service.qr_state = {
             "state": "scanned",
@@ -879,20 +1436,273 @@ class ServiceTests(unittest.TestCase):
         }
 
         class ConfirmedQrClient(StubIlinkClient):
-            async def api_get(self, _path: str, *, base_url: str | None = None) -> dict:
+            async def get_bot_qr_status(
+                self,
+                _qrcode: str,
+                *,
+                base_url: str | None = None,
+                verify_code: str | None = None,
+            ) -> dict:
                 return {
                     "status": "confirmed",
                     "ilink_bot_id": "replacement-account",
                     "bot_token": "replacement-ilink-token-00000000000",
                     "baseurl": base_url or "https://ilinkai.weixin.qq.com",
-                    "ilink_user_id": "replacement-bot-user",
+                    "ilink_user_id": "fixture-owner",
                 }
 
         self.run_async(service._poll_qr(ConfirmedQrClient()))
         identity = self.identity_store.load_identity()
         assert identity is not None
-        self.assertEqual(identity["allowed_user_ids"], [])
-        self.assertFalse(self.store.list_users()["users"])
+        self.assertEqual(service.qr_state["state"], "failed")
+        self.assertEqual(service.qr_state["error_code"], "owner_identity_mismatch")
+        self.assertEqual(identity["account_id"], "fixture-account")
+        self.assertEqual(identity["allowed_user_ids"], ["fixture-owner"])
+        self.assertEqual(len(self.store.list_users()["users"]), 1)
+
+    def test_member_onboarding_qr_verify_and_pairing_activate_independent_runtime(self) -> None:
+        service = self.service(poller_enabled=True, confirmation="HERMES_POLLER_STOPPED")
+
+        class MemberQrClient(StubIlinkClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.verify_codes: list[str | None] = []
+
+            async def start(self) -> None:
+                return None
+
+            async def create_bot_qr(self, local_tokens: list[str]) -> dict:
+                self.local_tokens = local_tokens
+                return {"qrcode": "member-onboarding-qr", "qrcode_img_content": "fixture-member-qr"}
+
+            async def get_bot_qr_status(
+                self,
+                _qrcode: str,
+                *,
+                base_url: str | None = None,
+                verify_code: str | None = None,
+            ) -> dict:
+                self.verify_codes.append(verify_code)
+                if verify_code != "2468":
+                    return {"status": "need_verifycode"}
+                return {
+                    "status": "confirmed",
+                    "ilink_bot_id": "fixture-onboarded-account",
+                    "bot_token": "fixture-onboarded-token-000000000000",
+                    "baseurl": base_url or "https://ilinkai.weixin.qq.com",
+                    "ilink_user_id": "fixture-onboarded-member",
+                }
+
+        qr_client = MemberQrClient()
+        service._new_qr_client = lambda: qr_client  # type: ignore[method-assign]
+        service._render_qr_image = lambda target, content: (
+            target.parent.mkdir(parents=True, exist_ok=True),
+            target.write_bytes(content.encode("utf-8")),
+        )  # type: ignore[method-assign]
+
+        async def start_pairing_runtime(runtime: object) -> None:
+            service._set_runtime_state(runtime, "pairing", identity_state="pending_pairing")  # type: ignore[arg-type]
+
+        service._resume_identity_runtime = start_pairing_runtime  # type: ignore[method-assign]
+
+        async def exercise() -> None:
+            created = await service.start_member_onboarding(
+                {
+                    "alias": "二维码成员",
+                    "revision": self.store.users_revision(),
+                    "request_id": "member-qr-onboarding-create",
+                    "ttl_seconds": 900,
+                }
+            )
+            self.assertIn("code", created)
+            for _ in range(20):
+                if service.member_qr_state and service.member_qr_state.get("state") == "need_verifycode":
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(service.member_qr_state["state"], "need_verifycode")  # type: ignore[index]
+            service.submit_member_onboarding_verify_code(
+                created["session_short"],
+                {"verify_code": "2468"},
+            )
+            assert service._member_qr_task is not None
+            await asyncio.wait_for(service._member_qr_task, timeout=2)
+            self.assertEqual(service.member_qr_state["state"], "pending_pairing")  # type: ignore[index]
+            identity_identifier = identity_id("fixture-onboarded-account")
+            runtime = service._runtime_for_identity(identity_identifier)
+            self.assertEqual(runtime.poller_state, "pairing")
+            runtime.client = StubIlinkClient()  # type: ignore[assignment]
+            raw = fixture_update()["msgs"][0]
+            pairing_message = json.loads(json.dumps(raw))
+            pairing_message["message_id"] = "member-onboarding-code-message"
+            pairing_message["from_user_id"] = "fixture-onboarded-member"
+            pairing_message["context_token"] = "fixture-onboarded-context"
+            pairing_message["item_list"] = [
+                {"type": 1, "text_item": {"text": created["code"]}}
+            ]
+            await service._ingest(pairing_message, runtime)
+            self.assertEqual(runtime.poller_state, "polling")
+            self.assertEqual(service.member_qr_state["state"], "active")  # type: ignore[index]
+            user = self.store.user_by_identity_sender(identity_identifier, "fixture-onboarded-member")
+            assert user is not None
+            self.assertEqual(user["role"], "member")
+            self.assertEqual(user["capability_profile"] if "capability_profile" in user else "member_read_only", "member_read_only")
+            self.assertFalse(self.store.message_exists("member-onboarding-code-message"))
+            self.assertEqual(
+                self.identity_store.active_account_hash(),
+                account_hash("fixture-account"),
+            )
+
+        self.run_async(exercise())
+
+    def test_member_qr_terminal_states_fail_closed(self) -> None:
+        cases = (
+            ("binded_redirect", "already_bound", "already_bound"),
+            ("expired", "expired", "expired"),
+            ("verify_code_blocked", "verify_code_blocked", "failed"),
+        )
+        for upstream_status, public_state, stored_state in cases:
+            with self.subTest(status=upstream_status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                identity_store = IdentityStore(root / "data")
+                identity_store.save_identity(fixture_identity())
+                store = GatewayStore(root / "data" / "gateway.sqlite3", data_dir=root / "data")
+                service = GatewayService(
+                    identity_store=identity_store,
+                    store=store,
+                    controller=StubController(),  # type: ignore[arg-type]
+                    bootstrap_identity={},
+                    poller_enabled=True,
+                    owner_pairing_enabled=False,
+                    activation_confirmation="HERMES_POLLER_STOPPED",
+                    max_media_bytes=1024,
+                )
+
+                class TerminalQrClient(StubIlinkClient):
+                    async def start(self) -> None:
+                        return None
+
+                    async def create_bot_qr(self, _local_tokens: list[str]) -> dict:
+                        return {
+                            "qrcode": f"terminal-{upstream_status}",
+                            "qrcode_img_content": f"image-{upstream_status}",
+                        }
+
+                    async def get_bot_qr_status(
+                        self,
+                        _qrcode: str,
+                        *,
+                        base_url: str | None = None,
+                        verify_code: str | None = None,
+                    ) -> dict:
+                        return {"status": upstream_status}
+
+                client = TerminalQrClient()
+                service._new_qr_client = lambda: client  # type: ignore[method-assign]
+                service._render_qr_image = lambda target, content: (
+                    target.parent.mkdir(parents=True, exist_ok=True),
+                    target.write_bytes(content.encode("utf-8")),
+                )  # type: ignore[method-assign]
+
+                async def no_sleep(_delay: float) -> None:
+                    return None
+
+                async def exercise() -> None:
+                    with mock.patch("weixin_gateway.service.asyncio.sleep", new=no_sleep):
+                        created = await service.start_member_onboarding(
+                            {
+                                "alias": f"终态成员-{upstream_status}",
+                                "revision": store.users_revision(),
+                                "request_id": f"terminal-{upstream_status}-create",
+                                "ttl_seconds": 900,
+                            }
+                        )
+                        assert service._member_qr_task is not None
+                        await asyncio.wait_for(service._member_qr_task, timeout=2)
+                    self.assertEqual(service.member_qr_state["state"], public_state)  # type: ignore[index]
+                    self.assertEqual(
+                        store.onboarding_session(created["session_short"])["state"],
+                        stored_state,
+                    )
+                    self.assertTrue(client.closed)
+
+                self.run_async(exercise())
+
+    def test_pairing_attempt_limit_stops_runtime_and_removes_pending_credentials(self) -> None:
+        self.service()
+        onboarding = self.store.create_onboarding_session(
+            expected_revision=self.store.users_revision(),
+            request_id="pairing-attempt-limit-create",
+            alias="错误码成员",
+        )
+        secondary = fixture_identity(allowed=[])
+        secondary.update(
+            {
+                "account_id": "fixture-pairing-limit-account",
+                "token": "fixture-pairing-limit-token-000000000",
+                "user_id": "fixture-pairing-limit-bot",
+            }
+        )
+        secondary_identity = identity_id(secondary["account_id"])
+        self.identity_store.save_identity(secondary, make_active=False)
+        self.store.attach_onboarding_identity(
+            session_id=onboarding["session_id"],
+            identity_identifier=secondary_identity,
+            account_digest=account_hash(secondary["account_id"]),
+            scanned_private_user_id="fixture-pairing-limit-member",
+        )
+        service = self.service()
+        runtime = service._runtime_for_identity(secondary_identity)
+        self.assertEqual(runtime.pairing_session_id, onboarding["session_id"])
+        runtime.poller_state = "pairing"
+        runtime.client = StubIlinkClient()  # type: ignore[assignment]
+        runtime.token_lock = self.identity_store.acquire_token_lock(runtime.identity["token"])
+        runtime.token_lock.acquire()
+
+        async def exercise() -> None:
+            raw = fixture_update()["msgs"][0]
+            for attempt in range(MAX_ONBOARDING_ATTEMPTS):
+                wrong = json.loads(json.dumps(raw))
+                wrong["message_id"] = f"pairing-attempt-{attempt}"
+                wrong["from_user_id"] = "fixture-pairing-limit-member"
+                wrong["item_list"] = [{"type": 1, "text_item": {"text": "错误接入码"}}]
+                await service._ingest(wrong, runtime)
+
+        self.run_async(exercise())
+        self.assertEqual(
+            self.store.onboarding_session(onboarding["session_short"])["state"],
+            "failed",
+        )
+        self.assertEqual(self.store.identity_record(secondary_identity)["state"], "revoked")
+        self.assertNotIn(secondary_identity, service._runtimes)
+        self.assertIsNone(runtime.token_lock)
+        self.assertTrue(runtime.client.closed)
+        self.assertIsNone(
+            self.identity_store.load_identity_by_hash(account_hash(secondary["account_id"]))
+        )
+
+    def test_owner_migration_mismatch_does_not_leave_or_overwrite_identity_file(self) -> None:
+        service = self.service()
+        key = secrets.token_bytes(32)
+        different = fixture_identity()
+        different.update(
+            {
+                "account_id": "fixture-different-migration-account",
+                "token": "fixture-different-migration-token-000000",
+            }
+        )
+        package = self.identity_store.migration_dir / "different-owner.zip"
+        self.identity_store.build_migration_package(different, key, package)
+
+        with self.assertRaises(StoreError) as mismatch:
+            service.import_migration(
+                package.name,
+                base64.urlsafe_b64encode(key).decode("ascii"),
+            )
+        self.assertEqual(mismatch.exception.code, "owner_identity_mismatch")
+        self.assertEqual(self.identity_store.load_identity()["account_id"], "fixture-account")  # type: ignore[index]
+        self.assertIsNone(
+            self.identity_store.load_identity_by_hash(account_hash(different["account_id"]))
+        )
 
     def test_restart_repairs_owner_mirror_after_database_only_transfer(self) -> None:
         service = self.service()
@@ -1916,6 +2726,161 @@ class AdminApiTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+                loop.close()
+
+    def test_onboarding_start_verify_cancel_and_status_are_private(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_store = IdentityStore(root / "data")
+            identity_store.save_identity(fixture_identity())
+            store = GatewayStore(root / "data" / "gateway.sqlite3", data_dir=root / "data")
+            service = GatewayService(
+                identity_store=identity_store,
+                store=store,
+                controller=StubController(),  # type: ignore[arg-type]
+                bootstrap_identity={},
+                poller_enabled=True,
+                owner_pairing_enabled=False,
+                activation_confirmation="HERMES_POLLER_STOPPED",
+                max_media_bytes=1024,
+            )
+
+            class ApiQrClient(StubIlinkClient):
+                async def start(self) -> None:
+                    return None
+
+                async def create_bot_qr(self, _local_tokens: list[str]) -> dict:
+                    return {
+                        "qrcode": "api-member-qr-private-value",
+                        "qrcode_img_content": "api-member-qr-image",
+                    }
+
+                async def get_bot_qr_status(
+                    self,
+                    _qrcode: str,
+                    *,
+                    base_url: str | None = None,
+                    verify_code: str | None = None,
+                ) -> dict:
+                    if verify_code is None:
+                        return {"status": "need_verifycode"}
+                    return {"status": "wait"}
+
+            qr_client = ApiQrClient()
+            service._new_qr_client = lambda: qr_client  # type: ignore[method-assign]
+            service._render_qr_image = lambda target, content: (
+                target.parent.mkdir(parents=True, exist_ok=True),
+                target.write_bytes(content.encode("utf-8")),
+            )  # type: ignore[method-assign]
+
+            loop = asyncio.new_event_loop()
+            loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+            loop_thread.start()
+            server = create_server(
+                "127.0.0.1",
+                0,
+                service=service,
+                loop=loop,
+                attachment_api_token="a" * 32,
+            )
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                connection.request("GET", "/api/status")
+                response = connection.getresponse()
+                status = json.loads(response.read())
+                csrf = status["csrf_token"]
+                headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+
+                body = json.dumps(
+                    {
+                        "alias": "API 二维码成员",
+                        "revision": status["users"]["revision"],
+                        "request_id": "api-onboarding-start-01",
+                        "ttl_seconds": 900,
+                    }
+                )
+                connection.request("POST", "/api/onboarding/start", body, headers)
+                created_response = connection.getresponse()
+                created = json.loads(created_response.read())["result"]
+                self.assertEqual(created_response.status, 200)
+                self.assertIn("code", created)
+                self.assertRegex(created["session_short"], r"^OB-[A-Z2-7]{10}$")
+
+                connection.request("GET", "/api/onboarding/qr/image")
+                image_response = connection.getresponse()
+                self.assertEqual(image_response.status, 200)
+                self.assertEqual(image_response.read(), b"api-member-qr-image")
+
+                for _ in range(100):
+                    connection.request("GET", "/api/status")
+                    current_response = connection.getresponse()
+                    current_status = json.loads(current_response.read())
+                    if current_status["onboarding"]["qr"]["state"] == "need_verifycode":
+                        break
+                    threading.Event().wait(0.01)
+                self.assertEqual(current_status["onboarding"]["qr"]["state"], "need_verifycode")
+
+                verify_body = json.dumps({"verify_code": "2468"})
+                connection.request(
+                    "POST",
+                    f"/api/onboarding/{created['session_short']}/verify",
+                    verify_body,
+                    headers,
+                )
+                verify_response = connection.getresponse()
+                verify_document = json.loads(verify_response.read())
+                self.assertEqual(verify_response.status, 200)
+                self.assertEqual(verify_document["result"]["state"], "verifying")
+
+                connection.request("GET", "/api/status")
+                private_response = connection.getresponse()
+                private_status = json.loads(private_response.read())
+                encoded_status = json.dumps(private_status, ensure_ascii=False)
+                self.assertNotIn("fixture-owner", encoded_status)
+                self.assertNotIn("fixture-account", encoded_status)
+                self.assertNotIn("fixture-ilink-token", encoded_status)
+                self.assertNotIn(account_hash("fixture-account"), encoded_status)
+                self.assertNotIn("context_tokens", encoded_status)
+                self.assertNotIn("api-member-qr-private-value", encoded_status)
+                self.assertNotIn(created["code"], encoded_status)
+
+                cancel_body = json.dumps(
+                    {
+                        "revision": created["revision"],
+                        "request_id": "api-onboarding-cancel-01",
+                    }
+                )
+                connection.request(
+                    "POST",
+                    f"/api/onboarding/{created['session_short']}/cancel",
+                    cancel_body,
+                    headers,
+                )
+                cancel_response = connection.getresponse()
+                cancelled = json.loads(cancel_response.read())["result"]
+                self.assertEqual(cancel_response.status, 200)
+                self.assertEqual(cancelled["state"], "cancelled")
+                self.assertTrue(qr_client.closed)
+
+                connection.request(
+                    "POST",
+                    f"/api/onboarding/{created['session_short']}/cancel",
+                    cancel_body,
+                    headers,
+                )
+                replay_response = connection.getresponse()
+                replay = json.loads(replay_response.read())["result"]
+                self.assertEqual(replay_response.status, 200)
+                self.assertEqual(replay, cancelled)
+            finally:
+                connection.close()
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join(timeout=5)
                 loop.close()
 
 

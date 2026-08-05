@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.3.0
+
+- 将单一 iLink 身份升级为进程内多身份运行时：每个 ClawBot 独立 client、Token 锁、Poller、游标、context、发送锁、运行状态和故障隔离，共享同一 Controller/Codex。
+- 新增 additive `principal_id`、`ilink_identities`、`identity_bindings`、`onboarding_sessions` 以及入站/Remote Work 身份路由字段；旧 Owner conversation key、Thread、队列和 `active.json` 兼容镜像保持不变。
+- 入站消息使用 `identity_id + upstream_message_id` 域分隔幂等键；文字、媒体、Controller 结果、主动通知和 Remote Work 结果均按持久身份原路回复，禁止跨身份 fallback。
+- 新增成员独立 ClawBot onboarding：Owner 生成二维码和一次性接入码，扫码用户必须与发送接入码的用户一致；pairing-only 消息不进入 Controller，错误尝试超限、过期和取消会停止运行时并清理未完成凭据。
+- Owner 二维码只允许首次初始化或重新认证同一 ClawBot；已有 Owner 时扫码者必须是当前 Owner。Owner 转移要求目标成员已有 active 独立 ClawBot，并同步切换旧版 `active.json` 镜像。
+- Member 继续固定 `member_read_only`；`/work`、主动通知和 Owner 权限没有放宽。暂停、恢复、移除和 Token 冲突只影响目标身份。
+- Ingress 新增多身份摘要、ClawBot 列表、成员接入向导、验证码、取消和故障状态；API/HTML 只返回 `CB/WX/CV/TH/OB-*` 等脱敏短标识，不返回 Token、context、原始微信 ID 或账号哈希。
+- 新增 `max_active_identities` 配置，默认 5、范围 1～32；Docker 镜像安装 `python3-qrcode`，版本统一升级为 `0.3.0`。
+
 ## 0.2.3
 
 - Ingress 页面明确区分“全局机器人身份”和“用户级权限”，二维码登录不再呈现为某个微信用户的配置。

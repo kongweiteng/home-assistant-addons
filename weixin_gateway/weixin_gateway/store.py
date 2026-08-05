@@ -26,9 +26,16 @@ IDENTITY_FORMAT = "weixin-ilink-identity@1"
 OWNER_PAIRING_FORMAT = "weixin-owner-pairing@1"
 OWNER_PAIRING_TTL_SECONDS = 15 * 60
 MEMBER_INVITATION_TTL_SECONDS = 15 * 60
+ONBOARDING_TTL_SECONDS = 15 * 60
+MAX_ONBOARDING_ATTEMPTS = 5
 MAX_WEIXIN_USERS = 32
+DEFAULT_MAX_ACTIVE_IDENTITIES = 5
 USER_ROLES = frozenset({"owner", "member"})
 USER_STATES = frozenset({"active", "suspended", "revoked"})
+IDENTITY_STATES = frozenset({"active", "pending_pairing", "paused", "session_expired", "revoked"})
+IDENTITY_RUNTIME_STATES = frozenset(
+    {"disabled", "stopped", "starting", "pairing", "polling", "session_expired", "token_conflict", "error"}
+)
 
 
 def utc_now() -> str:
@@ -74,6 +81,23 @@ def conversation_key(user_id: str) -> str:
     return "sha256:" + hashlib.sha256(f"weixin:{user_id}".encode("utf-8")).hexdigest()
 
 
+def principal_conversation_key(principal_id: str) -> str:
+    return "sha256:" + hashlib.sha256(f"weixin-principal-v2:{principal_id}".encode("utf-8")).hexdigest()
+
+
+def identity_id(account_id: str) -> str:
+    return "ID-" + account_hash(account_id)[:32]
+
+
+def routed_message_id(identity_identifier: str, upstream_message_id: str) -> str:
+    digest = hashlib.sha256(f"{identity_identifier}\0{upstream_message_id}".encode("utf-8")).hexdigest()
+    return f"wx2-{digest}"
+
+
+def new_principal_id() -> str:
+    return "PR-" + secrets.token_hex(16)
+
+
 def re_fullmatch_short(prefix: str, value: str) -> bool:
     expected_prefix = f"{prefix}-"
     suffix = value[len(expected_prefix) :] if value.startswith(expected_prefix) else ""
@@ -92,12 +116,80 @@ class IdentityStore:
         self.active_path = self.accounts_dir / "active.json"
         self.owner_pairing_path = self.pairing_dir / "owner.json"
 
-    def save_identity(self, identity: dict[str, Any]) -> dict[str, Any]:
+    def save_identity(self, identity: dict[str, Any], *, make_active: bool = True) -> dict[str, Any]:
         normalized = self.validate_identity(identity)
         digest = account_hash(normalized["account_id"])
         atomic_json_write(self.accounts_dir / f"{digest}.json", normalized)
-        atomic_json_write(self.active_path, {"account_hash": digest, "updated_at": utc_now()})
+        if make_active:
+            atomic_json_write(self.active_path, {"account_hash": digest, "updated_at": utc_now()})
         return self.public_summary(normalized)
+
+    def set_active_identity(self, identity: dict[str, Any]) -> None:
+        normalized = self.validate_identity(identity)
+        digest = account_hash(normalized["account_id"])
+        path = self.accounts_dir / f"{digest}.json"
+        if path.is_symlink() or not path.is_file():
+            raise StoreError("identity_missing", "iLink 身份文件不存在", status=404)
+        atomic_json_write(self.active_path, {"account_hash": digest, "updated_at": utc_now()})
+
+    def active_account_hash(self) -> str | None:
+        if not self.active_path.is_file() or self.active_path.is_symlink():
+            return None
+        try:
+            document = json.loads(self.active_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        digest = document.get("account_hash") if isinstance(document, dict) else None
+        return digest if isinstance(digest, str) and len(digest) == 64 else None
+
+    def load_identity_by_hash(self, digest: str) -> dict[str, Any] | None:
+        if not isinstance(digest, str) or len(digest) != 64:
+            return None
+        path = self.accounts_dir / f"{digest}.json"
+        if path.is_symlink() or not path.is_file():
+            return None
+        try:
+            return self.validate_identity(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, StoreError):
+            return None
+
+    def load_all_identities(self) -> list[dict[str, Any]]:
+        identities: list[dict[str, Any]] = []
+        for path in sorted(self.accounts_dir.glob("*.json")):
+            if path.name == self.active_path.name or path.is_symlink() or not path.is_file():
+                continue
+            if not re.fullmatch(r"[a-f0-9]{64}\.json", path.name):
+                continue
+            loaded = self.load_identity_by_hash(path.stem)
+            if loaded is not None:
+                identities.append(loaded)
+        return identities
+
+    def remove_identity(self, identity: dict[str, Any]) -> None:
+        """Delete a non-owner credential file after a terminal revoke or failed pairing."""
+        normalized = self.validate_identity(identity)
+        digest = account_hash(normalized["account_id"])
+        if hmac.compare_digest(self.active_account_hash() or "", digest):
+            raise StoreError("owner_identity_delete_forbidden", "不能删除当前 Owner ClawBot 凭据", status=409)
+        path = self.accounts_dir / f"{digest}.json"
+        if path.is_symlink():
+            raise StoreError("identity_invalid", "身份文件不能是符号链接", status=500)
+        if path.is_file():
+            path.unlink()
+
+    def recent_tokens(self, limit: int = 10) -> list[str]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10:
+            raise StoreError("identity_token_limit_invalid", "本地 Token 列表上限无效")
+        identities = self.load_all_identities()
+        identities.sort(key=lambda item: str(item.get("saved_at") or ""))
+        tokens: list[str] = []
+        for identity in reversed(identities):
+            token = str(identity.get("token") or "").strip()
+            if token and token not in tokens:
+                tokens.append(token)
+            if len(tokens) >= limit:
+                break
+        return tokens
 
     def load_identity(self) -> dict[str, Any] | None:
         if not self.active_path.is_file() or self.active_path.is_symlink():
@@ -150,8 +242,13 @@ class IdentityStore:
         cursor = identity.get("get_updates_buf", "")
         if not isinstance(cursor, str) or len(cursor) > 1024 * 1024:
             raise StoreError("identity_invalid", "同步游标无效")
+        expected_identity_id = identity_id(account_id)
+        provided_identity_id = identity.get("identity_id")
+        if provided_identity_id not in {None, "", expected_identity_id}:
+            raise StoreError("identity_invalid", "identity_id 与 account_id 不匹配")
         return {
             "format_id": IDENTITY_FORMAT,
+            "identity_id": expected_identity_id,
             "account_id": account_id,
             "token": token,
             "base_url": validate_ilink_base_url(str(identity.get("base_url") or "https://ilinkai.weixin.qq.com")),
@@ -179,7 +276,7 @@ class IdentityStore:
     def set_cursor(self, identity: dict[str, Any], cursor: str) -> None:
         updated = dict(identity)
         updated["get_updates_buf"] = cursor
-        self.save_identity(updated)
+        self.save_identity(updated, make_active=self.active_account_hash() == account_hash(updated["account_id"]))
         identity["get_updates_buf"] = cursor
 
     def context(self, identity: dict[str, Any], user_id: str) -> str | None:
@@ -190,7 +287,7 @@ class IdentityStore:
         contexts = dict(updated.get("context_tokens", {}))
         contexts[user_id] = token
         updated["context_tokens"] = contexts
-        self.save_identity(updated)
+        self.save_identity(updated, make_active=self.active_account_hash() == account_hash(updated["account_id"]))
         identity["context_tokens"] = contexts
 
     def clear_context(self, identity: dict[str, Any], user_id: str) -> None:
@@ -198,14 +295,14 @@ class IdentityStore:
         contexts = dict(updated.get("context_tokens", {}))
         contexts.pop(user_id, None)
         updated["context_tokens"] = contexts
-        self.save_identity(updated)
+        self.save_identity(updated, make_active=self.active_account_hash() == account_hash(updated["account_id"]))
         identity["context_tokens"] = contexts
 
     def mirror_owner(self, identity: dict[str, Any], user_id: str) -> None:
         """Keep the legacy allowlist as a one-owner compatibility mirror."""
         updated = dict(identity)
         updated["allowed_user_ids"] = [user_id]
-        self.save_identity(updated)
+        self.save_identity(updated, make_active=True)
         identity.clear()
         identity.update(updated)
 
@@ -324,7 +421,14 @@ class IdentityStore:
             "size_bytes": len(ciphertext),
         }
 
-    def import_migration(self, package_path: str | Path, key_b64: str) -> dict[str, Any]:
+    def import_migration(
+        self,
+        package_path: str | Path,
+        key_b64: str,
+        *,
+        make_active: bool = True,
+        expected_account_id: str | None = None,
+    ) -> dict[str, Any]:
         path = self._migration_path(package_path)
         self.inspect_migration(path.name)
         try:
@@ -342,7 +446,16 @@ class IdentityStore:
             identity = json.loads(plaintext)
         except Exception as exc:
             raise StoreError("migration_decrypt_failed", "身份包解密或认证失败") from exc
-        summary = self.save_identity(identity)
+        normalized = self.validate_identity(identity)
+        if expected_account_id is not None and not hmac.compare_digest(
+            normalized["account_id"], expected_account_id
+        ):
+            raise StoreError(
+                "owner_identity_mismatch",
+                "迁移包只允许刷新当前 Owner ClawBot；新成员请使用成员接入流程。",
+                status=409,
+            )
+        summary = self.save_identity(normalized, make_active=make_active)
         return {"state": "credential_ready", **summary}
 
     @staticmethod
@@ -537,6 +650,52 @@ class GatewayStore:
                     ON weixin_users(role) WHERE role='owner';
                 CREATE INDEX IF NOT EXISTS weixin_users_status_idx
                     ON weixin_users(status, role, updated_at);
+                CREATE TABLE IF NOT EXISTS ilink_identities (
+                    identity_id TEXT PRIMARY KEY,
+                    account_hash TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL CHECK(state IN ('active','pending_pairing','paused','session_expired','revoked')),
+                    runtime_state TEXT NOT NULL DEFAULT 'stopped',
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_seen_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ilink_identities_state_idx
+                    ON ilink_identities(state, updated_at);
+                CREATE TABLE IF NOT EXISTS identity_bindings (
+                    identity_id TEXT NOT NULL,
+                    principal_id TEXT NOT NULL UNIQUE,
+                    private_user_id TEXT NOT NULL,
+                    binding_type TEXT NOT NULL CHECK(binding_type IN ('primary','legacy_shared')),
+                    state TEXT NOT NULL CHECK(state IN ('active','suspended','revoked')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(identity_id,principal_id),
+                    FOREIGN KEY(identity_id) REFERENCES ilink_identities(identity_id)
+                );
+                CREATE INDEX IF NOT EXISTS identity_bindings_route_idx
+                    ON identity_bindings(identity_id,private_user_id,state);
+                CREATE TABLE IF NOT EXISTS onboarding_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    target_principal_id TEXT,
+                    requested_alias TEXT NOT NULL,
+                    code_salt TEXT NOT NULL,
+                    code_hash TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN (
+                        'waiting_qr','pending_pairing','claimed','expired','cancelled','failed','already_bound'
+                    )),
+                    identity_id TEXT,
+                    account_hash TEXT,
+                    scanned_private_user_id TEXT,
+                    qr_state TEXT,
+                    last_error TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS onboarding_sessions_state_idx
+                    ON onboarding_sessions(state, expires_at);
                 CREATE TABLE IF NOT EXISTS pairing_invitations (
                     invite_id TEXT PRIMARY KEY,
                     code_salt TEXT NOT NULL,
@@ -638,12 +797,47 @@ class GatewayStore:
                 "capability_profile",
                 "TEXT NOT NULL DEFAULT 'owner_legacy'",
             )
+            self._ensure_column(connection, "weixin_users", "principal_id", "TEXT")
+            self._ensure_column(connection, "inbound_messages", "identity_id", "TEXT")
+            self._ensure_column(connection, "inbound_messages", "principal_id", "TEXT")
+            self._ensure_column(connection, "inbound_messages", "upstream_message_id", "TEXT")
+            self._ensure_column(connection, "remote_work_tasks", "identity_id", "TEXT")
+            self._ensure_column(connection, "remote_work_tasks", "principal_id", "TEXT")
+            self._ensure_column(connection, "onboarding_sessions", "qr_state", "TEXT")
+            self._ensure_column(connection, "onboarding_sessions", "last_error", "TEXT")
+            self._backfill_principal_ids(connection)
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS weixin_users_principal_idx ON weixin_users(principal_id)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS inbound_identity_message_idx "
+                "ON inbound_messages(identity_id,upstream_message_id) "
+                "WHERE identity_id IS NOT NULL AND upstream_message_id IS NOT NULL"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS identity_bindings_sender_idx "
+                "ON identity_bindings(identity_id,private_user_id)"
+            )
 
     @staticmethod
     def _ensure_column(connection: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    @staticmethod
+    def _backfill_principal_ids(connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            "SELECT user_hash FROM weixin_users WHERE principal_id IS NULL OR principal_id=''"
+        ).fetchall()
+        for row in rows:
+            principal_id_value = "PR-" + hashlib.sha256(
+                f"weixin-principal-legacy:{row['user_hash']}".encode("utf-8")
+            ).hexdigest()[:32]
+            connection.execute(
+                "UPDATE weixin_users SET principal_id=? WHERE user_hash=?",
+                (principal_id_value, row["user_hash"]),
+            )
 
     def short_id(self, prefix: str, value: str) -> str:
         digest = hmac.new(self.display_secret, f"{prefix}:{value}".encode("utf-8"), hashlib.sha256).digest()
@@ -741,9 +935,12 @@ class GatewayStore:
             revision = self._next_users_revision(connection)
             digest = user_hash(owner_id)
             key = conversation_key(owner_id)
+            principal_id_value = "PR-" + hashlib.sha256(
+                f"weixin-principal-legacy:{digest}".encode("utf-8")
+            ).hexdigest()[:32]
             connection.execute(
-                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at) VALUES (?,?,?,?,?,'active',?,?,?,NULL)",
-                (digest, owner_id, key, "管理员", "owner", revision, now, now),
+                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at,principal_id) VALUES (?,?,?,?,?,'active',?,?,?,NULL,?)",
+                (digest, owner_id, key, "管理员", "owner", revision, now, now, principal_id_value),
             )
             connection.execute(
                 "INSERT INTO conversation_links(user_hash,conversation_short) VALUES (?,?)",
@@ -800,6 +997,741 @@ class GatewayStore:
             if len(rows) != 1:
                 raise StoreError("notification_owner_unavailable", "微信通知要求精确绑定一个 active owner", status=409)
             return self._private_user_document(rows[0])
+
+    @staticmethod
+    def _validate_identity_reference(identity_identifier: str, account_digest: str) -> None:
+        if not isinstance(account_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", account_digest):
+            raise StoreError("identity_invalid", "account_hash 无效")
+        if (
+            not isinstance(identity_identifier, str)
+            or not re.fullmatch(r"ID-[a-f0-9]{32}", identity_identifier)
+            or identity_identifier != f"ID-{account_digest[:32]}"
+        ):
+            raise StoreError("identity_invalid", "identity_id 无效")
+
+    def migrate_legacy_identity(self, *, identity_identifier: str, account_digest: str) -> dict[str, Any]:
+        """Register the current active identity without changing existing principals or conversations."""
+        self._validate_identity_reference(identity_identifier, account_digest)
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            duplicate = connection.execute(
+                "SELECT identity_id FROM ilink_identities WHERE account_hash=?",
+                (account_digest,),
+            ).fetchone()
+            if duplicate is not None and duplicate["identity_id"] != identity_identifier:
+                raise StoreError("identity_already_bound", "该 ClawBot 身份已经接入", status=409)
+            connection.execute(
+                """
+                INSERT INTO ilink_identities(identity_id,account_hash,state,runtime_state,created_at,updated_at)
+                VALUES (?,?,'active','stopped',?,?)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    account_hash=excluded.account_hash,
+                    state=CASE WHEN ilink_identities.state='revoked' THEN ilink_identities.state ELSE 'active' END,
+                    updated_at=excluded.updated_at
+                """,
+                (identity_identifier, account_digest, now, now),
+            )
+            users = connection.execute("SELECT * FROM weixin_users ORDER BY created_at").fetchall()
+            for row in users:
+                binding_type = "primary" if row["role"] == "owner" else "legacy_shared"
+                connection.execute(
+                    """
+                    INSERT INTO identity_bindings(
+                        identity_id,principal_id,private_user_id,binding_type,state,created_at,updated_at
+                    ) VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(principal_id) DO UPDATE SET
+                        identity_id=CASE
+                            WHEN identity_bindings.binding_type='primary' THEN identity_bindings.identity_id
+                            ELSE excluded.identity_id
+                        END,
+                        private_user_id=CASE
+                            WHEN identity_bindings.binding_type='primary' THEN identity_bindings.private_user_id
+                            ELSE excluded.private_user_id
+                        END,
+                        binding_type=CASE
+                            WHEN identity_bindings.binding_type='primary' THEN identity_bindings.binding_type
+                            ELSE excluded.binding_type
+                        END,
+                        state=CASE
+                            WHEN identity_bindings.state='revoked' THEN identity_bindings.state
+                            WHEN identity_bindings.binding_type='primary' THEN identity_bindings.state
+                            ELSE excluded.state
+                        END,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        identity_identifier,
+                        row["principal_id"],
+                        row["private_user_id"],
+                        binding_type,
+                        "active" if row["status"] == "active" else row["status"],
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE inbound_messages
+                    SET identity_id=COALESCE(identity_id,?),
+                        principal_id=COALESCE(principal_id,?),
+                        upstream_message_id=COALESCE(upstream_message_id,message_id)
+                    WHERE sender_id=?
+                    """,
+                    (identity_identifier, row["principal_id"], row["private_user_id"]),
+                )
+            return {
+                "identity_id": identity_identifier,
+                "account_hash": account_digest,
+                "bound_principals": len(users),
+            }
+
+    def register_pending_identity(self, *, identity_identifier: str, account_digest: str) -> dict[str, Any]:
+        self._validate_identity_reference(identity_identifier, account_digest)
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM ilink_identities WHERE account_hash=?",
+                (account_digest,),
+            ).fetchone()
+            if existing is not None and existing["identity_id"] != identity_identifier and existing["state"] != "revoked":
+                raise StoreError("identity_already_bound", "该 ClawBot 身份已经接入", status=409)
+            connection.execute(
+                """
+                INSERT INTO ilink_identities(identity_id,account_hash,state,runtime_state,created_at,updated_at)
+                VALUES (?,?,'pending_pairing','stopped',?,?)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    account_hash=excluded.account_hash,state='pending_pairing',last_error=NULL,updated_at=excluded.updated_at
+                """,
+                (identity_identifier, account_digest, now, now),
+            )
+        return self.identity_record(identity_identifier)
+
+    def identity_record(self, identity_identifier: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM ilink_identities WHERE identity_id=?",
+                (identity_identifier,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("identity_not_found", "ClawBot 身份不存在", status=404)
+            return dict(row)
+
+    def identity_records(self, *, include_revoked: bool = False) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            where = "" if include_revoked else "WHERE state!='revoked'"
+            rows = connection.execute(
+                f"SELECT * FROM ilink_identities {where} ORDER BY created_at"
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def set_identity_runtime_state(
+        self,
+        identity_identifier: str,
+        runtime_state: str,
+        *,
+        error_code: str | None = None,
+        identity_state: str | None = None,
+    ) -> None:
+        if runtime_state not in IDENTITY_RUNTIME_STATES:
+            raise StoreError("identity_runtime_state_invalid", "ClawBot 运行状态无效")
+        if identity_state is not None and identity_state not in IDENTITY_STATES:
+            raise StoreError("identity_state_invalid", "ClawBot 身份状态无效")
+        with self._connect() as connection:
+            changed = connection.execute(
+                """
+                UPDATE ilink_identities
+                SET runtime_state=?,last_error=?,state=COALESCE(?,state),updated_at=?,
+                    last_seen_at=CASE WHEN ?='polling' THEN ? ELSE last_seen_at END
+                WHERE identity_id=?
+                """,
+                (runtime_state, error_code, identity_state, utc_now(), runtime_state, utc_now(), identity_identifier),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("identity_not_found", "ClawBot 身份不存在", status=404)
+
+    def user_by_identity_sender(self, identity_identifier: str, private_user_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT u.* FROM identity_bindings b
+                JOIN weixin_users u ON u.principal_id=b.principal_id
+                WHERE b.identity_id=? AND b.private_user_id=? AND b.state='active'
+                """,
+                (identity_identifier, private_user_id),
+            ).fetchone()
+            return None if row is None else self._private_user_document(row)
+
+    def identity_route_for_principal(
+        self,
+        principal_id_value: str,
+        *,
+        include_inactive: bool = False,
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            binding_filter = "" if include_inactive else "AND b.state='active'"
+            row = connection.execute(
+                f"""
+                SELECT i.*,b.private_user_id,b.binding_type,b.state AS binding_state
+                FROM identity_bindings b JOIN ilink_identities i ON i.identity_id=b.identity_id
+                WHERE b.principal_id=? {binding_filter}
+                """,
+                (principal_id_value,),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def owner_identity_route(self) -> dict[str, Any]:
+        owner = self.active_owner()
+        route = self.identity_route_for_principal(owner["principal_id"])
+        if route is None or route["binding_state"] != "active" or route["state"] == "revoked":
+            raise StoreError("notification_owner_identity_unavailable", "当前 Owner 的 ClawBot 身份不可用", status=409)
+        return {**route, "principal": owner}
+
+    def list_identities(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT i.*,u.user_hash,u.alias,u.role,u.status,b.binding_type,b.private_user_id
+                FROM ilink_identities i
+                LEFT JOIN identity_bindings b ON b.identity_id=i.identity_id AND b.state!='revoked'
+                LEFT JOIN weixin_users u ON u.principal_id=b.principal_id
+                WHERE i.state!='revoked'
+                ORDER BY CASE WHEN u.role='owner' THEN 0 ELSE 1 END,i.created_at
+                """
+            ).fetchall()
+            identities: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                document = identities.setdefault(
+                    row["identity_id"],
+                    {
+                        "identity_short": self.short_id("CB", row["identity_id"]),
+                        "state": row["state"],
+                        "runtime_state": row["runtime_state"],
+                        "last_error": row["last_error"],
+                        "last_seen_at": row["last_seen_at"],
+                        "bindings": [],
+                    },
+                )
+                if row["user_hash"] is not None:
+                    document["bindings"].append(
+                        {
+                            "wx_short": self.short_id("WX", row["user_hash"]),
+                            "alias": row["alias"],
+                            "role": row["role"],
+                            "status": row["status"],
+                            "binding_type": row["binding_type"],
+                        }
+                    )
+            return {
+                "identities": list(identities.values()),
+                "limits": {
+                    "max_users": MAX_WEIXIN_USERS,
+                    "max_active_identities": DEFAULT_MAX_ACTIVE_IDENTITIES,
+                },
+            }
+
+    def create_onboarding_session(
+        self,
+        *,
+        expected_revision: int,
+        request_id: str,
+        alias: str,
+        target_wx_short: str | None = None,
+        ttl_seconds: int = ONBOARDING_TTL_SECONDS,
+        max_active_identities: int = DEFAULT_MAX_ACTIVE_IDENTITIES,
+    ) -> dict[str, Any]:
+        clean_alias = alias.strip()
+        if not 1 <= len(clean_alias) <= 40 or any(ord(character) < 32 for character in clean_alias):
+            raise StoreError("alias_invalid", "别名长度必须为 1 到 40 个可见字符")
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or not 60 <= ttl_seconds <= 3600:
+            raise StoreError("onboarding_ttl_invalid", "成员接入有效期必须在 60 到 3600 秒之间")
+        if not isinstance(max_active_identities, int) or not 1 <= max_active_identities <= MAX_WEIXIN_USERS:
+            raise StoreError("identity_limit_invalid", "活动 ClawBot 上限无效")
+        scope = "onboarding_session_create"
+        payload = {
+            "revision": expected_revision,
+            "alias": clean_alias,
+            "target_wx_short": target_wx_short,
+            "ttl_seconds": ttl_seconds,
+        }
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(connection, request_id=request_id, scope=scope, payload=payload)
+            if replay is not None:
+                return replay
+            self._assert_revision(connection, expected_revision)
+            self._expire_onboarding_sessions(connection)
+            owner_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM weixin_users WHERE role='owner' AND status='active'"
+                ).fetchone()[0]
+            )
+            if owner_count != 1:
+                raise StoreError("owner_required", "添加成员前必须存在唯一 active Owner", status=409)
+            pending = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM onboarding_sessions WHERE state IN ('waiting_qr','pending_pairing')"
+                ).fetchone()[0]
+            )
+            if pending:
+                raise StoreError("onboarding_in_progress", "已有成员接入会话正在进行", status=409)
+            identity_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM ilink_identities WHERE state!='revoked'"
+                ).fetchone()[0]
+            )
+            if identity_count >= max_active_identities:
+                raise StoreError("identity_limit_reached", "活动 ClawBot 数量已达到上限", status=409)
+            target_principal_id = None
+            if target_wx_short:
+                target = self._user_row_by_short(connection, target_wx_short)
+                if target["role"] != "member" or target["status"] != "active":
+                    raise StoreError("onboarding_target_invalid", "目标必须是 active Member", status=409)
+                bound = connection.execute(
+                    "SELECT binding_type FROM identity_bindings WHERE principal_id=? AND state='active'",
+                    (target["principal_id"],),
+                ).fetchone()
+                if bound is not None and bound["binding_type"] != "legacy_shared":
+                    raise StoreError("identity_already_bound", "该成员已经绑定 ClawBot", status=409)
+                target_principal_id = target["principal_id"]
+                clean_alias = target["alias"]
+            elif int(connection.execute("SELECT COUNT(*) FROM weixin_users WHERE status!='revoked'").fetchone()[0]) >= MAX_WEIXIN_USERS:
+                raise StoreError("user_limit_reached", "微信用户数量已达到上限", status=409)
+            now_dt = datetime.now(timezone.utc)
+            now = now_dt.isoformat()
+            code = "接入-CODEX-" + secrets.token_hex(16).upper()
+            salt = secrets.token_bytes(16)
+            session_id = secrets.token_urlsafe(24)
+            expires_at = (now_dt + timedelta(seconds=ttl_seconds)).isoformat()
+            connection.execute(
+                """
+                INSERT INTO onboarding_sessions(
+                    session_id,target_principal_id,requested_alias,code_salt,code_hash,state,
+                    qr_state,expires_at,created_at,updated_at
+                ) VALUES (?,?,?,?,?,'waiting_qr','waiting',?,?,?)
+                """,
+                (
+                    session_id,
+                    target_principal_id,
+                    clean_alias,
+                    base64.urlsafe_b64encode(salt).decode("ascii"),
+                    hashlib.sha256(salt + code.encode("utf-8")).hexdigest(),
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+            revision = self._next_users_revision(connection)
+            response = {
+                "state": "created_code_already_shown",
+                "session_short": self.short_id("OB", session_id),
+                "expires_at": expires_at,
+                "revision": revision,
+            }
+            self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=response)
+            return {**response, "state": "waiting_qr", "code": code, "session_id": session_id}
+
+    def onboarding_session(self, session_short: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._expire_onboarding_sessions(connection)
+            return dict(self._onboarding_by_short(connection, session_short))
+
+    def onboarding_session_by_id(self, session_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            self._expire_onboarding_sessions(connection)
+            row = connection.execute(
+                "SELECT * FROM onboarding_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def pending_onboarding_for_identity(self, identity_identifier: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            self._expire_onboarding_sessions(connection)
+            row = connection.execute(
+                "SELECT * FROM onboarding_sessions WHERE identity_id=? AND state='pending_pairing'",
+                (identity_identifier,),
+            ).fetchone()
+            return None if row is None else dict(row)
+
+    def set_onboarding_qr_state(
+        self,
+        *,
+        session_id: str,
+        qr_state: str,
+        error_code: str | None = None,
+        terminal_state: str | None = None,
+    ) -> None:
+        allowed_qr_states = {
+            "waiting",
+            "scanned",
+            "need_verifycode",
+            "verify_code_blocked",
+            "redirecting",
+            "confirmed",
+            "expired",
+            "cancelled",
+            "failed",
+            "already_bound",
+        }
+        if qr_state not in allowed_qr_states:
+            raise StoreError("onboarding_qr_state_invalid", "二维码状态无效")
+        if terminal_state is not None and terminal_state not in {
+            "expired",
+            "cancelled",
+            "failed",
+            "already_bound",
+        }:
+            raise StoreError("onboarding_state_invalid", "成员接入终态无效")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state FROM onboarding_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("onboarding_not_found", "成员接入会话不存在", status=404)
+            if row["state"] not in {"waiting_qr", "pending_pairing"}:
+                return
+            next_state = terminal_state or row["state"]
+            now = utc_now()
+            connection.execute(
+                "UPDATE onboarding_sessions SET state=?,qr_state=?,last_error=?,updated_at=? WHERE session_id=?",
+                (next_state, qr_state, error_code, now, session_id),
+            )
+            if terminal_state is not None:
+                connection.execute(
+                    "UPDATE ilink_identities SET state='revoked',runtime_state='stopped',last_error=?,updated_at=? "
+                    "WHERE identity_id=(SELECT identity_id FROM onboarding_sessions WHERE session_id=?) "
+                    "AND state='pending_pairing'",
+                    (error_code, now, session_id),
+                )
+
+    def attach_onboarding_identity(
+        self,
+        *,
+        session_id: str,
+        identity_identifier: str,
+        account_digest: str,
+        scanned_private_user_id: str,
+    ) -> dict[str, Any]:
+        if not scanned_private_user_id:
+            raise StoreError("onboarding_sender_missing", "扫码用户身份缺失", status=409)
+        self._validate_identity_reference(identity_identifier, account_digest)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_onboarding_sessions(connection)
+            row = connection.execute(
+                "SELECT * FROM onboarding_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None or row["state"] != "waiting_qr":
+                raise StoreError("onboarding_not_waiting", "成员接入会话已不可使用", status=409)
+            duplicate = connection.execute(
+                "SELECT principal_id,binding_type FROM identity_bindings WHERE private_user_id=? AND state='active'",
+                (scanned_private_user_id,),
+            ).fetchone()
+            duplicate_is_target_legacy = bool(
+                duplicate is not None
+                and row["target_principal_id"]
+                and duplicate["principal_id"] == row["target_principal_id"]
+                and duplicate["binding_type"] == "legacy_shared"
+            )
+            if duplicate is not None and not duplicate_is_target_legacy:
+                raise StoreError("identity_already_bound", "该微信用户已经绑定 ClawBot", status=409)
+            existing_identity = connection.execute(
+                "SELECT * FROM ilink_identities WHERE account_hash=? AND state!='revoked'",
+                (account_digest,),
+            ).fetchone()
+            if existing_identity is not None and existing_identity["identity_id"] != identity_identifier:
+                raise StoreError("identity_already_bound", "该 ClawBot 身份已经接入", status=409)
+            now = utc_now()
+            connection.execute(
+                """
+                INSERT INTO ilink_identities(identity_id,account_hash,state,runtime_state,created_at,updated_at)
+                VALUES (?,?,'pending_pairing','stopped',?,?)
+                ON CONFLICT(identity_id) DO UPDATE SET
+                    account_hash=excluded.account_hash,state='pending_pairing',last_error=NULL,updated_at=excluded.updated_at
+                """,
+                (identity_identifier, account_digest, now, now),
+            )
+            connection.execute(
+                """
+                UPDATE onboarding_sessions
+                SET state='pending_pairing',identity_id=?,account_hash=?,scanned_private_user_id=?,
+                    qr_state='confirmed',last_error=NULL,updated_at=?
+                WHERE session_id=? AND state='waiting_qr'
+                """,
+                (identity_identifier, account_digest, scanned_private_user_id, now, session_id),
+            )
+            return {
+                "state": "pending_pairing",
+                "session_short": self.short_id("OB", session_id),
+                "identity_short": self.short_id("CB", identity_identifier),
+                "expires_at": row["expires_at"],
+            }
+
+    def claim_onboarding(
+        self,
+        *,
+        identity_identifier: str,
+        private_user_id: str,
+        text: str,
+    ) -> dict[str, Any] | None:
+        if not private_user_id or not text:
+            return None
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_onboarding_sessions(connection)
+            session = connection.execute(
+                "SELECT * FROM onboarding_sessions WHERE identity_id=? AND state='pending_pairing'",
+                (identity_identifier,),
+            ).fetchone()
+            if session is None:
+                return None
+            if not hmac.compare_digest(str(session["scanned_private_user_id"]), private_user_id):
+                return None
+            try:
+                salt = base64.urlsafe_b64decode(session["code_salt"].encode("ascii"))
+            except Exception:
+                connection.execute(
+                    "UPDATE onboarding_sessions SET state='failed',updated_at=? WHERE session_id=?",
+                    (now, session["session_id"]),
+                )
+                return None
+            actual = hashlib.sha256(salt + text.strip().encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(actual, session["code_hash"]):
+                attempts = int(session["attempts"]) + 1
+                state = "failed" if attempts >= MAX_ONBOARDING_ATTEMPTS else "pending_pairing"
+                connection.execute(
+                    "UPDATE onboarding_sessions SET attempts=?,state=?,updated_at=? WHERE session_id=?",
+                    (attempts, state, now, session["session_id"]),
+                )
+                if state == "failed":
+                    connection.execute(
+                        "UPDATE ilink_identities SET state='revoked',runtime_state='error',last_error='pairing_attempts_exceeded',updated_at=? "
+                        "WHERE identity_id=? AND state='pending_pairing'",
+                        (now, identity_identifier),
+                    )
+                return None
+            principal_id_value = session["target_principal_id"]
+            if principal_id_value:
+                user = connection.execute(
+                    "SELECT * FROM weixin_users WHERE principal_id=?",
+                    (principal_id_value,),
+                ).fetchone()
+                if user is None or user["role"] != "member" or user["status"] != "active":
+                    raise StoreError("onboarding_target_invalid", "目标成员已不可绑定", status=409)
+                duplicate = connection.execute(
+                    "SELECT binding_type FROM identity_bindings WHERE principal_id=? AND state='active'",
+                    (principal_id_value,),
+                ).fetchone()
+                if duplicate is not None and duplicate["binding_type"] != "legacy_shared":
+                    raise StoreError("identity_already_bound", "该成员已经绑定 ClawBot", status=409)
+            else:
+                existing = connection.execute(
+                    "SELECT * FROM weixin_users WHERE private_user_id=? AND status!='revoked'",
+                    (private_user_id,),
+                ).fetchone()
+                if existing is not None:
+                    raise StoreError("identity_already_bound", "该微信用户已经接入", status=409)
+                count = int(
+                    connection.execute("SELECT COUNT(*) FROM weixin_users WHERE status!='revoked'").fetchone()[0]
+                )
+                if count >= MAX_WEIXIN_USERS:
+                    raise StoreError("user_limit_reached", "微信用户数量已达到上限", status=409)
+                principal_id_value = new_principal_id()
+                digest = user_hash(private_user_id)
+                key = principal_conversation_key(principal_id_value)
+                revision = self._next_users_revision(connection)
+                connection.execute(
+                    """
+                    INSERT INTO weixin_users(
+                        user_hash,private_user_id,conversation_key,alias,role,status,revision,
+                        created_at,updated_at,last_seen_at,principal_id
+                    ) VALUES (?,?,?,?,'member','active',?,?,?,?,?)
+                    """,
+                    (
+                        digest,
+                        private_user_id,
+                        key,
+                        session["requested_alias"],
+                        revision,
+                        now,
+                        now,
+                        now,
+                        principal_id_value,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO conversation_links(user_hash,conversation_short,last_seen_at) VALUES (?,?,?)",
+                    (digest, self.short_id("CV", key), now),
+                )
+                user = connection.execute(
+                    "SELECT * FROM weixin_users WHERE principal_id=?",
+                    (principal_id_value,),
+                ).fetchone()
+            assert user is not None
+            existing_binding = connection.execute(
+                "SELECT binding_type FROM identity_bindings WHERE principal_id=?",
+                (principal_id_value,),
+            ).fetchone()
+            if existing_binding is not None:
+                if existing_binding["binding_type"] != "legacy_shared":
+                    raise StoreError("identity_already_bound", "该成员已经绑定 ClawBot", status=409)
+                connection.execute(
+                    """
+                    UPDATE identity_bindings
+                    SET identity_id=?,private_user_id=?,binding_type='primary',state='active',updated_at=?
+                    WHERE principal_id=? AND binding_type='legacy_shared'
+                    """,
+                    (identity_identifier, private_user_id, now, principal_id_value),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO identity_bindings(
+                        identity_id,principal_id,private_user_id,binding_type,state,created_at,updated_at
+                    ) VALUES (?,?,?,'primary','active',?,?)
+                    """,
+                    (identity_identifier, principal_id_value, private_user_id, now, now),
+                )
+            connection.execute(
+                "UPDATE ilink_identities SET state='active',runtime_state='polling',last_error=NULL,updated_at=? WHERE identity_id=?",
+                (now, identity_identifier),
+            )
+            connection.execute(
+                "UPDATE onboarding_sessions SET state='claimed',updated_at=? WHERE session_id=? AND state='pending_pairing'",
+                (now, session["session_id"]),
+            )
+            if session["target_principal_id"]:
+                revision = self._next_users_revision(connection)
+                connection.execute(
+                    "UPDATE weixin_users SET revision=?,updated_at=?,last_seen_at=? WHERE principal_id=?",
+                    (revision, now, now, principal_id_value),
+                )
+                user = connection.execute(
+                    "SELECT * FROM weixin_users WHERE principal_id=?",
+                    (principal_id_value,),
+                ).fetchone()
+            result = self._private_user_document(user)
+            result["identity_id"] = identity_identifier
+            result["session_short"] = self.short_id("OB", session["session_id"])
+            return result
+
+    def cancel_onboarding_session(
+        self,
+        *,
+        session_short: str,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        scope = "onboarding_session_cancel"
+        payload = {"session_short": session_short, "revision": expected_revision}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(connection, request_id=request_id, scope=scope, payload=payload)
+            if replay is not None:
+                return replay
+            self._assert_revision(connection, expected_revision)
+            session = self._onboarding_by_short(connection, session_short)
+            if session["state"] not in {"waiting_qr", "pending_pairing"}:
+                raise StoreError("onboarding_not_waiting", "成员接入会话已不可取消", status=409)
+            now = utc_now()
+            connection.execute(
+                "UPDATE onboarding_sessions SET state='cancelled',updated_at=? WHERE session_id=?",
+                (now, session["session_id"]),
+            )
+            if session["identity_id"]:
+                connection.execute(
+                    "UPDATE ilink_identities SET state='revoked',runtime_state='stopped',updated_at=? WHERE identity_id=? AND state='pending_pairing'",
+                    (now, session["identity_id"]),
+                )
+            revision = self._next_users_revision(connection)
+            response = {"state": "cancelled", "session_short": session_short, "revision": revision}
+            self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=response)
+            return response
+
+    def onboarding_summary(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            self._expire_onboarding_sessions(connection)
+            counts = {
+                row["state"]: int(row["count"])
+                for row in connection.execute(
+                    "SELECT state,COUNT(*) AS count FROM onboarding_sessions GROUP BY state"
+                )
+            }
+            current = connection.execute(
+                """
+                SELECT * FROM onboarding_sessions
+                WHERE state IN ('waiting_qr','pending_pairing')
+                ORDER BY created_at LIMIT 1
+                """
+            ).fetchone()
+            return {
+                "counts": {
+                    state: counts.get(state, 0)
+                    for state in (
+                        "waiting_qr",
+                        "pending_pairing",
+                        "claimed",
+                        "expired",
+                        "cancelled",
+                        "failed",
+                        "already_bound",
+                    )
+                },
+                "current": None
+                if current is None
+                else {
+                    "session_short": self.short_id("OB", current["session_id"]),
+                    "state": current["state"],
+                    "qr_state": current["qr_state"],
+                    "last_error": current["last_error"],
+                    "expires_at": current["expires_at"],
+                },
+            }
+
+    def expire_onboarding_sessions(self) -> list[str]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = utc_now()
+            rows = connection.execute(
+                "SELECT identity_id FROM onboarding_sessions "
+                "WHERE state IN ('waiting_qr','pending_pairing') AND expires_at<=? AND identity_id IS NOT NULL",
+                (now,),
+            ).fetchall()
+            self._expire_onboarding_sessions(connection)
+            return [str(row["identity_id"]) for row in rows]
+
+    @staticmethod
+    def _expire_onboarding_sessions(connection: sqlite3.Connection) -> int:
+        now = utc_now()
+        rows = connection.execute(
+            "SELECT identity_id FROM onboarding_sessions WHERE state IN ('waiting_qr','pending_pairing') AND expires_at<=?",
+            (now,),
+        ).fetchall()
+        changed = connection.execute(
+            "UPDATE onboarding_sessions SET state='expired',updated_at=? WHERE state IN ('waiting_qr','pending_pairing') AND expires_at<=?",
+            (now, now),
+        ).rowcount
+        for row in rows:
+            if row["identity_id"]:
+                connection.execute(
+                    "UPDATE ilink_identities SET state='revoked',runtime_state='stopped',updated_at=? WHERE identity_id=? AND state='pending_pairing'",
+                    (now, row["identity_id"]),
+                )
+        return int(changed)
+
+    def _onboarding_by_short(self, connection: sqlite3.Connection, session_short: str) -> sqlite3.Row:
+        if not isinstance(session_short, str) or not re_fullmatch_short("OB", session_short):
+            raise StoreError("onboarding_not_found", "成员接入会话不存在", status=404)
+        for row in connection.execute("SELECT * FROM onboarding_sessions"):
+            if hmac.compare_digest(self.short_id("OB", row["session_id"]), session_short):
+                return row
+        raise StoreError("onboarding_not_found", "成员接入会话不存在", status=404)
 
     def list_users(self) -> dict[str, Any]:
         with self._connect() as connection:
@@ -961,14 +1893,32 @@ class GatewayStore:
                 raise StoreError("user_limit_reached", "微信用户数量已达到上限", status=409)
             revision = self._next_users_revision(connection)
             alias = f"成员 {count}"
+            principal_id_value = new_principal_id()
             connection.execute(
-                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at) VALUES (?,?,?,?,?,'active',?,?,?,?)",
-                (digest, user_id, key, alias, "member", revision, now, now, now),
+                "INSERT INTO weixin_users(user_hash,private_user_id,conversation_key,alias,role,status,revision,created_at,updated_at,last_seen_at,principal_id) VALUES (?,?,?,?,?,'active',?,?,?,?,?)",
+                (digest, user_id, key, alias, "member", revision, now, now, now, principal_id_value),
             )
             connection.execute(
                 "INSERT INTO conversation_links(user_hash,conversation_short,last_seen_at) VALUES (?,?,?)",
                 (digest, self.short_id("CV", key), now),
             )
+            shared_identity = connection.execute(
+                """
+                SELECT b.identity_id FROM identity_bindings b
+                JOIN weixin_users u ON u.principal_id=b.principal_id
+                JOIN ilink_identities i ON i.identity_id=b.identity_id
+                WHERE u.role='owner' AND u.status='active' AND b.state='active' AND i.state='active'
+                """
+            ).fetchone()
+            if shared_identity is not None:
+                connection.execute(
+                    """
+                    INSERT INTO identity_bindings(
+                        identity_id,principal_id,private_user_id,binding_type,state,created_at,updated_at
+                    ) VALUES (?,?,?,'legacy_shared','active',?,?)
+                    """,
+                    (shared_identity["identity_id"], principal_id_value, user_id, now, now),
+                )
             changed = connection.execute(
                 "UPDATE pairing_invitations SET state='claimed',claimed_user_hash=?,updated_at=? WHERE invite_id=? AND state='waiting'",
                 (digest, now, matched["invite_id"]),
@@ -1049,6 +1999,7 @@ class GatewayStore:
                     "UPDATE weixin_users SET status='suspended',updated_at=? WHERE user_hash=?",
                     (now, row["user_hash"]),
                 )
+                self._set_principal_binding_state(connection, row["principal_id"], "suspended", now)
             elif action == "resume":
                 if row["role"] != "member" or row["status"] != "suspended":
                     raise StoreError("user_state_conflict", "只有 suspended 成员可以恢复", status=409)
@@ -1056,6 +2007,7 @@ class GatewayStore:
                     "UPDATE weixin_users SET status='active',updated_at=? WHERE user_hash=?",
                     (now, row["user_hash"]),
                 )
+                self._set_principal_binding_state(connection, row["principal_id"], "active", now)
             else:
                 if row["status"] == "revoked":
                     raise StoreError("user_state_conflict", "成员已经移除", status=409)
@@ -1063,6 +2015,7 @@ class GatewayStore:
                     "UPDATE weixin_users SET status='revoked',revoked_at=?,updated_at=? WHERE user_hash=?",
                     (now, now, row["user_hash"]),
                 )
+                self._set_principal_binding_state(connection, row["principal_id"], "revoked", now)
             revision = self._next_users_revision(connection)
             connection.execute(
                 "UPDATE weixin_users SET revision=? WHERE user_hash=?",
@@ -1073,6 +2026,31 @@ class GatewayStore:
             response = {"revision": revision, "user": self._public_user_document(connection, updated)}
             self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=response)
             return response
+
+    @staticmethod
+    def _set_principal_binding_state(
+        connection: sqlite3.Connection,
+        principal_id_value: str,
+        state: str,
+        now: str,
+    ) -> None:
+        binding = connection.execute(
+            "SELECT identity_id,binding_type FROM identity_bindings WHERE principal_id=?",
+            (principal_id_value,),
+        ).fetchone()
+        if binding is None:
+            return
+        connection.execute(
+            "UPDATE identity_bindings SET state=?,updated_at=? WHERE principal_id=?",
+            (state, now, principal_id_value),
+        )
+        if binding["binding_type"] != "primary":
+            return
+        identity_state = {"active": "active", "suspended": "paused", "revoked": "revoked"}[state]
+        connection.execute(
+            "UPDATE ilink_identities SET state=?,runtime_state='stopped',updated_at=? WHERE identity_id=?",
+            (identity_state, now, binding["identity_id"]),
+        )
 
     def transfer_owner(
         self,
@@ -1127,37 +2105,63 @@ class GatewayStore:
                 "previous_owner": self.short_id("WX", old_owner["user_hash"]),
                 "owner_private_id": target["private_user_id"],
                 "previous_owner_private_id": old_owner["private_user_id"],
+                "owner_principal_id": target["principal_id"],
+                "previous_owner_principal_id": old_owner["principal_id"],
             }
-            stored_response = {key: value for key, value in response.items() if not key.endswith("private_id")}
+            stored_response = {
+                key: value
+                for key, value in response.items()
+                if not key.endswith("private_id") and not key.endswith("principal_id")
+            }
             self._record_mutation(connection, request_id=request_id, scope=scope, payload=payload, response=stored_response)
             return response
 
     def restore_owner_after_mirror_failure(
         self,
-        previous_owner_private_id: str,
-        target_private_id: str,
+        previous_owner_principal_id: str,
+        target_principal_id: str,
         request_id: str,
     ) -> None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            previous = user_hash(previous_owner_private_id)
-            target = user_hash(target_private_id)
-            connection.execute("UPDATE weixin_users SET role='member' WHERE user_hash=?", (target,))
-            connection.execute("UPDATE weixin_users SET role='owner' WHERE user_hash=?", (previous,))
+            connection.execute(
+                "UPDATE weixin_users SET role='member' WHERE principal_id=?",
+                (target_principal_id,),
+            )
+            connection.execute(
+                "UPDATE weixin_users SET role='owner' WHERE principal_id=?",
+                (previous_owner_principal_id,),
+            )
             revision = self._next_users_revision(connection)
             connection.execute(
-                "UPDATE weixin_users SET revision=?,updated_at=? WHERE user_hash IN (?,?)",
-                (revision, utc_now(), previous, target),
+                "UPDATE weixin_users SET revision=?,updated_at=? WHERE principal_id IN (?,?)",
+                (revision, utc_now(), previous_owner_principal_id, target_principal_id),
             )
             connection.execute("DELETE FROM admin_mutations WHERE request_id=?", (request_id,))
 
-    def touch_user(self, private_user_id: str) -> dict[str, Any] | None:
-        digest = user_hash(private_user_id)
+    def touch_user(
+        self,
+        private_user_id: str,
+        *,
+        identity_identifier: str | None = None,
+    ) -> dict[str, Any] | None:
         now = utc_now()
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            if identity_identifier is None:
+                digest = user_hash(private_user_id)
+                row = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT u.* FROM identity_bindings b
+                    JOIN weixin_users u ON u.principal_id=b.principal_id
+                    WHERE b.identity_id=? AND b.private_user_id=? AND b.state='active'
+                    """,
+                    (identity_identifier, private_user_id),
+                ).fetchone()
             if row is None:
                 return None
+            digest = row["user_hash"]
             connection.execute(
                 "UPDATE weixin_users SET last_seen_at=?,updated_at=? WHERE user_hash=?",
                 (now, now, digest),
@@ -1166,6 +2170,11 @@ class GatewayStore:
                 "UPDATE conversation_links SET last_seen_at=? WHERE user_hash=?",
                 (now, digest),
             )
+            if identity_identifier is not None:
+                connection.execute(
+                    "UPDATE identity_bindings SET updated_at=? WHERE identity_id=? AND principal_id=?",
+                    (now, identity_identifier, row["principal_id"]),
+                )
             updated = connection.execute("SELECT * FROM weixin_users WHERE user_hash=?", (digest,)).fetchone()
             assert updated is not None
             return self._private_user_document(updated)
@@ -1228,19 +2237,12 @@ class GatewayStore:
             return {state: counts.get(state, 0) for state in ("waiting", "claimed", "expired", "cancelled")}
 
     def reset_access_directory_for_identity_replacement(self) -> int:
-        """Fail closed and remove principals that belong to a different bot identity."""
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            now = utc_now()
-            connection.execute(
-                "UPDATE inbound_messages SET state='failed',error_code='identity_replaced',updated_at=? WHERE state IN ('pending_controller','controller_submitted')",
-                (now,),
-            )
-            connection.execute("DELETE FROM conversation_links")
-            connection.execute("DELETE FROM pairing_invitations")
-            connection.execute("DELETE FROM weixin_users")
-            connection.execute("DELETE FROM admin_mutations")
-            return self._next_users_revision(connection)
+        """Legacy destructive replacement is forbidden after multi-identity migration."""
+        raise StoreError(
+            "identity_replacement_forbidden",
+            "不能通过替换 ClawBot 身份清空用户目录；请使用成员接入或同账号重新认证。",
+            status=409,
+        )
 
     def _user_row_by_short(self, connection: sqlite3.Connection, wx_short: str) -> sqlite3.Row:
         if not isinstance(wx_short, str) or not re_fullmatch_short("WX", wx_short):
@@ -1260,6 +2262,15 @@ class GatewayStore:
 
     def _public_user_document(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         link = connection.execute("SELECT * FROM conversation_links WHERE user_hash=?", (row["user_hash"],)).fetchone()
+        binding = connection.execute(
+            """
+            SELECT b.binding_type,b.state AS binding_state,i.identity_id,
+                   i.state AS identity_state,i.runtime_state
+            FROM identity_bindings b JOIN ilink_identities i ON i.identity_id=b.identity_id
+            WHERE b.principal_id=?
+            """,
+            (row["principal_id"],),
+        ).fetchone()
         return {
             "wx_short": self.short_id("WX", row["user_hash"]),
             "alias": row["alias"],
@@ -1271,11 +2282,17 @@ class GatewayStore:
             "thread_short": None if link is None else link["thread_short"],
             "last_job_short": None if link is None else link["last_job_short"],
             "last_seen_at": row["last_seen_at"],
+            "identity_short": None if binding is None else self.short_id("CB", binding["identity_id"]),
+            "identity_state": None if binding is None else binding["identity_state"],
+            "identity_runtime_state": None if binding is None else binding["runtime_state"],
+            "binding_type": None if binding is None else binding["binding_type"],
+            "binding_state": None if binding is None else binding["binding_state"],
         }
 
     @staticmethod
     def _private_user_document(row: sqlite3.Row) -> dict[str, Any]:
         return {
+            "principal_id": row["principal_id"],
             "user_hash": row["user_hash"],
             "private_user_id": row["private_user_id"],
             "conversation_key": row["conversation_key"],
@@ -1297,6 +2314,8 @@ class GatewayStore:
         payload: dict[str, Any],
         sender_id: str,
         user_digest: str,
+        identity_identifier: str | None = None,
+        principal_id_value: str | None = None,
     ) -> dict[str, Any]:
         """Persist one request/control before MQTT publication."""
         if topic not in {"home/codex-work/v1/request", "home/codex-work/v1/control"}:
@@ -1335,8 +2354,8 @@ class GatewayStore:
                     """
                     INSERT INTO remote_work_tasks(
                         task_id,source_message_id,sender_id,user_hash,project_alias,instruction_digest,
-                        state,created_at,expires_at,updated_at
-                    ) VALUES (?,?,?,?,?,?,'waiting_mac',?,?,?)
+                        state,created_at,expires_at,updated_at,identity_id,principal_id
+                    ) VALUES (?,?,?,?,?,?,'waiting_mac',?,?,?,?,?)
                     """,
                     (
                         task_id,
@@ -1348,12 +2367,18 @@ class GatewayStore:
                         str(payload["created_at"]),
                         str(payload["expires_at"]),
                         now,
+                        identity_identifier,
+                        principal_id_value,
                     ),
                 )
             else:
                 if task is None:
                     raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
                 if not hmac.compare_digest(str(task["user_hash"]), user_digest):
+                    raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
+                if identity_identifier is not None and task["identity_id"] != identity_identifier:
+                    raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
+                if principal_id_value is not None and task["principal_id"] != principal_id_value:
                     raise StoreError("remote_work_task_not_found", "Remote Work task 不存在", status=404)
             connection.execute(
                 """
@@ -1520,7 +2545,8 @@ class GatewayStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT e.event_id,e.payload_json,t.task_id,t.sender_id,t.user_hash
+                SELECT e.event_id,e.payload_json,t.task_id,t.sender_id,t.user_hash,
+                       t.identity_id,t.principal_id
                 FROM remote_work_events e JOIN remote_work_tasks t ON t.task_id=e.task_id
                 WHERE e.reply_state='pending' ORDER BY e.created_at LIMIT ?
                 """,
@@ -1533,6 +2559,8 @@ class GatewayStore:
                     "task_id": row["task_id"],
                     "sender_id": row["sender_id"],
                     "user_hash": row["user_hash"],
+                    "identity_id": row["identity_id"],
+                    "principal_id": row["principal_id"],
                 }
                 for row in rows
             ]
@@ -1582,6 +2610,8 @@ class GatewayStore:
     def _remote_work_task_document(row: sqlite3.Row) -> dict[str, Any]:
         return {
             "task_id": row["task_id"],
+            "identity_id": row["identity_id"],
+            "principal_id": row["principal_id"],
             "project_alias": row["project_alias"],
             "state": row["state"],
             "run_seq": int(row["run_seq"]),
@@ -1604,12 +2634,39 @@ class GatewayStore:
         media: list[tuple[dict[str, Any], bytes]],
         user_digest: str | None = None,
         capability_profile: str = "owner_legacy",
+        identity_identifier: str | None = None,
+        principal_id_value: str | None = None,
+        upstream_message_id: str | None = None,
     ) -> dict[str, Any]:
         if capability_profile not in {"owner", "owner_legacy", "member_read_only"}:
             raise StoreError("capability_profile_invalid", "会话权限画像无效")
+        route_values = (identity_identifier, principal_id_value, upstream_message_id)
+        if any(value is not None for value in route_values) and not all(
+            isinstance(value, str) and value for value in route_values
+        ):
+            raise StoreError("message_route_invalid", "消息身份路由不完整")
         now = utc_now()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if identity_identifier is not None:
+                route = connection.execute(
+                    """
+                    SELECT u.user_hash FROM identity_bindings b
+                    JOIN ilink_identities i ON i.identity_id=b.identity_id
+                    JOIN weixin_users u ON u.principal_id=b.principal_id
+                    WHERE b.identity_id=? AND b.principal_id=? AND b.private_user_id=?
+                      AND b.state='active' AND i.state='active' AND u.status='active'
+                    """,
+                    (identity_identifier, principal_id_value, sender_id),
+                ).fetchone()
+                if route is None or (user_digest is not None and route["user_hash"] != user_digest):
+                    raise StoreError("message_route_invalid", "消息身份路由无效", status=409)
+                existing_route = connection.execute(
+                    "SELECT * FROM inbound_messages WHERE identity_id=? AND upstream_message_id=?",
+                    (identity_identifier, upstream_message_id),
+                ).fetchone()
+                if existing_route is not None:
+                    return self._message_document(existing_route)
             existing = connection.execute("SELECT * FROM inbound_messages WHERE message_id=?", (message_id,)).fetchone()
             if existing:
                 return self._message_document(existing)
@@ -1618,8 +2675,21 @@ class GatewayStore:
             created_targets: list[Path] = []
             try:
                 connection.execute(
-                    "INSERT INTO inbound_messages(message_id,sender_id,conversation_key,text,attachments_json,state,received_at,updated_at,user_hash,capability_profile) VALUES (?,?,?,?,?,'pending_controller',?,?,?,?)",
-                    (message_id, sender_id, conversation_key, text, "[]", now, now, user_digest, capability_profile),
+                    "INSERT INTO inbound_messages(message_id,sender_id,conversation_key,text,attachments_json,state,received_at,updated_at,user_hash,capability_profile,identity_id,principal_id,upstream_message_id) VALUES (?,?,?,?,?,'pending_controller',?,?,?,?,?,?,?)",
+                    (
+                        message_id,
+                        sender_id,
+                        conversation_key,
+                        text,
+                        "[]",
+                        now,
+                        now,
+                        user_digest,
+                        capability_profile,
+                        identity_identifier,
+                        principal_id_value,
+                        upstream_message_id,
+                    ),
                 )
                 for spec, content in media:
                     digest = hashlib.sha256(content).hexdigest()
@@ -1897,4 +2967,7 @@ class GatewayStore:
             "error_code": row["error_code"],
             "user_hash": row["user_hash"],
             "capability_profile": row["capability_profile"],
+            "identity_id": row["identity_id"],
+            "principal_id": row["principal_id"],
+            "upstream_message_id": row["upstream_message_id"],
         }

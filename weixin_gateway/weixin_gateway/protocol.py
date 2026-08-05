@@ -265,10 +265,18 @@ class IlinkClient:
         if self._owns_session and self.session is not None and not self.session.closed:
             await self.session.close()
 
-    async def api_post(self, endpoint: str, payload: dict[str, Any], *, timeout: float = 15.0) -> dict[str, Any]:
+    async def api_post(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float = 15.0,
+        include_base_info: bool = True,
+    ) -> dict[str, Any]:
         if self.session is None:
             await self.start()
-        body = canonical_json({**payload, "base_info": {"channel_version": CHANNEL_VERSION}})
+        document = {**payload, "base_info": {"channel_version": CHANNEL_VERSION}} if include_base_info else payload
+        body = canonical_json(document)
         url = f"{self.base_url}/{endpoint}"
 
         async def execute() -> dict[str, Any]:
@@ -323,6 +331,40 @@ class IlinkClient:
         except ProtocolError as exc:
             if exc.code == "ilink_timeout":
                 return {"ret": 0, "msgs": [], "get_updates_buf": sync_buf}
+            raise
+
+    async def create_bot_qr(self, local_tokens: list[str]) -> dict[str, Any]:
+        clean_tokens: list[str] = []
+        for token in local_tokens:
+            if not isinstance(token, str):
+                continue
+            value = token.strip()
+            if not value or value in clean_tokens:
+                continue
+            clean_tokens.append(value)
+            if len(clean_tokens) >= 10:
+                break
+        return await self.api_post(
+            f"{EP_GET_BOT_QR}?bot_type=3",
+            {"local_token_list": clean_tokens},
+            include_base_info=False,
+        )
+
+    async def get_bot_qr_status(
+        self,
+        qrcode_value: str,
+        *,
+        base_url: str | None = None,
+        verify_code: str | None = None,
+    ) -> dict[str, Any]:
+        endpoint = f"{EP_GET_QR_STATUS}?qrcode={quote(qrcode_value, safe='')}"
+        if verify_code:
+            endpoint += f"&verify_code={quote(verify_code, safe='')}"
+        try:
+            return await self.api_get(endpoint, timeout=35.0, base_url=base_url)
+        except ProtocolError as exc:
+            if exc.code == "ilink_timeout":
+                return {"status": "wait"}
             raise
 
     async def send_text(self, to_user_id: str, text: str, context_token: str | None, client_id: str) -> dict[str, Any]:

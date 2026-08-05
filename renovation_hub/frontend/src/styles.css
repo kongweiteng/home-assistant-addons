@@ -211,13 +211,22 @@ img { display: block; max-width: 100%; }
 .ledger-metrics .metric-card { min-height: 124px; }
 .ledger-table-card > header { border-bottom: 1px solid var(--line-soft); }
 .ledger-table { overflow-x: auto; }
-.ledger-header, .ledger-row { min-width: 900px; display: grid; grid-template-columns: 110px 1.4fr 1fr 1fr 120px 120px; align-items: center; gap: 12px; padding: 0 16px; }
+.ledger-header, .ledger-row { min-width: 980px; display: grid; grid-template-columns: 110px minmax(280px, 1.65fr) 0.9fr 1fr 120px 120px; align-items: center; gap: 12px; padding: 0 16px; }
 .ledger-header { min-height: 38px; color: var(--muted); background: #faf8f4; font-size: 10px; }
-.ledger-row { min-height: 61px; border-top: 1px solid var(--line-soft); font-size: 11px; }
+.ledger-row { min-height: 88px; border-top: 1px solid var(--line-soft); font-size: 11px; }
 .ledger-row time { color: #5c5650; }
 .ledger-row > div { min-width: 0; }
 .ledger-row > div > strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ledger-row > div > small { display: block; margin-top: 3px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-entry-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.ledger-entry-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transaction-kind { flex: 0 0 auto; padding: 2px 6px; border-radius: 3px; font-size: 8px; font-weight: 750; }
+.transaction-kind.payment { color: var(--blue); background: var(--blue-soft); }
+.transaction-kind.deposit { color: #8a641f; background: #f8eed8; }
+.transaction-kind.refund { color: var(--green); background: var(--green-soft); }
+.ledger-purpose { margin: 5px 0 0; display: -webkit-box; overflow: hidden; color: #5f5953; font-size: 10px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.ledger-purpose span { margin-right: 5px; color: var(--terracotta); font-size: 8px; font-weight: 800; }
+.ledger-merchant { display: block; margin-top: 4px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ledger-row > b { font-family: ui-monospace, monospace; text-align: right; }
 .refund-amount { color: var(--green); }
 .ledger-row.voided { opacity: 0.45; text-decoration: line-through; }

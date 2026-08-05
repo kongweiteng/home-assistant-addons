@@ -83,6 +83,8 @@ export interface Transaction {
   original_payment_id: string | null;
   status: "active" | "voided";
   tags: string[];
+  grouped_tags?: Record<string, string[]>;
+  ledger_format_version?: number;
   context: TransactionContext | null;
   version: number;
   created_at: string;

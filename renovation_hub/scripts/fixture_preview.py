@@ -138,20 +138,61 @@ def build_fixture(root: Path, addon_root: Path) -> tuple[RenovationHubStore, Med
                 }
             )["event"]
         )
+    v2_payment = store.add_payment(
+        {
+            "idempotency_key": key("payment-v2-door"),
+            "ledger_format_version": 2,
+            "amount_cents": 1_280_000,
+            "occurred_on": "2026-05-05",
+            "merchant": "TATA 木门",
+            "note": "购买客厅和卧室木门、门套及五金安装服务",
+            "grouped_tags": {"主题": ["门窗"], "专业": ["木作"], "性质": ["设备"]},
+            "project_id": project["id"],
+            "stage_id": stages[2]["id"],
+            "area_id": areas[1]["id"],
+        }
+    )["transaction"]
+    store.add_payment(
+        {
+            "idempotency_key": key("payment-v2-deposit"),
+            "ledger_format_version": 2,
+            "amount_cents": 500_000,
+            "occurred_on": "2026-05-06",
+            "merchant": "水电班组",
+            "note": "水电施工进场订金",
+            "is_deposit": True,
+            "grouped_tags": {"专业": ["水电"], "性质": ["人工"]},
+            "project_id": project["id"],
+            "stage_id": stages[2]["id"],
+            "area_id": areas[0]["id"],
+        }
+    )
+    store.add_refund(
+        {
+            "idempotency_key": key("refund-v2-door"),
+            "original_payment_id": v2_payment["id"],
+            "amount_cents": 80_000,
+            "occurred_on": "2026-05-07",
+            "note": "木门五金差价退回",
+            "project_id": project["id"],
+            "stage_id": stages[2]["id"],
+            "area_id": areas[1]["id"],
+        }
+    )
     payments = [
-        ("设计费用", 1_200_000, "设计工作室", ["设计"], stages[0], areas[1]),
-        ("拆除工程", 850_000, "施工队", ["人工"], stages[1], areas[4]),
-        ("水电工程", 2_860_000, "水电班组", ["人工", "材料"], stages[2], areas[0]),
-        ("其他费用", 355_000, "材料市场", ["辅材"], stages[2], areas[5]),
+        ("设计费用", 1_200_000, "设计工作室", "全屋平面方案与施工图设计费", ["设计"], stages[0], areas[1]),
+        ("拆除工程", 850_000, "施工队", "厨房、卫生间及过道拆除人工费", ["人工"], stages[1], areas[4]),
+        ("其他费用", 355_000, "材料市场", "水电辅材和现场保护材料", ["辅材"], stages[2], areas[5]),
     ]
-    for index, (category, amount, merchant, tags, stage, area) in enumerate(payments):
+    for index, (category, amount, merchant, note, tags, stage, area) in enumerate(payments):
         store.add_payment(
             {
-                "idempotency_key": key(f"payment-{index}"),
+                "idempotency_key": key(f"payment-v1-{index}"),
                 "amount_cents": amount,
-                "occurred_on": f"2026-05-{index + 5:02d}",
+                "occurred_on": f"2026-05-{index + 8:02d}",
                 "main_category": category,
                 "merchant": merchant,
+                "note": note,
                 "tags": tags,
                 "project_id": project["id"],
                 "stage_id": stage["id"],

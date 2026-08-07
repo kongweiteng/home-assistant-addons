@@ -37,6 +37,12 @@
 
 本地锁只保护当前 Gateway 进程，不能证明其他 Add-on 或主机没有使用同一 token；正式发布前仍需完成一次外部运行态清点，确认同一身份只有一个有效 Poller。
 
+## 等待回复时的输入状态
+
+进入 Controller 的普通消息会先调用 iLink getconfig 获取该用户的 typing_ticket，随后调用 sendtyping 的 status=1 显示“正在输入”。等待期间每 5 秒续发；最终文字/图片、失败、取消、会话过期、Poller 停止或身份移除时发送 status=2。
+
+绑定确认、/work 立即回复和被访问控制拒绝的消息不进入此状态链。ticket 只保留在当前 Gateway 进程内，错误只记录脱敏错误码，不阻塞最终回复。
+
 ## 身份迁移
 
 正式格式为 `weixin-ilink-identity@1`：ZIP 包含 `manifest.json` 和 AES-256-GCM 加密的 `identity.enc`。明文只包含 iLink 账号、token、固定服务地址、自身 ID、allowlist、同步游标和按会话保存的 `context_token`。

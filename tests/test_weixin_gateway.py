@@ -17,9 +17,11 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from weixin_gateway.protocol import (
+    EP_GET_CONFIG,
     EP_GET_BOT_QR,
     EP_GET_UPLOAD_URL,
     EP_SEND_MESSAGE,
+    EP_SEND_TYPING,
     IlinkClient,
     ProtocolError,
     SESSION_EXPIRED_ERRCODE,
@@ -107,6 +109,11 @@ class LegacySubmittingController(StubController):
         return {"state": "queued"}
 
 
+class CompletingController(LegacySubmittingController):
+    async def job(self, _job_id: str) -> dict:
+        return {"state": "completed", "result": "完成", "thread_short": "TH-ABCDEFGHIJ"}
+
+
 class CompatibleSubmittingController(LegacySubmittingController):
     capability_state = "compatible"
 
@@ -120,6 +127,7 @@ class StubIlinkClient:
         self.closed = False
         self.sent: list[dict] = []
         self.sent_media: list[dict] = []
+        self.typing_calls: list[dict] = []
         self.events: list[str] = []
 
     async def download_media(self, _spec: dict) -> bytes:
@@ -133,6 +141,19 @@ class StubIlinkClient:
                 "text": text,
                 "context_token": context_token,
                 "client_id": client_id,
+            }
+        )
+        return {"ret": 0}
+
+    async def get_config(self, ilink_user_id: str, context_token: str | None = None) -> dict:
+        return {"ret": 0, "typing_ticket": f"ticket-{ilink_user_id}"}
+
+    async def send_typing(self, ilink_user_id: str, typing_ticket: str, status: int) -> dict:
+        self.typing_calls.append(
+            {
+                "ilink_user_id": ilink_user_id,
+                "typing_ticket": typing_ticket,
+                "status": status,
             }
         )
         return {"ret": 0}
@@ -197,7 +218,41 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.3.1"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.3.2"', api_source)
+
+    def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
+        class TypingClient(IlinkClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    base_url="https://ilinkai.weixin.qq.com",
+                    cdn_base_url="https://novac2c.cdn.weixin.qq.com/c2c",
+                    token="fixture-token",
+                    max_media_bytes=1024,
+                )
+                self.calls: list[tuple[str, dict]] = []
+
+            async def api_post(self, endpoint: str, payload: dict) -> dict:
+                self.calls.append((endpoint, payload))
+                if endpoint == EP_GET_CONFIG:
+                    return {"ret": 0, "typing_ticket": "fixture-ticket"}
+                if endpoint == EP_SEND_TYPING:
+                    return {"ret": 0}
+                raise AssertionError(endpoint)
+
+        async def exercise() -> None:
+            client = TypingClient()
+            self.assertEqual(
+                await client.get_config("fixture-user", "fixture-context"),
+                {"ret": 0, "typing_ticket": "fixture-ticket"},
+            )
+            self.assertEqual(
+                await client.send_typing("fixture-user", "fixture-ticket", 1),
+                {"ret": 0},
+            )
+            self.assertEqual(client.calls[0], (EP_GET_CONFIG, {"ilink_user_id": "fixture-user", "context_token": "fixture-context"}))
+            self.assertEqual(client.calls[1], (EP_SEND_TYPING, {"ilink_user_id": "fixture-user", "typing_ticket": "fixture-ticket", "status": 1}))
+
+        asyncio.run(exercise())
 
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
@@ -1107,6 +1162,60 @@ class ServiceTests(unittest.TestCase):
         self.identity_store.save_identity(stored_secondary, make_active=False)
         service = self.service()
         return service, secondary_identity, member
+
+    def test_controller_delivery_shows_typing_until_final_reply(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        self.store.store_message(
+            message_id="typing-lifecycle-message",
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="等待处理",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        service.controller = CompletingController()  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        client = service.client
+        assert isinstance(client, StubIlinkClient)
+        self.assertEqual([call["status"] for call in client.typing_calls], [1, 2])
+        self.assertEqual(self.store.get_message("typing-lifecycle-message")["state"], "completed")
+        self.assertFalse(service._runtime_for_identity(None).typing_sessions)
+
+    def test_typing_session_expired_protocol_error_stops_keepalive_and_marks_runtime(self) -> None:
+        service = self.service()
+        runtime = service._runtime_for_identity(None)
+
+        class ExpiringTypingClient(StubIlinkClient):
+            async def send_typing(self, ilink_user_id: str, typing_ticket: str, status: int) -> dict:
+                if status == 1:
+                    raise ProtocolError("session_expired", "fixture session expired")
+                return await super().send_typing(ilink_user_id, typing_ticket, status)
+
+        client = ExpiringTypingClient()
+        service.client = client  # type: ignore[assignment]
+        runtime.client = client  # type: ignore[assignment]
+        message = {
+            "identity_id": runtime.identity_id,
+            "sender_id": "fixture-owner",
+            "message_id": "typing-session-expired",
+        }
+
+        self.run_async(service._start_typing(message))
+
+        self.assertEqual(runtime.poller_state, "session_expired")
+        self.assertEqual(runtime.last_error, "session_expired")
+        self.assertFalse(runtime.typing_sessions)
 
     def test_two_identity_ingest_and_replies_stay_on_original_runtime(self) -> None:
         service, secondary_identity, member = self.independent_member_service()

@@ -27,6 +27,8 @@ ILINK_APP_CLIENT_VERSION = (2 << 16) | (2 << 8)
 
 EP_GET_UPDATES = "ilink/bot/getupdates"
 EP_SEND_MESSAGE = "ilink/bot/sendmessage"
+EP_GET_CONFIG = "ilink/bot/getconfig"
+EP_SEND_TYPING = "ilink/bot/sendtyping"
 EP_GET_UPLOAD_URL = "ilink/bot/getuploadurl"
 EP_GET_BOT_QR = "ilink/bot/get_bot_qrcode"
 EP_GET_QR_STATUS = "ilink/bot/get_qrcode_status"
@@ -38,6 +40,8 @@ ITEM_FILE = 4
 ITEM_VIDEO = 5
 MSG_TYPE_BOT = 2
 MSG_STATE_FINISH = 2
+TYPING_STATUS_START = 1
+TYPING_STATUS_STOP = 2
 
 MEDIA_IMAGE = 1
 MEDIA_VIDEO = 2
@@ -381,6 +385,35 @@ class IlinkClient:
         if context_token:
             message["context_token"] = context_token
         return await self.api_post(EP_SEND_MESSAGE, {"msg": message})
+
+    async def get_config(self, ilink_user_id: str, context_token: str | None = None) -> dict[str, Any]:
+        if not ilink_user_id.strip():
+            raise ProtocolError("typing_user_invalid", "输入状态用户 ID 不能为空")
+        payload: dict[str, Any] = {"ilink_user_id": ilink_user_id}
+        if context_token:
+            payload["context_token"] = context_token
+        return await self.api_post(EP_GET_CONFIG, payload)
+
+    async def send_typing(
+        self,
+        ilink_user_id: str,
+        typing_ticket: str,
+        status: int,
+    ) -> dict[str, Any]:
+        if not ilink_user_id.strip():
+            raise ProtocolError("typing_user_invalid", "输入状态用户 ID 不能为空")
+        if not typing_ticket.strip():
+            raise ProtocolError("typing_ticket_missing", "输入状态 ticket 不能为空")
+        if status not in {TYPING_STATUS_START, TYPING_STATUS_STOP}:
+            raise ProtocolError("typing_status_invalid", "输入状态 status 无效")
+        return await self.api_post(
+            EP_SEND_TYPING,
+            {
+                "ilink_user_id": ilink_user_id,
+                "typing_ticket": typing_ticket,
+                "status": status,
+            },
+        )
 
     async def download_media(self, spec: dict[str, Any]) -> bytes:
         encrypted_query = spec.get("encrypt_query_param")

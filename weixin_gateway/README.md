@@ -66,6 +66,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - status/result 使用 `task_id + run_seq + sequence` 收敛乱序和重投；未知 task、旧序号和同序号不同正文均失败关闭。
 - 结果发送前再次核对发起者仍是 active owner；owner 已转移、暂停或撤销时抑制回传。
 - `0.3.1` 代码候选不代表真实多人微信已验收；真实二维码、多个手机、长期多 Poller、通知、媒体和 Remote Work 仍需独立 HAOS 发布与真机验收。
+- `0.3.2` 为进入 Controller 的消息增加 iLink “正在输入”状态；每用户缓存短期 typing_ticket，处理中续发，最终回复、失败、会话过期和身份停止时清理。
 
 ## 本地验证
 

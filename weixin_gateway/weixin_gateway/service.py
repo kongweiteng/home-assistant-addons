@@ -22,6 +22,8 @@ from .protocol import (
     ProtocolError,
     RATE_LIMIT_ERRCODE,
     SESSION_EXPIRED_ERRCODE,
+    TYPING_STATUS_START,
+    TYPING_STATUS_STOP,
     extract_message,
 )
 from .remote_work import (
@@ -40,6 +42,10 @@ from .store import (
     routed_message_id,
     utc_now,
 )
+
+
+TYPING_REFRESH_SECONDS = 5.0
+TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
 
 
 def validate_controller_url(value: str) -> str:
@@ -230,6 +236,14 @@ class ControllerClient:
 
 
 @dataclass
+class TypingSession:
+    sender_id: str
+    ticket: str
+    message_ids: set[str] = field(default_factory=set)
+    task: asyncio.Task[Any] | None = None
+
+
+@dataclass
 class IdentityRuntime:
     identity: dict[str, Any]
     client: IlinkClient
@@ -241,6 +255,9 @@ class IdentityRuntime:
     pairing_session_id: str | None = None
     outbound_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     poll_task: asyncio.Task[Any] | None = None
+    typing_tickets: dict[str, str] = field(default_factory=dict)
+    typing_ticket_fetched_at: dict[str, float] = field(default_factory=dict)
+    typing_sessions: dict[str, TypingSession] = field(default_factory=dict)
 
     @property
     def identity_id(self) -> str:
@@ -384,6 +401,8 @@ class GatewayService:
             self._tasks.append(runtime.poll_task)
 
     async def _stop_pollers_unlocked(self) -> None:
+        for runtime in self._runtimes.values():
+            await self._stop_all_typing(runtime)
         poll_tasks = {runtime.poll_task for runtime in self._runtimes.values() if runtime.poll_task is not None}
         for task in poll_tasks:
             if task is not None:
@@ -528,7 +547,189 @@ class GatewayService:
         if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
             self.last_message_at = runtime.last_message_at
 
+    @staticmethod
+    def _ilink_response_code(response: dict[str, Any]) -> int:
+        for key in ("ret", "errcode"):
+            value = response.get(key)
+            if value not in {None, 0}:
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return 1
+        return 0
+
+    def _accept_typing_error(self, runtime: IdentityRuntime, code: str) -> None:
+        if code == "session_expired":
+            try:
+                self._set_runtime_state(
+                    runtime,
+                    "session_expired",
+                    error_code="session_expired",
+                    identity_state="session_expired",
+                )
+            except StoreError:
+                runtime.last_error = "session_expired"
+            return
+        runtime.last_error = code
+
+    def _accept_typing_response(self, runtime: IdentityRuntime, response: dict[str, Any]) -> bool:
+        code = self._ilink_response_code(response)
+        if code == SESSION_EXPIRED_ERRCODE:
+            self._accept_typing_error(runtime, "session_expired")
+            return False
+        if code != 0:
+            runtime.last_error = "typing_send_failed"
+            return False
+        return True
+
+    async def _start_typing(self, message: dict[str, Any]) -> None:
+        """Best-effort start and keepalive for a Controller-bound conversation."""
+        try:
+            runtime = self._runtime_for_identity(message.get("identity_id"))
+        except StoreError:
+            return
+        if runtime.poller_state == "session_expired":
+            return
+        sender_id = str(message.get("sender_id") or "")
+        message_id = str(message.get("message_id") or "")
+        if not sender_id or not message_id:
+            return
+        existing = runtime.typing_sessions.get(sender_id)
+        if existing is not None:
+            existing.message_ids.add(message_id)
+            return
+        context_token = self.identity_store.context(runtime.identity, sender_id) or None
+        async with runtime.outbound_lock:
+            existing = runtime.typing_sessions.get(sender_id)
+            if existing is not None:
+                existing.message_ids.add(message_id)
+                return
+            ticket = runtime.typing_tickets.get(sender_id)
+            ticket_fetched_at = runtime.typing_ticket_fetched_at.get(sender_id, 0.0)
+            if ticket and time.monotonic() - ticket_fetched_at >= TYPING_TICKET_TTL_SECONDS:
+                ticket = None
+            try:
+                if not ticket:
+                    response = await runtime.client.get_config(sender_id, context_token)
+                    if not self._accept_typing_response(runtime, response):
+                        return
+                    ticket_value = response.get("typing_ticket")
+                    if not isinstance(ticket_value, str) or not ticket_value.strip():
+                        runtime.last_error = "typing_ticket_missing"
+                        return
+                    ticket = ticket_value.strip()
+                    runtime.typing_tickets[sender_id] = ticket
+                    runtime.typing_ticket_fetched_at[sender_id] = time.monotonic()
+                response = await runtime.client.send_typing(sender_id, ticket, TYPING_STATUS_START)
+            except ProtocolError as exc:
+                self._accept_typing_error(runtime, exc.code)
+                return
+            except Exception:
+                runtime.last_error = "typing_send_failed"
+                return
+            if not self._accept_typing_response(runtime, response):
+                return
+            session = TypingSession(sender_id=sender_id, ticket=ticket, message_ids={message_id})
+            runtime.typing_sessions[sender_id] = session
+            session.task = asyncio.create_task(
+                self._typing_keepalive(runtime, sender_id),
+                name=f"weixin-typing-{runtime.identity_id[-8:]}-{sender_id[-8:]}",
+            )
+
+    async def _typing_keepalive(self, runtime: IdentityRuntime, sender_id: str) -> None:
+        try:
+            while not self._stop.is_set():
+                await asyncio.sleep(TYPING_REFRESH_SECONDS)
+                async with runtime.outbound_lock:
+                    session = runtime.typing_sessions.get(sender_id)
+                    if session is None or not session.message_ids:
+                        return
+                    if runtime.poller_state == "session_expired":
+                        return
+                    try:
+                        response = await runtime.client.send_typing(
+                            sender_id,
+                            session.ticket,
+                            TYPING_STATUS_START,
+                        )
+                    except ProtocolError as exc:
+                        self._accept_typing_error(runtime, exc.code)
+                        if runtime.poller_state == "session_expired":
+                            return
+                        continue
+                    except Exception:
+                        runtime.last_error = "typing_send_failed"
+                        continue
+                    if not self._accept_typing_response(runtime, response) and runtime.poller_state == "session_expired":
+                        return
+        except asyncio.CancelledError:
+            return
+
+    async def _stop_typing_for_message(self, message: dict[str, Any]) -> None:
+        try:
+            runtime = self._runtime_for_identity(message.get("identity_id"))
+        except StoreError:
+            return
+        sender_id = str(message.get("sender_id") or "")
+        message_id = str(message.get("message_id") or "")
+        if not sender_id or not message_id:
+            return
+        async with runtime.outbound_lock:
+            session = runtime.typing_sessions.get(sender_id)
+            if session is None:
+                return
+            session.message_ids.discard(message_id)
+            if session.message_ids:
+                return
+            runtime.typing_sessions.pop(sender_id, None)
+            task = session.task
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+        async with runtime.outbound_lock:
+            if sender_id in runtime.typing_sessions or runtime.poller_state == "session_expired":
+                return
+            try:
+                response = await runtime.client.send_typing(sender_id, session.ticket, TYPING_STATUS_STOP)
+            except ProtocolError as exc:
+                self._accept_typing_error(runtime, exc.code)
+                return
+            except Exception:
+                return
+            self._accept_typing_response(runtime, response)
+
+    async def _stop_all_typing(self, runtime: IdentityRuntime) -> None:
+        for sender_id in list(runtime.typing_sessions):
+            async with runtime.outbound_lock:
+                session = runtime.typing_sessions.pop(sender_id, None)
+                if session is None:
+                    continue
+                task = session.task
+                if task is not None and task is not asyncio.current_task():
+                    task.cancel()
+            if task is not None and task is not asyncio.current_task():
+                await asyncio.gather(task, return_exceptions=True)
+            if runtime.poller_state == "session_expired":
+                continue
+            async with runtime.outbound_lock:
+                if sender_id in runtime.typing_sessions:
+                    continue
+                try:
+                    response = await runtime.client.send_typing(
+                        sender_id,
+                        session.ticket,
+                        TYPING_STATUS_STOP,
+                    )
+                except ProtocolError as exc:
+                    self._accept_typing_error(runtime, exc.code)
+                    continue
+                except Exception:
+                    continue
+                self._accept_typing_response(runtime, response)
+
     async def _stop_identity_runtime(self, runtime: IdentityRuntime) -> None:
+        await self._stop_all_typing(runtime)
         if runtime.poll_task is not None:
             runtime.poll_task.cancel()
             await asyncio.gather(runtime.poll_task, return_exceptions=True)
@@ -570,6 +771,7 @@ class GatewayService:
 
     async def _discard_identity_runtime(self, runtime: IdentityRuntime) -> None:
         """Stop a non-owner runtime and remove credentials that must not survive a terminal revoke."""
+        await self._stop_all_typing(runtime)
         if runtime.poll_task is not None and runtime.poll_task is not asyncio.current_task():
             runtime.poll_task.cancel()
             await asyncio.gather(runtime.poll_task, return_exceptions=True)
@@ -986,117 +1188,126 @@ class GatewayService:
             self.last_error = "member_pairing_confirmation_failed"
 
     async def _delivery_loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                await self._deliver_remote_work_replies()
-                if self.controller.configured:
-                    for message in self.store.pending_controller():
-                        payload = {
-                            "version": 1,
-                            "message_id": message["message_id"],
-                            "conversation_key": message["conversation_key"],
-                            "received_at": message["received_at"],
-                            "text": message["text"],
-                            "attachments": message["attachments"],
-                            "reply_capabilities": ["text", "image", "file"],
-                        }
-                        stored_profile = str(message.get("capability_profile") or "owner_legacy")
-                        try:
-                            incompatible = False
-                            async with self._authorization_lock:
-                                authorization = self.store.authorize_stored_message(
-                                    message.get("user_hash"), stored_profile
-                                )
-                                if not authorization["allowed"]:
+        try:
+            while not self._stop.is_set():
+                try:
+                    await self._deliver_remote_work_replies()
+                    if self.controller.configured:
+                        for message in self.store.pending_controller():
+                            payload = {
+                                "version": 1,
+                                "message_id": message["message_id"],
+                                "conversation_key": message["conversation_key"],
+                                "received_at": message["received_at"],
+                                "text": message["text"],
+                                "attachments": message["attachments"],
+                                "reply_capabilities": ["text", "image", "file"],
+                            }
+                            stored_profile = str(message.get("capability_profile") or "owner_legacy")
+                            try:
+                                incompatible = False
+                                async with self._authorization_lock:
+                                    authorization = self.store.authorize_stored_message(
+                                        message.get("user_hash"), stored_profile
+                                    )
+                                    if not authorization["allowed"]:
+                                        self.store.mark_finished(
+                                            message["message_id"],
+                                            success=False,
+                                            error_code=str(authorization["error_code"]),
+                                        )
+                                        continue
+                                    profile = str(authorization["capability_profile"])
+                                    profile_supported = await self._controller_supports_capability_profile()
+                                    if profile == "member_read_only" and not profile_supported:
+                                        incompatible = True
+                                        job = None
+                                    else:
+                                        if profile_supported:
+                                            payload["capability_profile"] = (
+                                                "owner" if profile == "owner_legacy" else profile
+                                            )
+                                        job = await self.controller.submit(payload)
+                                if incompatible:
+                                    suppression = await self._send_direct_result(
+                                        message,
+                                        "当前 Codex Controller 尚未启用成员只读权限协商，本条消息未提交。",
+                                        error_code="controller_capability_incompatible",
+                                    )
                                     self.store.mark_finished(
                                         message["message_id"],
                                         success=False,
-                                        error_code=str(authorization["error_code"]),
+                                        error_code=suppression or "controller_capability_incompatible",
                                     )
                                     continue
-                                profile = str(authorization["capability_profile"])
-                                profile_supported = await self._controller_supports_capability_profile()
-                                if profile == "member_read_only" and not profile_supported:
-                                    incompatible = True
-                                    job = None
-                                else:
-                                    if profile_supported:
-                                        payload["capability_profile"] = (
-                                            "owner" if profile == "owner_legacy" else profile
-                                        )
-                                    job = await self.controller.submit(payload)
-                            if incompatible:
-                                suppression = await self._send_direct_result(
-                                    message,
-                                    "当前 Codex Controller 尚未启用成员只读权限协商，本条消息未提交。",
-                                    error_code="controller_capability_incompatible",
-                                )
-                                self.store.mark_finished(
-                                    message["message_id"],
-                                    success=False,
-                                    error_code=suppression or "controller_capability_incompatible",
-                                )
-                                continue
-                            assert job is not None
-                        except StoreError as exc:
-                            self.last_error = exc.code
-                            break
-                        self.store.mark_submitted(message["message_id"], job["job_id"])
-                    for message in self.store.submitted():
-                        try:
-                            job = await self.controller.job(message["controller_job_id"])
-                        except StoreError as exc:
-                            self.last_error = exc.code
-                            break
-                        if job["state"] == "completed":
-                            self.store.update_conversation_link(
-                                message.get("user_hash"),
-                                thread_short=job.get("thread_short"),
-                                job_id=message.get("controller_job_id"),
-                            )
-                            outbound = dict(message)
-                            outbound["thread_short"] = job.get("thread_short")
-                            try:
-                                suppression = await self._send_completed_job(outbound, job)
+                                assert job is not None
                             except StoreError as exc:
-                                if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
-                                    continue
-                                raise
-                            if suppression:
-                                self.store.mark_finished(
-                                    message["message_id"],
-                                    success=False,
-                                    error_code=suppression,
-                                )
-                                continue
-                            self.store.mark_finished(message["message_id"], success=True)
-                        elif job["state"] in {"failed", "cancelled", "recovery_required"}:
-                            text = "任务状态需要人工核对，请在 Codex Controller 页面查看。" if job["state"] == "recovery_required" else "任务未完成，请在 Codex Controller 页面查看错误状态。"
-                            outbound = dict(message)
-                            outbound["thread_short"] = job.get("thread_short")
+                                self.last_error = exc.code
+                                break
+                            await self._start_typing(message)
+                            self.store.mark_submitted(message["message_id"], job["job_id"])
+                        for message in self.store.submitted():
                             try:
-                                suppression = await self._send_result(outbound, text)
+                                job = await self.controller.job(message["controller_job_id"])
                             except StoreError as exc:
-                                if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
-                                    continue
-                                raise
-                            if suppression:
-                                self.store.mark_finished(
-                                    message["message_id"],
-                                    success=False,
-                                    error_code=suppression,
+                                self.last_error = exc.code
+                                break
+                            if job["state"] == "completed":
+                                self.store.update_conversation_link(
+                                    message.get("user_hash"),
+                                    thread_short=job.get("thread_short"),
+                                    job_id=message.get("controller_job_id"),
                                 )
-                                continue
-                            self.store.mark_finished(message["message_id"], success=False, error_code=job.get("error_code") or job["state"])
-                await asyncio.sleep(2)
-            except asyncio.CancelledError:
-                return
-            except (StoreError, ProtocolError) as exc:
-                self.last_error = exc.code
-                await asyncio.sleep(30 if exc.code == "session_expired" else 5)
-            except Exception:
-                self.last_error = "delivery_failed"
-                await asyncio.sleep(5)
+                                outbound = dict(message)
+                                outbound["thread_short"] = job.get("thread_short")
+                                try:
+                                    suppression = await self._send_completed_job(outbound, job)
+                                except StoreError as exc:
+                                    if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
+                                        continue
+                                    raise
+                                finally:
+                                    await self._stop_typing_for_message(message)
+                                if suppression:
+                                    self.store.mark_finished(
+                                        message["message_id"],
+                                        success=False,
+                                        error_code=suppression,
+                                    )
+                                    continue
+                                self.store.mark_finished(message["message_id"], success=True)
+                            elif job["state"] in {"failed", "cancelled", "recovery_required"}:
+                                text = "任务状态需要人工核对，请在 Codex Controller 页面查看。" if job["state"] == "recovery_required" else "任务未完成，请在 Codex Controller 页面查看错误状态。"
+                                outbound = dict(message)
+                                outbound["thread_short"] = job.get("thread_short")
+                                try:
+                                    suppression = await self._send_result(outbound, text)
+                                except StoreError as exc:
+                                    if exc.code in {"session_expired", "identity_runtime_unavailable", "credential_missing"}:
+                                        continue
+                                    raise
+                                finally:
+                                    await self._stop_typing_for_message(message)
+                                if suppression:
+                                    self.store.mark_finished(
+                                        message["message_id"],
+                                        success=False,
+                                        error_code=suppression,
+                                    )
+                                    continue
+                                self.store.mark_finished(message["message_id"], success=False, error_code=job.get("error_code") or job["state"])
+                    await asyncio.sleep(2)
+                except asyncio.CancelledError:
+                    raise
+                except (StoreError, ProtocolError) as exc:
+                    self.last_error = exc.code
+                    await asyncio.sleep(30 if exc.code == "session_expired" else 5)
+                except Exception:
+                    self.last_error = "delivery_failed"
+                    await asyncio.sleep(5)
+        finally:
+            for runtime in self._runtimes.values():
+                await self._stop_all_typing(runtime)
 
     async def _deliver_remote_work_replies(self) -> None:
         for event in self.store.remote_work_pending_replies():
@@ -2109,7 +2320,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.3.1",
+            "version": "0.3.2",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

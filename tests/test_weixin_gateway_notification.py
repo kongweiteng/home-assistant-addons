@@ -92,7 +92,7 @@ class PackagingTests(unittest.TestCase):
         dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
         run = (ADDON / "run.sh").read_text(encoding="utf-8")
         main = (ADDON / "weixin_gateway" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('version: "0.3.1"', config_text)
+        self.assertIn('version: "0.3.2"', config_text)
         self.assertIn("notification_bridge_enabled: false", config_text)
         self.assertIn('notification_mqtt_host: ""', config_text)
         self.assertIn('notification_mqtt_username: "str?"', config_text)

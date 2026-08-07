@@ -193,6 +193,42 @@ class RenovationPageApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(upload_state["state"], "created")
         self.assertFalse(Path(upload_state["path"]).exists())
 
+    async def test_internal_chart_download_returns_authenticated_png_not_spa_html(self) -> None:
+        reference = "summary-" + "a" * 32 + ".png"
+        content = b"\x89PNG\r\n\x1a\nfixture-chart"
+        chart_path = self.store.charts_dir / reference
+        chart_path.write_bytes(content)
+        bearer = {"Authorization": f"Bearer {'t' * 32}"}
+
+        async with self.session.get(
+            f"http://127.0.0.1:{self.port}/internal/v1/downloads/chart/{reference}"
+        ) as response:
+            self.assertEqual(response.status, 401)
+
+        async with self.session.get(
+            f"http://127.0.0.1:{self.port}/internal/v1/downloads/chart/{reference}",
+            headers=bearer,
+        ) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Content-Type"], "image/png")
+            self.assertEqual(int(response.headers["Content-Length"]), len(content))
+            self.assertEqual(await response.read(), content)
+
+        async with self.session.get(
+            f"http://127.0.0.1:{self.port}/internal/v1/downloads/chart/not-a-chart.png",
+            headers=bearer,
+        ) as response:
+            self.assertEqual(response.status, 400)
+            self.assertEqual((await response.json())["error"]["code"], "invalid_reference")
+
+        missing = "summary-" + "b" * 32 + ".png"
+        async with self.session.get(
+            f"http://127.0.0.1:{self.port}/internal/v1/downloads/chart/{missing}",
+            headers=bearer,
+        ) as response:
+            self.assertEqual(response.status, 404)
+            self.assertEqual((await response.json())["error"]["code"], "not_found")
+
     async def test_cutover_requires_independent_token_and_old_writer_endpoint_cannot_activate(self) -> None:
         bearer = {"Authorization": f"Bearer {'t' * 32}"}
         async with self.session.post(

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.2.7
+
+- 修复 aiohttp 运行时缺少 `/internal/v1/downloads/chart/{reference}` 路由，导致图表文件已生成但 Controller 收到 SPA `text/html` 而拒绝保存 PNG artifact 的问题。
+- 新增内部 bearer 鉴权、固定图表文件名校验、路径边界校验和明确的 400/404 JSON 错误响应；有效图表强制返回 `image/png`。
+- 新增图表下载路由回归测试，覆盖鉴权、MIME、Content-Length、PNG 正文、非法引用和不存在文件；本版本只交付源码与本地测试，不代表已部署 HAOS。
+
 ## 0.2.6
 
 - 将 `ledger_add_payment` 的模型可见 manifest/dispatch 契约收紧为 canonical v2，必填金额分、日期和九维 `grouped_tags`，不再暴露 legacy 分类、标签或格式版本字段。

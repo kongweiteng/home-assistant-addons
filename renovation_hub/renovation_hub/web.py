@@ -9,6 +9,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 from typing import Any
 
@@ -39,6 +40,7 @@ STATIC_DIR_KEY = _make_app_key("static_dir", object)
 CSRF_TOKEN_KEY = _make_app_key("csrf_token", str)
 PAGE_ACTOR = "sha256:renovation-hub-ingress-admin"
 BUSINESS_ROUTE_PREFIX = "business__"
+CHART_REFERENCE_RE = re.compile(r"^summary-[a-f0-9]{32}\.png$")
 
 
 def _business_route_name(action_id: str) -> str:
@@ -132,6 +134,7 @@ def create_app(
     app.router.add_post("/internal/v1/admin/cutover/ready", cutover_ready)
     app.router.add_post("/internal/v1/admin/cutover/activate", cutover_activate)
     app.router.add_post("/internal/v1/admin/cutover/suspend", cutover_suspend)
+    app.router.add_get("/internal/v1/downloads/chart/{reference}", chart_download)
     app.router.add_get("/internal/v1/media/replay", media_replay)
     app.router.add_post("/internal/v1/media/ingest", media_ingest)
     app.router.add_get("/{tail:.*}", spa)
@@ -433,6 +436,33 @@ async def upload_complete(request: web.Request) -> web.Response:
 async def internal_status(request: web.Request) -> web.Response:
     _authorized(request)
     return _result(_store(request).status())
+
+
+async def chart_download(request: web.Request) -> web.StreamResponse:
+    """Serve one authenticated chart artifact to the Controller."""
+    _authorized(request)
+    reference = request.match_info["reference"]
+    if not CHART_REFERENCE_RE.fullmatch(reference):
+        return web.json_response(
+            {"error": {"code": "invalid_reference"}},
+            status=400,
+        )
+
+    charts_dir = _store(request).charts_dir.resolve()
+    target = (charts_dir / reference).resolve()
+    try:
+        target.relative_to(charts_dir)
+    except ValueError:
+        return web.json_response(
+            {"error": {"code": "invalid_reference"}},
+            status=400,
+        )
+    if not target.is_file():
+        return web.json_response(
+            {"error": {"code": "not_found"}},
+            status=404,
+        )
+    return web.FileResponse(target, headers={"Content-Type": "image/png"})
 
 
 async def mcp_manifest(request: web.Request) -> web.Response:

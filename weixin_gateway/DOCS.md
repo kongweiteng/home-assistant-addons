@@ -5,9 +5,8 @@
 | 配置项 | 说明 |
 | --- | --- |
 | `attachment_api_token` | Ledger/Controller 读取一次性附件的独立 Token，至少 32 个字符 |
-| `poller_enabled` | 是否启动真实 iLink 长轮询；默认关闭 |
+| `poller_enabled` | 是否启动真实 iLink 长轮询；默认开启。Ingress 页面可以用持久化覆盖临时关闭或重新开启 |
 | `owner_pairing_enabled` | 是否允许新身份进入一次性 owner 绑定状态；默认关闭 |
-| `activation_confirmation` | 真实切换时必须精确填写 `HERMES_POLLER_STOPPED` |
 | `controller_base_url` | Codex Controller 固定内部服务根地址 |
 | `controller_api_token` | Gateway 提交和查询作业使用的独立 bearer |
 | `controller_ingress_base_url` | 仅用于图片失败链接的 Controller HTTPS Ingress 基址；作为私有 password option 填写，成功发图时不会使用或发送 |
@@ -32,12 +31,11 @@
 真实启动必须同时满足：
 
 1. Owner 身份、Controller 和本地持久化检查通过；已有 Owner allowlist，或显式进入一次性 Owner 绑定状态。
-2. `poller_enabled=true`。
-3. `activation_confirmation=HERMES_POLLER_STOPPED`。
-4. 每个准备启动的身份分别取得 token 哈希对应的本地独占锁；冲突身份进入 `token_conflict`，其他身份继续运行。
-5. 维护窗口中人工确认 Hermes 或其他外部进程不再轮询这些 token。
+2. 有效 Poller desired state 为 `enabled`（无页面覆盖时跟随 `poller_enabled` 默认值）。
+3. 每个准备启动的身份分别取得 token 哈希对应的本地独占锁；冲突身份进入 `token_conflict`，其他身份继续运行。
+4. 页面关闭操作会持久化 `disabled`，页面开启操作会持久化 `enabled`；两者都使用 CSRF、revision 和 request_id。
 
-本地锁无法跨 Add-on 或跨主机证明 Hermes 已停止，所以精确人工确认不能省略。
+本地锁只保护当前 Gateway 进程，不能证明其他 Add-on 或主机没有使用同一 token；正式发布前仍需完成一次外部运行态清点，确认同一身份只有一个有效 Poller。
 
 ## 身份迁移
 
@@ -56,8 +54,8 @@
 
 Ingress 将此流程标记为“身份初始化”，而不是普通用户管理。页面不会预先选择一个微信用户；第一个在机器人私聊中发送正确绑定码的用户成为 Owner。绑定完成后首次绑定区域隐藏，当前 Owner 以别名和 `WX-*` 短标识显示，后续更换必须使用用户列表中的 Owner 转移。
 
-1. 保持 `poller_enabled=false` 完成扫码，确认页面显示身份已就绪。
-2. 停止旧 Poller 后设置 `owner_pairing_enabled=true`、`poller_enabled=true` 和精确激活确认值。
+1. 使用默认开启的 Poller 完成扫码；没有身份时页面仍可用并显示凭据状态。
+2. 若新身份需要首次绑定，设置 `owner_pairing_enabled=true`，然后在页面保持 Poller 开启。
 3. 新 Gateway 进入 `pairing`，普通消息、图片和错误绑定码全部丢弃，不提交 Controller。
 4. 在管理员 Ingress 点击“生成一次性绑定码”；明文只在该次响应中显示，磁盘仅保存带盐 SHA-256，15 分钟后失效。
 5. owner 在新机器人私聊中原样发送绑定码。Gateway 原子保存唯一 owner ID 和当次 `context_token`，绑定消息本身不会进入 Codex。
@@ -67,7 +65,7 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 
 ## 一人一个 ClawBot 与会话管理
 
-`0.3.0` 将 `0.2.x` 的单身份多用户模型升级为多身份模型。每个 principal 只能有一个 primary ClawBot 绑定；旧共享成员在升级后保留为 `legacy_shared`，直到通过成员接入向导绑定自己的独立 ClawBot。
+`0.3.1` 在 `0.3.0` 多身份模型上增加全局 Poller desired-state 持久化和 Ingress 开关。每个 principal 只能有一个 primary ClawBot 绑定；旧共享成员在升级后保留为 `legacy_shared`，直到通过成员接入向导绑定自己的独立 ClawBot。
 
 每个身份独占 `IlinkClient`、TokenLock、Poller、同步游标、context 字典和发送锁。SQLite `identity_bindings` 保存身份与 principal 的一对一关系；入站消息以 `identity_id + upstream_message_id` 域分隔去重，Controller、图片、通知和 Remote Work 结果均使用原身份回传，不允许跨身份 fallback。
 
@@ -135,7 +133,7 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 - 只有微信明确返回限流且确认未发送时才允许有限重试；HTTP 5xx、传输超时和未知运行时异常统一视为投递状态未知。
 - iLink session expired 只尝试一次，立即停止后续微信出站并发布失败结果。
 
-切换顺序必须是：保持新适配器关闭安装并重启验证；停止旧 Hermes notification bridge consumer；确认 request 主题只有一个 consumer；再启用新适配器并执行文字、重复、过期、重启、MQTT 断线和 session-expired 真机验收。失败时关闭新适配器，保留当前有效的新 Gateway 身份。
+切换顺序必须是：保持新适配器关闭安装并重启验证；确认 request 主题只有一个 consumer；再启用新适配器并执行文字、重复、过期、重启、MQTT 断线和 session-expired 真机验收。失败时关闭新适配器，保留当前有效的新 Gateway 身份。
 
 ## Remote Work MQTT
 
@@ -167,7 +165,7 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 1. 关闭新 Gateway 的 intake 和全部身份 Poller，等待当前长轮询退出并释放所有 Token 锁。
 2. 核对最后同步游标、待提交消息和待回复作业。
 3. 关闭 Controller intake，保留 Owner 与成员身份、游标、context 和待回复队列；不要启动已失效身份的 Hermes poller。
-4. 回退到 `0.2.3` 时，旧版本只读取 `active.json` 指向的当前 Owner 身份；成员身份文件和 additive SQLite 表保留离线，不会由旧版本启动。恢复 `0.3.0` 后再逐身份核对。
+4. 回退到 `0.2.3` 时，旧版本只读取 `active.json` 指向的当前 Owner 身份；成员身份文件和 additive SQLite 表保留离线，不会由旧版本启动。恢复 `0.3.1` 后再逐身份核对。
 5. 修复当前 Owner 身份，或重新认证同一 ClawBot；恢复后核对每个 token 最多一个 Poller，并确认待回复消息没有重复或跨身份发送。
 6. 不删除 Gateway 私有数据，直到确认没有未回传消息、附件或需要恢复的成员身份。
 

@@ -197,7 +197,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.3.0"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.3.1"', api_source)
 
     def test_aes_round_trip_and_supported_key_formats(self) -> None:
         key = bytes.fromhex("00112233445566778899aabbccddeeff")
@@ -2591,7 +2591,7 @@ class ServiceTests(unittest.TestCase):
 
         self.run_async(exercise())
 
-    def test_poller_defaults_disabled_and_exact_activation_is_required(self) -> None:
+    def test_poller_configuration_does_not_depend_on_hermes_confirmation(self) -> None:
         async def start_and_stop() -> None:
             disabled = self.service()
             await disabled.start()
@@ -2600,15 +2600,7 @@ class ServiceTests(unittest.TestCase):
 
         self.run_async(start_and_stop())
 
-        async def reject_wrong_confirmation() -> None:
-            wrong = self.service(poller_enabled=True, confirmation="hermes stopped")
-            with self.assertRaises(StoreError) as context:
-                await wrong.start()
-            self.assertEqual(context.exception.code, "activation_confirmation_required")
-
-        self.run_async(reject_wrong_confirmation())
-
-        async def accept_exact_confirmation() -> None:
+        async def starts_without_hermes_confirmation() -> None:
             class PollingClient(StubIlinkClient):
                 async def get_updates(self, _cursor: str, *, timeout_ms: int) -> dict:
                     await asyncio.sleep(60)
@@ -2625,14 +2617,59 @@ class ServiceTests(unittest.TestCase):
                 bootstrap_identity={},
                 poller_enabled=True,
                 owner_pairing_enabled=False,
-                activation_confirmation="HERMES_POLLER_STOPPED",
+                activation_confirmation="not-hermes",
                 max_media_bytes=1024 * 1024,
             )
             await service.start()
             self.assertEqual(service.poller_state, "polling")
+            stopped = await service.stop_poller(
+                {"revision": 0, "request_id": "service-poller-stop-0001"}
+            )
+            self.assertFalse(service.poller_enabled)
+            self.assertEqual(stopped["poller_state"], "stopped")
+            started = await service.start_poller(
+                {"revision": stopped["revision"], "request_id": "service-poller-start-0001"}
+            )
+            self.assertTrue(service.poller_enabled)
+            self.assertEqual(started["poller_state"], "polling")
             await service.stop()
 
-        self.run_async(accept_exact_confirmation())
+        self.run_async(starts_without_hermes_confirmation())
+
+    def test_poller_control_is_persistent_revisioned_and_idempotent(self) -> None:
+        first = self.store.set_poller_enabled(
+            False,
+            expected_revision=0,
+            request_id="poller-control-stop-0001",
+        )
+        self.assertEqual(first["override"], "disabled")
+        self.assertEqual(first["revision"], 1)
+        replay = self.store.set_poller_enabled(
+            False,
+            expected_revision=0,
+            request_id="poller-control-stop-0001",
+        )
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(self.store.poller_control(), {"override": "disabled", "revision": 1})
+        with self.assertRaises(StoreError) as conflict:
+            self.store.set_poller_enabled(
+                True,
+                expected_revision=0,
+                request_id="poller-control-start-0001",
+            )
+        self.assertEqual(conflict.exception.code, "poller_revision_conflict")
+        reopened = GatewayStore(self.root / "data" / "gateway.sqlite3", data_dir=self.root / "data")
+        self.assertEqual(reopened.poller_control(), {"override": "disabled", "revision": 1})
+
+    def test_poller_override_wins_over_addon_default_on_restart(self) -> None:
+        self.store.set_poller_enabled(
+            False,
+            expected_revision=0,
+            request_id="poller-control-restart-0001",
+        )
+        service = self.service(poller_enabled=True)
+        self.assertTrue(service.poller_default_enabled)
+        self.assertFalse(service.poller_enabled)
 
     def test_unbound_identity_requires_explicit_pairing_mode(self) -> None:
         self.identity_store.save_identity(fixture_identity(allowed=[]))
@@ -2663,7 +2700,13 @@ class AdminApiTests(unittest.TestCase):
                 activation_confirmation="",
                 max_media_bytes=1024,
             )
+            async def fake_start_pollers() -> None:
+                service.poller_state = "polling"
+
+            service._start_pollers_unlocked = fake_start_pollers  # type: ignore[method-assign]
             loop = asyncio.new_event_loop()
+            loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+            loop_thread.start()
             server = create_server(
                 "127.0.0.1",
                 0,
@@ -2681,6 +2724,24 @@ class AdminApiTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 csrf = status["csrf_token"]
                 revision = status["users"]["revision"]
+                poller_revision = status["poller_revision"]
+
+                headers = {"Content-Type": "application/json", "X-CSRF-Token": csrf}
+                stop_body = json.dumps(
+                    {"revision": poller_revision, "request_id": "api-poller-stop-01"}
+                )
+                connection.request("POST", "/api/poller/stop", stop_body, headers)
+                stopped = json.loads(connection.getresponse().read())
+                self.assertEqual(stopped["result"]["override"], "disabled")
+                self.assertEqual(stopped["result"]["poller_state"], "stopped")
+
+                start_body = json.dumps(
+                    {"revision": stopped["result"]["revision"], "request_id": "api-poller-start-01"}
+                )
+                connection.request("POST", "/api/poller/start", start_body, headers)
+                started = json.loads(connection.getresponse().read())
+                self.assertEqual(started["result"]["override"], "enabled")
+                self.assertEqual(started["result"]["poller_state"], "polling")
 
                 body = json.dumps(
                     {"revision": revision, "request_id": "api-invite-request-01", "ttl_seconds": 900}
@@ -2726,6 +2787,8 @@ class AdminApiTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join(timeout=5)
                 loop.close()
 
     def test_onboarding_start_verify_cancel_and_status_are_private(self) -> None:

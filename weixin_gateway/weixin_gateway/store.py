@@ -631,6 +631,8 @@ class GatewayStore:
                 CREATE TABLE IF NOT EXISTS gateway_meta (
                     id INTEGER PRIMARY KEY CHECK(id=1),
                     users_revision INTEGER NOT NULL,
+                    poller_override TEXT CHECK(poller_override IN ('enabled','disabled') OR poller_override IS NULL),
+                    poller_revision INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS weixin_users (
@@ -790,6 +792,8 @@ class GatewayStore:
                 "INSERT OR IGNORE INTO gateway_meta(id,users_revision,updated_at) VALUES (1,0,?)",
                 (utc_now(),),
             )
+            self._ensure_column(connection, "gateway_meta", "poller_override", "TEXT")
+            self._ensure_column(connection, "gateway_meta", "poller_revision", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "inbound_messages", "user_hash", "TEXT")
             self._ensure_column(
                 connection,
@@ -857,6 +861,71 @@ class GatewayStore:
             (revision, utc_now()),
         )
         return revision
+
+    def poller_control(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT poller_override,poller_revision FROM gateway_meta WHERE id=1"
+            ).fetchone()
+            if row is None:
+                raise StoreError("gateway_meta_missing", "Gateway 控制状态不存在", status=500)
+            override = row["poller_override"]
+            if override not in {None, "enabled", "disabled"}:
+                raise StoreError("poller_override_invalid", "Poller 持久化覆盖状态无效", status=500)
+            return {"override": override, "revision": int(row["poller_revision"])}
+
+    def set_poller_enabled(
+        self,
+        enabled: bool,
+        *,
+        expected_revision: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if not isinstance(enabled, bool):
+            raise StoreError("poller_enabled_invalid", "Poller 开关值无效")
+        payload = {"enabled": enabled, "revision": expected_revision}
+        scope = "poller_control"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._idempotent_response(
+                connection,
+                request_id=request_id,
+                scope=scope,
+                payload=payload,
+            )
+            if replay is not None:
+                replay["replayed"] = True
+                return replay
+            row = connection.execute(
+                "SELECT poller_revision FROM gateway_meta WHERE id=1"
+            ).fetchone()
+            if row is None:
+                raise StoreError("gateway_meta_missing", "Gateway 控制状态不存在", status=500)
+            current_revision = int(row["poller_revision"])
+            if (
+                not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or expected_revision != current_revision
+            ):
+                raise StoreError("poller_revision_conflict", "Poller 状态已变化，请刷新页面后重试", status=409)
+            revision = current_revision + 1
+            response = {
+                "enabled": enabled,
+                "override": "enabled" if enabled else "disabled",
+                "revision": revision,
+            }
+            connection.execute(
+                "UPDATE gateway_meta SET poller_override=?,poller_revision=?,updated_at=? WHERE id=1",
+                (response["override"], revision, utc_now()),
+            )
+            self._record_mutation(
+                connection,
+                request_id=request_id,
+                scope=scope,
+                payload=payload,
+                response=response,
+            )
+            return response
 
     @staticmethod
     def _request_digest(scope: str, payload: dict[str, Any]) -> str:

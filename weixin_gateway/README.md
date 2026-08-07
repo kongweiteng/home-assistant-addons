@@ -5,8 +5,8 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 ## 当前阶段
 
 - 固定参考 Hermes 上游提交 `d0b87dad77944c669b453385bb797d53fa33c4f7` 的 iLink 协议行为，重新实现最小客户端。
-- 默认 `poller_enabled=false`，不会访问正式 iLink 长轮询。
-- 启动真实 poller 还必须设置精确确认值 `HERMES_POLLER_STOPPED`。
+- 默认 `poller_enabled=true`；如果 Gateway 没有身份凭据，会保持页面可用并显示 `credential_missing`，不会伪造轮询成功。
+- Ingress 页面可以开启或关闭全部 Poller；页面操作以 SQLite 持久化覆盖保存，重启后不会意外恢复或关闭。
 - `0.1.2` 新增新扫码身份的一次性 owner 绑定；绑定前只识别管理员页面生成的高熵绑定码，其他消息不会进入 Codex。
 - `0.1.3` 在 iLink 会话过期时同时停止轮询和全部微信出站，保留 Controller 已完成但尚未回传的持久结果，禁止 context 清除后的第二次发送尝试。
 - `0.1.4` 内置可选的 MQTT v1 主动通知适配器，直接使用唯一 owner 的当前 iLink 上下文发送固定文本，完全绕过 Codex、模型和 Controller。
@@ -17,7 +17,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.3.0` 升级为“一人一个 ClawBot”：每个 Owner/Member 使用独立 iLink 身份、Token 锁、Poller、游标、上下文和发送锁，但继续共享同一 Controller/Codex 与全局单活动 Turn。
 - 新成员由 Owner 在 Ingress 生成独立二维码和一次性接入码；扫码微信与发送接入码的微信必须一致，绑定消息不会进入 Controller。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。
-- 当前新 Gateway 是唯一真实 poller；旧 Hermes iLink 身份已失效，不能作为微信回滚目标。
+- 当前新 Gateway 是唯一真实 poller；旧 Hermes iLink 身份已失效且不再是运行依赖，不能作为微信回滚目标。
 
 ## 安全边界
 
@@ -28,7 +28,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - 传给 Controller 的会话标识为域分隔 SHA-256，不包含原始微信 ID。
 - 页面只展示私有 HMAC 生成的 `WX-*`、`CV-*`、`TH-*` 短标识；短标识只用于排障，不参与授权。
 - member 必须先完成 Controller `job_capability_profile_v1` 能力协商，只能提交 `member_read_only`；旧 Controller 下成员消息失败关闭，owner 仍按旧契约兼容。
-- 同一 token 由独立本地文件锁保护，第二个运行时进入 `token_conflict` 而不影响其他身份；正式切换仍必须人工确认外部旧 poller 已停止。
+- 同一 token 由独立本地文件锁保护，第二个运行时进入 `token_conflict` 而不影响其他身份；Gateway 不依赖 Hermes 激活确认值。
 - 媒体仅允许固定微信 CDN、HTTPS、大小上限、AES-128-ECB 和短期私有 spool；预览与消费都重新校验正文摘要，只有正式消费接口会标记引用已消费。
 - 主动通知默认关闭，只允许 `owner` audience；通知正文只存在于 MQTT payload 和进程内存，不写 SQLite、身份文件或日志。
 - Remote Work 默认关闭并使用独立 MQTT 账户；请求只包含项目别名、最小任务说明和脱敏 owner hash，不接受 path、Shell、model、sandbox、Git ref、remote 或 reply topic。
@@ -42,7 +42,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - 文本固定为 `【通知|警告|紧急】标题` 加正文，不调用模型、不改写内容。
 - 支持 `message_id` 幂等、`dedupe_key`、TTL、来源/全局限流、有限重试和 `delivery_state_unknown` 故障语义。
 - MQTT Broker host 默认留空，启用时必须显式填写实际 Broker；iLink 发送结果超时属于投递状态未知，不会自动重试。
-- 启用前必须先停止旧 Hermes notification bridge，避免两个不同 client ID 同时消费 request。
+- 启用前必须确认没有其他 notification consumer 同时消费 request，避免重复回执。
 - 无论存在多少 member，主动通知始终解析当前 active owner 的独立身份；owner 转移会原子切换 `active.json` 兼容镜像，member 不进入通知 audience。
 
 ## 多身份与多用户管理
@@ -65,7 +65,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - Gateway 账户只 publish request/control、subscribe status/result/agent；不得复用主动通知账户或 superuser。
 - status/result 使用 `task_id + run_seq + sequence` 收敛乱序和重投；未知 task、旧序号和同序号不同正文均失败关闭。
 - 结果发送前再次核对发起者仍是 active owner；owner 已转移、暂停或撤销时抑制回传。
-- `0.3.0` 代码候选不代表真实多人微信已验收；真实二维码、多个手机、长期多 Poller、通知、媒体和 Remote Work 仍需独立 HAOS 发布与真机验收。
+- `0.3.1` 代码候选不代表真实多人微信已验收；真实二维码、多个手机、长期多 Poller、通知、媒体和 Remote Work 仍需独立 HAOS 发布与真机验收。
 
 ## 本地验证
 

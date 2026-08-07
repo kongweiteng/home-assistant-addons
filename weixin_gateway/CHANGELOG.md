@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.3.1
+
+- Poller 默认改为开启；移除 Hermes 专用 `HERMES_POLLER_STOPPED` 启动门禁，Gateway 不再依赖 Hermes。
+- 新增 Gateway SQLite Poller desired-state 覆盖和 revision/idempotency；Ingress 页面可以开启或关闭全部身份 Poller，重启后保持明确的页面选择。
+- Poller stop 只停止轮询并释放 TokenLock，不停止 Controller delivery/cleanup；start 会恢复所有符合条件的身份并继续 fail closed 处理 Token 冲突、会话过期和凭据缺失。
+- 状态 API 增加配置默认值、持久化覆盖和 Poller 控制 revision；版本升级为 `0.3.1`。
+
 ## 0.3.0
 
 - 将单一 iLink 身份升级为进程内多身份运行时：每个 ClawBot 独立 client、Token 锁、Poller、游标、context、发送锁、运行状态和故障隔离，共享同一 Controller/Codex。

@@ -277,7 +277,13 @@ class GatewayService:
                 identity_identifier=self.identity["identity_id"],
                 account_digest=account_hash(self.identity["account_id"]),
             )
-        self.poller_enabled = poller_enabled
+        self.poller_default_enabled = poller_enabled
+        stored_poller = self.store.poller_control()
+        self.poller_enabled = (
+            poller_enabled
+            if stored_poller["override"] is None
+            else stored_poller["override"] == "enabled"
+        )
         self.owner_pairing_enabled = owner_pairing_enabled
         self.activation_confirmation = activation_confirmation
         self.max_media_bytes = max_media_bytes
@@ -307,6 +313,7 @@ class GatewayService:
         self._stop = asyncio.Event()
         self._outbound_lock = asyncio.Lock()
         self._authorization_lock = asyncio.Lock()
+        self._poller_control_lock = asyncio.Lock()
         self._runtimes: dict[str, IdentityRuntime] = {}
         self._refresh_client()
         self._ensure_owner_runtime()
@@ -320,54 +327,92 @@ class GatewayService:
         self._refresh_client()
         self._ensure_owner_runtime()
         if self.poller_enabled:
-            if self.activation_confirmation != "HERMES_POLLER_STOPPED":
-                raise StoreError("activation_confirmation_required", "未确认 Hermes poller 已停止", status=409)
-            if self.identity is None or self.client is None or not self._runtimes:
-                raise StoreError("credential_missing", "缺少完整 iLink 身份", status=409)
-            if not self.identity.get("allowed_user_ids") and not self.owner_pairing_enabled:
-                raise StoreError("owner_binding_required", "新身份必须先启用一次性 owner 绑定", status=409)
-            for runtime in list(self._runtimes.values()):
-                record = self.store.identity_record(runtime.identity_id)
-                if record["state"] not in {"active", "pending_pairing"}:
-                    continue
-                runtime.token_lock = self.identity_store.acquire_token_lock(runtime.identity["token"])
-                try:
-                    runtime.token_lock.acquire()
-                except StoreError as exc:
-                    self._set_runtime_state(
-                        runtime,
-                        "token_conflict",
-                        error_code=exc.code,
-                    )
-                    continue
-                if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
-                    self.token_lock = runtime.token_lock
-                state = "pairing" if record["state"] == "pending_pairing" or not runtime.identity.get("allowed_user_ids") else "polling"
-                self._set_runtime_state(runtime, state)
-                runtime.poll_task = asyncio.create_task(
-                    self._poll_loop(runtime),
-                    name=f"weixin-poller-{runtime.identity_id[-8:]}",
-                )
-                self._tasks.append(runtime.poll_task)
+            async with self._poller_control_lock:
+                await self._start_pollers_unlocked()
         self._tasks.append(asyncio.create_task(self._delivery_loop(), name="weixin-controller-delivery"))
         self._tasks.append(asyncio.create_task(self._cleanup_loop(), name="weixin-spool-cleanup"))
+
+    async def start_poller(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self._poller_control_lock:
+            response = self.store.set_poller_enabled(
+                True,
+                expected_revision=payload.get("revision"),
+                request_id=str(payload.get("request_id") or ""),
+            )
+            self.poller_enabled = True
+            await self._start_pollers_unlocked()
+            return {**response, "poller_state": self.poller_state}
+
+    async def stop_poller(self, payload: dict[str, Any]) -> dict[str, Any]:
+        async with self._poller_control_lock:
+            response = self.store.set_poller_enabled(
+                False,
+                expected_revision=payload.get("revision"),
+                request_id=str(payload.get("request_id") or ""),
+            )
+            self.poller_enabled = False
+            await self._stop_pollers_unlocked()
+            return {**response, "poller_state": self.poller_state}
+
+    async def _start_pollers_unlocked(self) -> None:
+        if self.identity is None or self.client is None or not self._runtimes:
+            self.poller_state = "disabled"
+            self.last_error = "credential_missing"
+            return
+        if not self.identity.get("allowed_user_ids") and not self.owner_pairing_enabled:
+            raise StoreError("owner_binding_required", "新身份必须先启用一次性 owner 绑定", status=409)
+        for runtime in list(self._runtimes.values()):
+            if runtime.poll_task is not None and not runtime.poll_task.done():
+                continue
+            record = self.store.identity_record(runtime.identity_id)
+            if record["state"] not in {"active", "pending_pairing"}:
+                continue
+            runtime.token_lock = self.identity_store.acquire_token_lock(runtime.identity["token"])
+            try:
+                runtime.token_lock.acquire()
+            except StoreError as exc:
+                self._set_runtime_state(runtime, "token_conflict", error_code=exc.code)
+                continue
+            if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
+                self.token_lock = runtime.token_lock
+            state = "pairing" if record["state"] == "pending_pairing" or not runtime.identity.get("allowed_user_ids") else "polling"
+            self._set_runtime_state(runtime, state)
+            runtime.poll_task = asyncio.create_task(
+                self._poll_loop(runtime),
+                name=f"weixin-poller-{runtime.identity_id[-8:]}",
+            )
+            self._tasks.append(runtime.poll_task)
+
+    async def _stop_pollers_unlocked(self) -> None:
+        poll_tasks = {runtime.poll_task for runtime in self._runtimes.values() if runtime.poll_task is not None}
+        for task in poll_tasks:
+            if task is not None:
+                task.cancel()
+        if poll_tasks:
+            await asyncio.gather(*poll_tasks, return_exceptions=True)
+        self._tasks = [task for task in self._tasks if task not in poll_tasks]
+        for runtime in self._runtimes.values():
+            runtime.poll_task = None
+            if runtime.token_lock is not None:
+                runtime.token_lock.release()
+                runtime.token_lock = None
+            self._set_runtime_state(runtime, "stopped")
+        self.token_lock = None
+        self.poller_state = "stopped"
 
     async def stop(self) -> None:
         self._stop.set()
         for task in self._tasks:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        async with self._poller_control_lock:
+            await self._stop_pollers_unlocked()
         closed_clients: set[int] = set()
         for runtime in self._runtimes.values():
             if id(runtime.client) not in closed_clients:
                 await runtime.client.close()
                 closed_clients.add(id(runtime.client))
-            if runtime.token_lock is not None:
-                runtime.token_lock.release()
-                runtime.token_lock = None
-            self._set_runtime_state(runtime, "stopped")
         await self.controller.close()
-        self.token_lock = None
         self.poller_state = "stopped"
 
     def _refresh_client(self) -> None:
@@ -506,7 +551,7 @@ class GatewayService:
             self._set_runtime_state(runtime, "token_conflict", error_code=exc.code)
             return
         record = self.store.identity_record(runtime.identity_id)
-        pairing = record["state"] == "pending_pairing"
+        pairing = record["state"] == "pending_pairing" or not runtime.identity.get("allowed_user_ids")
         self._set_runtime_state(
             runtime,
             "pairing" if pairing else "polling",
@@ -2062,9 +2107,13 @@ class GatewayService:
         active_users = sum(1 for user in users["users"] if user["status"] == "active")
         identities = self.store.list_identities()
         identities["limits"]["max_active_identities"] = self.max_active_identities
+        poller_control = self.store.poller_control()
         return {
-            "version": "0.3.0",
+            "version": "0.3.1",
             "poller_enabled": self.poller_enabled,
+            "poller_default_enabled": self.poller_default_enabled,
+            "poller_override": poller_control["override"],
+            "poller_revision": poller_control["revision"],
             "poller_state": self.poller_state,
             "identity": identity,
             "identities": identities,

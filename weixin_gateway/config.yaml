@@ -1,5 +1,5 @@
 name: Weixin Gateway
-version: "0.3.0"
+version: "0.3.1"
 slug: weixin_gateway
 description: "承载一人一个 ClawBot、多身份原路回复与安全多人 Codex 接入的微信网关。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"
@@ -23,9 +23,8 @@ ports_description:
   8103/tcp: "仅供 Home Assistant Ingress 和受认证附件 API 使用"
 options:
   attachment_api_token: ""
-  poller_enabled: false
+  poller_enabled: true
   owner_pairing_enabled: false
-  activation_confirmation: ""
   controller_base_url: ""
   controller_api_token: ""
   controller_ingress_base_url: ""
@@ -57,7 +56,6 @@ schema:
   attachment_api_token: password
   poller_enabled: bool
   owner_pairing_enabled: bool
-  activation_confirmation: str
   controller_base_url: str
   controller_api_token: password
   controller_ingress_base_url: password

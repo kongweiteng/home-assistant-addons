@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Any
@@ -13,6 +14,27 @@ from .store import ControllerStore, StoreError
 
 NEW_THREAD_COMMANDS = frozenset({"打开新会话", "/new"})
 NEW_THREAD_RESULT = "新会话已建立。下一条消息将使用当前 Codex 配置和工具目录。"
+MEDIA_ARCHIVE_ACTION_RE = re.compile(r"(?:归档|存档|保存|添加|加入|关联|记录)")
+MEDIA_ARCHIVE_TARGET_RE = re.compile(r"(?:装修|施工|工地|现场).{0,12}(?:档案|记录|媒体库|资料库)")
+MEDIA_ARCHIVE_MEDIA_ACTION_RE = re.compile(
+    r"(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体).{0,8}(?:归档|存档|归入|收录|记录)"
+    r"|(?:归档|存档|归入|收录|记录).{0,8}(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体)"
+)
+MEDIA_ARCHIVE_NEGATION_RE = re.compile(r"(?:不要|别|无需|不用|不需要).{0,12}(?:归档|存档|保存|添加|加入|关联|记录)")
+
+
+def has_explicit_media_archive_intent(text: str, attachments: list[dict[str, Any]] | None = None) -> bool:
+    """Allow media writes only for an explicit positive renovation-archive request."""
+
+    if not isinstance(text, str) or not text.strip() or not attachments:
+        return False
+    normalized = re.sub(r"\s+", "", text)
+    if MEDIA_ARCHIVE_NEGATION_RE.search(normalized):
+        return False
+    return bool(
+        MEDIA_ARCHIVE_ACTION_RE.search(normalized)
+        and (MEDIA_ARCHIVE_TARGET_RE.search(normalized) or MEDIA_ARCHIVE_MEDIA_ACTION_RE.search(normalized))
+    )
 
 
 def is_new_thread_command(payload: dict[str, Any]) -> bool:
@@ -180,7 +202,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.2.3",
+            "version": "0.2.4",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -280,8 +302,14 @@ class ControllerService:
         try:
             payload = job["input"]
             capability_profile = payload.get("capability_profile", "owner_legacy")
+            media_archive_authorized = has_explicit_media_archive_intent(
+                payload.get("text", ""), payload.get("attachments")
+            )
             effective_tools = (
-                self.tool_context.available_tools(capability_profile)
+                self.tool_context.available_tools(
+                    capability_profile,
+                    media_archive_authorized=media_archive_authorized,
+                )
                 if self.tool_context is not None
                 else []
             )
@@ -305,7 +333,12 @@ class ControllerService:
                 self.store.complete_new_thread(job["job_id"], thread_id, result)
                 return
             if self.tool_context is not None:
-                self.tool_context.begin_job(job["job_id"], payload["message_id"], capability_profile)
+                self.tool_context.begin_job(
+                    job["job_id"],
+                    payload["message_id"],
+                    capability_profile,
+                    media_archive_authorized=media_archive_authorized,
+                )
             thread_id = self.store.conversation_thread(job["conversation_key"])
             if thread_id is None:
                 thread_id = self.app_server.start_thread()

@@ -218,7 +218,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.3.2"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.3.3"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -708,6 +708,61 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(StoreError) as context:
             self.store.consume_attachment(expired)
         self.assertEqual(context.exception.code, "attachment_unavailable")
+
+    def test_media_stream_is_non_consuming_until_ack_and_ack_is_idempotent(self) -> None:
+        content = b"streamed-media"
+        spec = {"media_type": "video", "filename": "progress.mp4", "mime_type": "video/mp4"}
+        reference = self.store.store_message(
+            message_id="fixture-message-stream-ack",
+            sender_id="fixture-owner",
+            conversation_key="sha256:fixture",
+            text="施工视频",
+            media=[(spec, content)],
+        )["attachments"][0]["attachment_ref"]
+        digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+        metadata, first_handle = self.store.open_stream_attachment(reference)
+        with first_handle:
+            self.assertEqual(first_handle.read(), content)
+        self.assertEqual(metadata["sha256"], digest)
+
+        _metadata, second_handle = self.store.open_stream_attachment(reference)
+        with second_handle:
+            self.assertEqual(second_handle.read(), content)
+
+        self.assertEqual(
+            self.store.acknowledge_attachment(reference, digest),
+            {"consumed": True, "idempotent_replay": False},
+        )
+        self.assertEqual(
+            self.store.acknowledge_attachment(reference, digest),
+            {"consumed": True, "idempotent_replay": True},
+        )
+        with self.assertRaises(StoreError) as context:
+            self.store.open_stream_attachment(reference)
+        self.assertEqual(context.exception.code, "attachment_consumed")
+
+    def test_media_stream_rejects_symlinked_storage(self) -> None:
+        content = b"symlinked-media"
+        spec = {"media_type": "image", "filename": "site.jpg", "mime_type": "image/jpeg"}
+        reference = self.store.store_message(
+            message_id="fixture-message-stream-symlink",
+            sender_id="fixture-owner",
+            conversation_key="sha256:fixture",
+            text="现场照片",
+            media=[(spec, content)],
+        )["attachments"][0]["attachment_ref"]
+        stored = self.store.spool_dir / hashlib.sha256(content).hexdigest()
+        link = self.store.spool_dir / "attachment-link"
+        link.symlink_to(stored)
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE attachments SET storage_name=? WHERE attachment_ref=?",
+                (link.name, reference),
+            )
+        with self.assertRaises(StoreError) as context:
+            self.store.open_stream_attachment(reference)
+        self.assertEqual(context.exception.code, "attachment_invalid")
 
     def test_single_token_lock_conflict(self) -> None:
         first = self.identity_store.acquire_token_lock(fixture_identity()["token"])

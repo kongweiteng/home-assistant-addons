@@ -1,5 +1,7 @@
 # Weixin Gateway 使用说明
 
+当前版本：`0.3.3`。
+
 ## 配置
 
 | 配置项 | 说明 |
@@ -114,7 +116,7 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 - 原始微信 ID 只存在 Gateway 私有身份/SQLite；Controller 收到 `sha256("weixin:" + user_id)` 和角色权限画像。
 - 入站图片、文件、视频和语音使用固定微信 CDN、大小限制与 AES 解密，生成短期一次性 `attachment_ref`。
 - Controller 可通过同一 bearer 调用 `/internal/v1/attachments/<ref>/preview` 非消费读取正文，用于官方 Codex `localImage`；预览后原引用仍可由账本或媒体归档工具消费。
-- `/internal/v1/attachments/<ref>` 保持一次性消费语义。预览与消费都核验文件路径、大小和 SHA-256；引用已消费或过期后，两种接口都返回不可用。
+- `/internal/v1/attachments/<ref>` 保持一次性消费语义。新媒体归档使用 `/internal/v1/attachments/<ref>/stream` 非消费流式读取，并在 Renovation Hub 成功后调用 `/internal/v1/attachments/<ref>/ack` 消费引用；流式失败或 Hub 拒绝时，原引用在 TTL 内保持可重试。所有接口都核验文件路径、大小和 SHA-256。
 - 出站文本按最多 4000 字符分块，并使用确定性 client ID，重试不会生成新发送键。
 - Controller completed job 含 `artifacts[]` 时，Gateway 先用内部 bearer 预取图片，并再次核验 `image/png`、Content-Length、响应 SHA-256、DTO 大小/摘要和 PNG 正文；临时文件写入私有 outbound spool，权限 `0600`，发送或抑制后立即删除。
 - 预取完成后在同一“出站锁 -> 授权锁”临界区重新核对用户，再发送一条 `result_summary` 中文摘要，随后调用 iLink 原生图片上传/发送。文本、图片和失败链接分别使用持久确定性 client ID；成功图片不附下载链接。
@@ -174,6 +176,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 4. 回退到 `0.2.3` 时，旧版本只读取 `active.json` 指向的当前 Owner 身份；成员身份文件和 additive SQLite 表保留离线，不会由旧版本启动。恢复 `0.3.1` 后再逐身份核对。
 5. 修复当前 Owner 身份，或重新认证同一 ClawBot；恢复后核对每个 token 最多一个 Poller，并确认待回复消息没有重复或跨身份发送。
 6. 不删除 Gateway 私有数据，直到确认没有未回传消息、附件或需要恢复的成员身份。
+
+从 `0.3.3` 回退到 `0.3.2` 不需要数据库迁移；先停止全部 Poller 并确认没有 Controller 正在读取附件。旧版本会忽略新的非消费流式读取与 ACK 接口，原有一次性附件接口和私有 spool 数据保持兼容。
 
 真实凭据导入、停止 Hermes、启动新 poller 和微信端到端测试均属于独立 L3 人工闸门。
 

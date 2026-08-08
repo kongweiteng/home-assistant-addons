@@ -47,6 +47,12 @@ MAX_UPSTREAM_ERROR_MESSAGE_CHARS = 500
 SAFE_UPSTREAM_ERROR_CODES = frozenset(
     {
         "area_not_found",
+        "attachment_consumed",
+        "attachment_digest_mismatch",
+        "attachment_expired",
+        "attachment_invalid",
+        "attachment_missing",
+        "attachment_not_found",
         "idempotency_conflict",
         "invalid_amount",
         "invalid_date",
@@ -142,7 +148,14 @@ class ToolRouter:
         self._manifest_thread: threading.Thread | None = None
         self._load_last_good_manifest()
 
-    def begin_job(self, job_id: str, message_id: str, capability_profile: str = "owner_legacy") -> None:
+    def begin_job(
+        self,
+        job_id: str,
+        message_id: str,
+        capability_profile: str = "owner_legacy",
+        *,
+        media_archive_authorized: bool | None = None,
+    ) -> None:
         if not job_id or not message_id:
             raise ToolProxyError("tool_context_invalid", "工具调用上下文无效")
         if capability_profile not in {"owner_legacy", "owner", "member_read_only"}:
@@ -156,6 +169,8 @@ class ToolRouter:
                 "turn_id": "",
                 "capability_profile": capability_profile,
             }
+            if media_archive_authorized is not None:
+                self._active_context["media_archive_authorized"] = media_archive_authorized
 
     def bind_turn(self, job_id: str, turn_id: str) -> None:
         with self._context_lock:
@@ -244,7 +259,12 @@ class ToolRouter:
             }
         return frozenset(tools)
 
-    def available_tools(self, capability_profile: str | None = None) -> list[str]:
+    def available_tools(
+        self,
+        capability_profile: str | None = None,
+        *,
+        media_archive_authorized: bool | None = None,
+    ) -> list[str]:
         configured = set(self.configured_tools())
         if self.store is not None:
             try:
@@ -255,6 +275,8 @@ class ToolRouter:
             configured &= set(MEMBER_READ_ONLY_TOOL_NAMES)
         elif capability_profile not in {None, "owner_legacy", "owner"}:
             return []
+        if media_archive_authorized is False:
+            configured.discard("renovation_media_ingest")
         return sorted(configured)
 
     def catalog_payload(self) -> dict[str, Any]:
@@ -532,6 +554,15 @@ class ToolRouter:
                 raise ToolProxyError("tool_disabled", "工具已由管理员关闭")
         if definition.requires_job_context and context is None:
             raise ToolProxyError("tool_context_unavailable", "该工具只能在活动 Controller 作业中调用")
+        if (
+            definition.transport == "gateway_media_stream"
+            and context is not None
+            and context.get("media_archive_authorized") is False
+        ):
+            raise ToolProxyError(
+                "media_archive_not_authorized",
+                "只有用户明确请求归档到装修档案时才能保存该附件",
+            )
         return definition
 
     def _call_authorized(self, definition: ToolDefinition, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -716,7 +747,7 @@ def _request_json(method: str, url: str, token: str, payload: dict[str, Any] | N
 
 
 def _safe_structured_http_error(exc: HTTPError) -> ToolProxyError | None:
-    if exc.code not in {400, 404, 409, 422}:
+    if exc.code not in {400, 404, 409, 410, 422}:
         return None
     try:
         if exc.headers.get_content_type() != "application/json":
@@ -841,6 +872,23 @@ def _stream_gateway_to_hub(
     if not isinstance(idempotency_key, str) or len(idempotency_key) < 16 or len(idempotency_key) > 256:
         raise ToolProxyError("invalid_idempotency_key", "媒体写入需要稳定 idempotency_key")
     source_ref_hash = hashlib.sha256(reference.encode("utf-8")).hexdigest()
+
+    def confirm_consumption(result: dict[str, Any], digest: str) -> dict[str, Any]:
+        try:
+            _request_json(
+                "POST",
+                f"{gateway_base_url}/internal/v1/attachments/{quote(reference, safe='')}/ack",
+                gateway_token,
+                {"sha256": digest},
+            )
+        except ToolProxyError as exc:
+            result.setdefault("result", {})["attachment_consumption"] = "pending"
+            result.setdefault("result", {})["attachment_ack_error"] = exc.code
+            result.setdefault("result", {})["warning_code"] = "attachment_ack_pending"
+        else:
+            result.setdefault("result", {})["attachment_consumption"] = "confirmed"
+        return result
+
     replay_url = f"{hub_base_url}/internal/v1/media/replay?{urlencode({'idempotency_key': idempotency_key, 'source_ref_hash': source_ref_hash})}"
     replay_request = Request(replay_url, method="GET", headers={"Authorization": f"Bearer {hub_token}", "Accept": "application/json"})
     try:
@@ -854,17 +902,24 @@ def _stream_gateway_to_hub(
     except (URLError, TimeoutError, OSError) as exc:
         raise ToolProxyError("upstream_unavailable", "Renovation Hub 媒体接口不可用") from exc
     else:
-        return _decode_json_response(replay_data)
+        replay_result = _decode_json_response(replay_data)
+        digest = str(replay_result.get("result", {}).get("media", {}).get("sha256") or "")
+        return confirm_consumption(replay_result, digest) if digest else replay_result
 
     request = Request(
-        f"{gateway_base_url}/internal/v1/attachments/{quote(reference, safe='')}",
+        f"{gateway_base_url}/internal/v1/attachments/{quote(reference, safe='')}/stream",
         method="GET",
         headers={"Authorization": f"Bearer {gateway_token}", "Accept": "application/octet-stream"},
     )
     try:
         gateway_response = urlopen(request, timeout=60)
     except HTTPError as exc:
-        exc.close()
+        try:
+            structured_error = _safe_structured_http_error(exc)
+        finally:
+            exc.close()
+        if structured_error is not None:
+            raise structured_error from exc
         raise ToolProxyError("attachment_unavailable", f"Gateway 拒绝附件读取：HTTP {exc.code}") from exc
     except (URLError, TimeoutError, OSError) as exc:
         raise ToolProxyError("gateway_unavailable", "Weixin Gateway 附件接口不可用") from exc
@@ -919,7 +974,7 @@ def _stream_gateway_to_hub(
         data = response.read(2 * 1024 * 1024 + 1)
         if response.status < 200 or response.status >= 300:
             raise ToolProxyError("upstream_rejected", f"Renovation Hub 拒绝媒体：HTTP {response.status}")
-        return _decode_json_response(data)
+        return confirm_consumption(_decode_json_response(data), digest_header)
     except (TimeoutError, OSError, http.client.HTTPException) as exc:
         raise ToolProxyError("upstream_unavailable", "媒体流式转发失败") from exc
     finally:

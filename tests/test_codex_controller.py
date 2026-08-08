@@ -29,10 +29,21 @@ from codex_controller.main import (
 )
 from codex_controller.mcp_proxy import socket_call, tool_catalog
 from codex_controller.media_input import TurnMediaManager
-from codex_controller.service import ControllerService, NEW_THREAD_RESULT, is_new_thread_command
+from codex_controller.service import (
+    ControllerService,
+    NEW_THREAD_RESULT,
+    has_explicit_media_archive_intent,
+    is_new_thread_command,
+)
 from codex_controller.store import ControllerStore, StoreError
 from codex_controller.tool_catalog import ALL_TOOL_NAMES, MEMBER_READ_ONLY_TOOL_NAMES, TOOL_BY_NAME
-from codex_controller.tool_proxy import ToolProxyError, ToolProxyServer, ToolRouter, validate_base_url
+from codex_controller.tool_proxy import (
+    ToolProxyError,
+    ToolProxyServer,
+    ToolRouter,
+    _stream_gateway_to_hub,
+    validate_base_url,
+)
 
 
 def fixture_job(message_id: str = "fixture-message-1", text: str = "查询装修支出") -> dict:
@@ -1293,7 +1304,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.2.3"
+        expected = "0.2.4"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1614,6 +1625,47 @@ class ControllerToolApiTests(unittest.TestCase):
 
 
 class ToolRouterTests(unittest.TestCase):
+    def test_media_archive_requires_explicit_renovation_intent(self) -> None:
+        attachment = [{"attachment_ref": "a" * 43}]
+        self.assertTrue(has_explicit_media_archive_intent("把这段施工视频归档", attachment))
+        self.assertTrue(has_explicit_media_archive_intent("保存到装修档案", attachment))
+        self.assertTrue(has_explicit_media_archive_intent("记录这张现场照片", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("看看这张照片", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("把这张装修图片保存到相册", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("把这份施工文件保存一下", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("这不是装修图片，不要归档", attachment))
+
+    def test_media_archive_tool_is_hidden_and_rejected_without_explicit_intent(self) -> None:
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            gateway_base_url="http://weixin-gateway:8103",
+            gateway_token="g" * 32,
+        )
+        self.assertNotIn(
+            "renovation_media_ingest",
+            router.available_tools("owner", media_archive_authorized=False),
+        )
+        router.begin_job(
+            "fixture-media-policy-job",
+            "fixture-media-policy-message",
+            "owner",
+            media_archive_authorized=False,
+        )
+        try:
+            with self.assertRaises(ToolProxyError) as context:
+                router.call(
+                    "renovation_media_ingest",
+                    {
+                        "idempotency_key": "fixture-media-policy-" + "0" * 24,
+                        "attachment_ref": "a" * 43,
+                        "project_id": "fixture-project",
+                    },
+                )
+            self.assertEqual(context.exception.code, "media_archive_not_authorized")
+        finally:
+            router.clear_job("fixture-media-policy-job")
+
     def test_structured_hub_validation_error_is_preserved_safely(self) -> None:
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, _format: str, *_args: object) -> None:
@@ -2349,6 +2401,109 @@ class ToolRouterTests(unittest.TestCase):
         forwarded = observed[0][5]
         self.assertNotIn("attachment_ref", forwarded)
         self.assertNotIn("content_base64", forwarded)
+
+    def test_media_stream_failure_keeps_attachment_retryable_until_hub_success(self) -> None:
+        content = b"retryable-media"
+        digest = hashlib.sha256(content).hexdigest()
+
+        class GatewayHandler(BaseHTTPRequestHandler):
+            stream_count = 0
+            ack_count = 0
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return None
+
+            def do_GET(self) -> None:  # noqa: N802
+                type(self).stream_count += 1
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header(
+                    "X-Attachment-Filename",
+                    base64.urlsafe_b64encode("retry.mp4".encode("utf-8")).decode("ascii"),
+                )
+                self.send_header("X-Attachment-Sha256", f"sha256:{digest}")
+                self.end_headers()
+                self.wfile.write(content)
+
+            def do_POST(self) -> None:  # noqa: N802
+                type(self).ack_count += 1
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                body = b'{"version":1,"result":{"consumed":true}}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        class HubHandler(BaseHTTPRequestHandler):
+            fail = True
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return None
+
+            def do_GET(self) -> None:  # noqa: N802
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                if type(self).fail:
+                    body = '{"error":{"code":"media_not_ready","message":"媒体暂不可用"}}'.encode("utf-8")
+                    self.send_response(503)
+                else:
+                    body = b'{"version":1,"result":{"media":{"id":"retry-media","sha256":"sha256:' + digest.encode("ascii") + b'"}}}'
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        gateway = ThreadingHTTPServer(("127.0.0.1", 0), GatewayHandler)
+        hub = ThreadingHTTPServer(("127.0.0.1", 0), HubHandler)
+        gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+        hub_thread = threading.Thread(target=hub.serve_forever, daemon=True)
+        gateway_thread.start()
+        hub_thread.start()
+        try:
+            arguments = {"idempotency_key": "fixture-media-retry-" + "0" * 24}
+            with self.assertRaises(ToolProxyError) as context:
+                _stream_gateway_to_hub(
+                    f"http://localhost:{gateway.server_port}",
+                    "g" * 32,
+                    f"http://localhost:{hub.server_port}",
+                    "h" * 32,
+                    "a" * 43,
+                    arguments,
+                    1024 * 1024,
+                )
+            self.assertEqual(context.exception.code, "upstream_rejected")
+            self.assertEqual(GatewayHandler.stream_count, 1)
+            self.assertEqual(GatewayHandler.ack_count, 0)
+
+            HubHandler.fail = False
+            result = _stream_gateway_to_hub(
+                f"http://localhost:{gateway.server_port}",
+                "g" * 32,
+                f"http://localhost:{hub.server_port}",
+                "h" * 32,
+                "a" * 43,
+                arguments,
+                1024 * 1024,
+            )
+            self.assertEqual(result["result"]["attachment_consumption"], "confirmed")
+            self.assertEqual(GatewayHandler.stream_count, 2)
+            self.assertEqual(GatewayHandler.ack_count, 1)
+        finally:
+            gateway.shutdown()
+            gateway.server_close()
+            hub.shutdown()
+            hub.server_close()
+            gateway_thread.join(timeout=2)
+            hub_thread.join(timeout=2)
 
 
 class TurnMediaManagerTests(unittest.TestCase):

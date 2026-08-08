@@ -130,7 +130,7 @@ X-Cutover-Token: <独立 cutover token>
 
 兼容工具入口为 `POST /internal/v1/tools/call`。历史 contracts 继续作为兼容输入事实源；当前模型可见目录以受认证 manifest 为准，并由同一 registry 执行。
 
-`renovation_media_ingest` 只允许模型提交一次性 `attachment_ref` 和结构化元数据。Controller 主进程先检查 Hub 幂等结果，再从 Gateway 流式读取正文并转发到 `/internal/v1/media/ingest`；不会生成 Base64 JSON，也不会把 Gateway bearer、Hub bearer、内部路径或媒体正文交给模型。
+`renovation_media_ingest` 只允许在用户明确请求归档装修/施工/工地媒体时提交一次性 `attachment_ref` 和结构化元数据。Controller 主进程先检查 Hub 幂等结果，再从 Gateway 非消费流式读取正文并转发到 `/internal/v1/media/ingest`；Hub 成功后由 Controller ACK 消费 Gateway 引用，失败时原引用保持可重试。不会生成 Base64 JSON，也不会把 Gateway bearer、Hub bearer、内部路径或媒体正文交给模型。
 
 ## 支持媒体
 

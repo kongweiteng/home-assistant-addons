@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.2.3`。
+当前版本：`0.2.4`。
 
 ## 通用微信会话
 
@@ -15,7 +15,7 @@
 - 管理员可逐工具开启或关闭。页面写请求必须同时携带短期 CSRF token、JSON、当前 catalog revision 和随机 request ID；并发旧 revision 会被拒绝，相同 request ID 的相同正文幂等返回原结果。
 - `/new` 确认和内部作业状态会返回稳定 `TH-*` 短标识，便于排查旧 Thread；完整 Thread、Turn 和 conversation key 不进入页面 DTO。
 - Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；用户自然语言提出查询、查看、核验、汇总或明细请求，即授权本次无副作用只读调用，不需要 Passkey、写入确认或额外征求授权。不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
-- 对 owner，清晰的图表、导出、记账、退款、更正、撤销、导入检查和装修媒体/事件归档请求也视为本次匹配工具调用授权，不再询问“是否确认/授权”。只有缺少必填字段或语义确有多种合理解释时才澄清；讨论、假设、举例和方案比较不能推断为写入命令。
+- 对 owner，清晰的图表、导出、记账、退款、更正、撤销、导入检查和装修媒体/事件归档请求也视为本次匹配工具调用授权，不再询问“是否确认/授权”。只有缺少必填字段或语义确有多种合理解释时才澄清；讨论、假设、举例和方案比较不能推断为写入命令。收到图片、视频或文件本身不构成装修归档授权；只有文本明确包含装修/施工/工地档案目标和正向归档动作时，Controller 才向本轮 Codex 暴露媒体归档工具。
 - app-server 启动时显式禁用 `goals`。普通微信 Turn 不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；需要持续监控时应建立独立 automation/monitor 服务、生命周期和通知通道。
 - bootstrap `ledger_add_payment` 与 Hub manifest 一致，只发布 canonical v2 金额分、日期和九维 `grouped_tags`。Hub 的白名单结构化校验错误会在长度、JSON 形态、错误码和消息控制字符检查后保留；非结构化、超长、未知或敏感错误继续返回通用上游拒绝。
 
@@ -114,7 +114,7 @@ MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 UR
 
 `ledger_attach` 保留 Legacy Ledger v1 桥接：模型只能提交 Gateway 生成的 `attachment_ref`。Controller 主进程使用独立 bearer 一次性读取附件，校验文件名、MIME、大小和 SHA-256，再转换为旧账本需要的 Base64 内容；第一版 Legacy 单附件限制为 20 MiB。
 
-`renovation_media_ingest` 用于新图片/视频档案。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时再从 Gateway 以二进制流读取正文，并直接转发到 Renovation Hub。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
+`renovation_media_ingest` 用于新图片/视频档案。收到附件默认只用于本轮识别，不自动归档；Controller 只有在作业文本明确请求归档到装修/施工/工地档案时才暴露该工具，并在调用时再次执行服务端门禁。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时从 Gateway 的非消费流式接口读取正文，直接转发到 Renovation Hub，Hub 成功后再 ACK 消费 Gateway 引用。Hub 失败时原引用保持可重试，不要求用户重新发送。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
 
 Broker 工具固定为重启提案、Passkey 授权请求/状态、执行和执行状态查询。它们不依赖 Codex UI 审批，但是否允许真正执行仍由 Broker 的不可变提案、Passkey、固定 allowlist、一次性收据、状态机和默认关闭的 `execution_enabled` 决定；Controller 不能绕过这些门禁或提交任意 Supervisor 动作。
 
@@ -134,5 +134,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 使用自定义 URL 回滚时，同时清空 `openai_base_url` 和 `openai_api_key` 或恢复升级前备份；不要把旧 Key 复制到普通文件。
 
 当前旧 Hermes iLink 身份已经失效，不能作为微信恢复目标。回滚 Controller 时应关闭 intake、保留队列和新 Gateway 身份；微信恢复必须修复当前 Gateway 或重新扫码并重新绑定。
+
+从 `0.2.4` 回退到 `0.2.3` 不需要数据库迁移；先关闭 intake 并排空活动作业，确认没有正在流式读取或等待 ACK 的装修媒体。回退后普通附件仍可用于识别，但旧版没有“明确装修档案意图后才暴露工具”的服务端门禁，也没有 Hub 成功后再消费 Gateway 引用的链路。
 
 从 `0.2.3` 回退到 `0.2.2` 不需要数据库迁移；回退会恢复 Goals 可用和通用 Hub HTTP 错误语义，因此应先关闭 intake、排空活动作业并确认没有依赖持续监控的请求。若继续回退到 `0.2.1`，旧版本会忽略 additive `result_summary`、`job_artifacts` 表和私有 artifact 文件；不要删除 `/data/job-artifacts`，待确认没有未发送或仍需下载的图片后再单独清理。

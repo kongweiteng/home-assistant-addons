@@ -14,7 +14,7 @@ import re
 import secrets
 import sqlite3
 import tempfile
-from typing import Any
+from typing import Any, BinaryIO
 import zipfile
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -2972,6 +2972,75 @@ class GatewayStore:
     def consume_attachment(self, reference: str) -> tuple[dict[str, Any], bytes]:
         """Read and atomically consume an attachment reference."""
         return self._read_attachment(reference, consume=True)
+
+    def open_stream_attachment(self, reference: str) -> tuple[dict[str, Any], BinaryIO]:
+        """Open an attachment for a non-consuming, authenticated media stream."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM attachments WHERE attachment_ref=?",
+                (reference,),
+            ).fetchone()
+        if row is None:
+            raise StoreError("attachment_not_found", "附件引用不存在", status=404)
+        if row["consumed_at"] is not None:
+            raise StoreError("attachment_consumed", "附件已经消费", status=409)
+        if parse_time(row["expires_at"]) <= datetime.now(timezone.utc):
+            raise StoreError("attachment_expired", "附件已过期", status=410)
+        raw_path = self.spool_dir / row["storage_name"]
+        spool_root = self.spool_dir.resolve()
+        try:
+            if raw_path.name != row["storage_name"] or raw_path.is_symlink():
+                raise StoreError("attachment_invalid", "附件存储越界或为符号链接", status=409)
+            path = raw_path.resolve(strict=True)
+            path.relative_to(spool_root)
+            if path.parent != spool_root or not path.is_file() or path.is_symlink():
+                raise StoreError("attachment_invalid", "附件存储缺失或越界", status=409)
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            handle = os.fdopen(os.open(path, flags), "rb")
+        except (OSError, ValueError) as exc:
+            raise StoreError("attachment_missing", "附件存储缺失或越界", status=404) from exc
+        try:
+            if path.is_symlink() or not path.is_file() or os.fstat(handle.fileno()).st_size != row["size_bytes"]:
+                raise StoreError("attachment_invalid", "附件大小或存储状态不一致", status=409)
+        except Exception:
+            handle.close()
+            raise
+        return (
+            {
+                "original_filename": row["original_filename"],
+                "mime_type": row["mime_type"],
+                "size_bytes": row["size_bytes"],
+                "sha256": f"sha256:{row['sha256']}",
+            },
+            handle,
+        )
+
+    def acknowledge_attachment(self, reference: str, sha256: str) -> dict[str, Any]:
+        """Consume a streamed attachment only after downstream ingestion succeeds."""
+
+        if not isinstance(sha256, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", sha256):
+            raise StoreError("attachment_invalid", "附件摘要无效", status=400)
+        expected = sha256.split(":", 1)[1]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT sha256,consumed_at,expires_at FROM attachments WHERE attachment_ref=?",
+                (reference,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("attachment_not_found", "附件引用不存在", status=404)
+            if row["sha256"] != expected:
+                raise StoreError("attachment_digest_mismatch", "附件摘要不一致", status=409)
+            if row["consumed_at"] is not None:
+                return {"consumed": True, "idempotent_replay": True}
+            if parse_time(row["expires_at"]) <= datetime.now(timezone.utc):
+                raise StoreError("attachment_expired", "附件已过期", status=410)
+            connection.execute(
+                "UPDATE attachments SET consumed_at=? WHERE attachment_ref=? AND consumed_at IS NULL",
+                (utc_now(), reference),
+            )
+            return {"consumed": True, "idempotent_replay": False}
 
     def _read_attachment(self, reference: str, *, consume: bool) -> tuple[dict[str, Any], bytes]:
         with self._connect() as connection:

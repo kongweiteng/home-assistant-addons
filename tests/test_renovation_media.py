@@ -263,6 +263,13 @@ class MediaStreamingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         first = await asyncio.to_thread(router.call, "renovation_media_ingest", arguments)
         asset = first["result"]["media"]
         self.assertEqual(asset["processing_status"], "ready")
+        self.assertEqual(first["result"]["attachment_consumption"], "confirmed")
+        with self.gateway_store._connect() as connection:
+            consumed = connection.execute(
+                "SELECT consumed_at FROM attachments WHERE attachment_ref=?",
+                (self.attachment_ref,),
+            ).fetchone()[0]
+        self.assertIsNotNone(consumed)
         second = await asyncio.to_thread(router.call, "renovation_media_ingest", arguments)
         self.assertTrue(second["result"]["idempotent_replay"])
         self.assertEqual(second["result"]["media"]["id"], asset["id"])

@@ -11,6 +11,7 @@ import hmac
 import json
 import re
 import secrets
+import shutil
 import time
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -22,6 +23,8 @@ from .store import StoreError
 
 ATTACHMENT_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})$")
 ATTACHMENT_PREVIEW_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/preview$")
+ATTACHMENT_STREAM_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/stream$")
+ATTACHMENT_ACK_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/ack$")
 USER_RE = re.compile(r"^/api/users/(WX-[A-Z2-7]{10})$")
 USER_ACTION_RE = re.compile(r"^/api/users/(WX-[A-Z2-7]{10})/(suspend|resume|revoke)$")
 INVITATION_CANCEL_RE = re.compile(r"^/api/users/invitations/(IV-[A-Z2-7]{10})/cancel$")
@@ -48,7 +51,7 @@ def create_server(
         ).decode("ascii").rstrip("=")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "WeixinGateway/0.3.2"
+        server_version = "WeixinGateway/0.3.3"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -100,6 +103,20 @@ def create_server(
                     return
                 self._attachment(metadata, content)
                 return
+            stream_match = ATTACHMENT_STREAM_RE.fullmatch(path)
+            if stream_match:
+                if not self._authorized():
+                    return
+                handle = None
+                try:
+                    metadata, handle = service.store.open_stream_attachment(unquote(stream_match.group(1)))
+                    self._stream_attachment(metadata, handle)
+                except StoreError as exc:
+                    self._json(HTTPStatus(exc.status), {"error": {"code": exc.code, "message": str(exc)}})
+                finally:
+                    if handle is not None:
+                        handle.close()
+                return
             match = ATTACHMENT_RE.fullmatch(path)
             if match:
                 if not self._authorized():
@@ -115,6 +132,20 @@ def create_server(
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlsplit(self.path).path
+            ack_match = ATTACHMENT_ACK_RE.fullmatch(path)
+            if ack_match:
+                if not self._authorized():
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                self._call(
+                    lambda: service.store.acknowledge_attachment(
+                        unquote(ack_match.group(1)),
+                        str(payload.get("sha256") or ""),
+                    )
+                )
+                return
             if path.startswith("/api/") and not self._csrf_valid():
                 return
             payload = self._read_json(allow_empty=path in {"/api/qr/start", "/api/owner-pairing/start"})
@@ -266,6 +297,17 @@ def create_server(
             self.send_header("X-Attachment-Sha256", metadata["sha256"])
             self.end_headers()
             self.wfile.write(content)
+
+        def _stream_attachment(self, metadata: dict[str, Any], handle: Any) -> None:
+            self.send_response(HTTPStatus.OK)
+            self._headers(metadata["mime_type"], metadata["size_bytes"])
+            self.send_header(
+                "X-Attachment-Filename",
+                base64.urlsafe_b64encode(metadata["original_filename"].encode("utf-8")).decode("ascii"),
+            )
+            self.send_header("X-Attachment-Sha256", metadata["sha256"])
+            self.end_headers()
+            shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
 
         def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

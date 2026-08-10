@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.2.8
+
+- 新增 `renovation_mutate` 统一业务工具，支持项目、阶段、空间、时间线和付款的声明字段修改。
+- 支持明确 ID 的批量预览、摘要校验、确认应用、乐观版本、单 writer、幂等和审计；付款项目归属写入 `transaction_context`，不绕过 Ledger 边界。
+- 新增批量项目归属和预览过期测试；当前仅完成本地源码候选，未部署或回写历史账单。
+
 ## 0.2.7
 
 - 修复 aiohttp 运行时缺少 `/internal/v1/downloads/chart/{reference}` 路由，导致图表文件已生成但 Controller 收到 SPA `text/html` 而拒绝保存 PNG artifact 的问题。

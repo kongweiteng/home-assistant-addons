@@ -24,7 +24,7 @@ def create_server(
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "RenovationHub/0.2.7"
+        server_version = "RenovationHub/0.2.8"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

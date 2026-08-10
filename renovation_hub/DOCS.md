@@ -43,7 +43,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.7` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.8` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
@@ -118,7 +118,7 @@ Content-Type: application/json
 X-Cutover-Token: <独立 cutover token>
 ```
 
-`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、catalog revision/digest 和当前 30 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
+`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、catalog revision/digest 和当前 31 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。`renovation_mutate` 要求明确对象 ID、预览摘要和确认后才应用批量变更。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
 
 `ledger_add_payment` 在 manifest 中只发布 canonical v2 输入：必填 `amount_cents`、`occurred_on`、`grouped_tags`，其中 `grouped_tags` 仅允许“主题、空间、专业、性质、渠道、品牌、生态、阶段、状态”九个固定维度。`amount/date/category/description/main_category/tags/ledger_format_version` 等 legacy 或猜测字段不会暴露，并在业务 dispatch 进入账本事务前返回确定性校验错误。页面和迁移等内部调用仍可使用 `LedgerStore.add_payment` 的 v1 兼容路径。
 

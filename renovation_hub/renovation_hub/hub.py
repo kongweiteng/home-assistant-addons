@@ -11,9 +11,13 @@ from .ledger import (
     LedgerError,
     LedgerStore,
     _idempotency_key,
+    _positive_cents,
     _text,
     _validate_date,
     canonical_json,
+    digest_json,
+    normalize_grouped_tags,
+    normalize_tags,
     utc_now,
 )
 
@@ -24,6 +28,8 @@ STAGE_STATUSES = {"planned", "active", "completed", "archived"}
 AREA_STATUSES = {"active", "archived"}
 EVENT_TYPES = {"progress", "note", "decision", "inspection", "milestone"}
 EVENT_STATUSES = {"active", "voided"}
+MUTATION_TARGET_TYPES = {"project", "stage", "area", "event", "transaction"}
+MUTATION_MAX_TARGETS = 100
 
 
 def _choice(value: Any, field: str, allowed: set[str], *, default: str | None = None) -> str:
@@ -579,6 +585,441 @@ class RenovationHubStore(LedgerStore):
             },
             validate_context=True,
         )
+
+    def mutate(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
+        """Preview or apply a bounded, typed mutation across Hub business objects.
+
+        The model can select explicit object IDs and a declared patch.  Preview
+        returns a digest over the exact current rows; apply must present that
+        digest and an explicit confirmation, so stale or guessed batch writes
+        fail closed without adding a second persistence model.
+        """
+
+        mode = _choice(payload.get("mode", "preview"), "mode", {"preview", "apply"})
+        target_type = _choice(payload.get("target_type"), "target_type", MUTATION_TARGET_TYPES)
+        target_ids = self._mutation_target_ids(payload.get("target_ids"))
+        reason = _text(payload.get("reason"), "reason", 500, required=True)
+        patch = self._clean_mutation_patch(target_type, payload.get("patch"))
+
+        if mode == "preview":
+            with self._connect() as connection:
+                prepared = self._prepare_mutation(connection, target_type, target_ids, patch)
+            return self._mutation_preview_result(target_type, target_ids, patch, reason, prepared)
+
+        if payload.get("confirmed") is not True:
+            raise LedgerError("confirmation_required", "应用变更前必须明确确认预览内容", status=409)
+        preview_digest = _text(payload.get("preview_digest"), "preview_digest", 71, required=True)
+        key = _idempotency_key(payload.get("idempotency_key"))
+
+        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            prepared = self._prepare_mutation(connection, target_type, target_ids, patch)
+            if prepared["preview_digest"] != preview_digest:
+                raise LedgerError("preview_stale", "预览对应的数据已变化，请重新生成预览", status=409)
+            results = self._apply_mutation(
+                connection,
+                target_type,
+                prepared["items"],
+                patch,
+                reason=reason,
+                actor_hash=actor_hash,
+                idempotency_key=key,
+            )
+            return {
+                "mode": "apply",
+                "target_type": target_type,
+                "target_ids": target_ids,
+                "count": len(results),
+                "items": results,
+                "preview_digest": preview_digest,
+            }
+
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={
+                "tool": "renovation_mutate",
+                "target_type": target_type,
+                "target_ids": target_ids,
+                "patch": patch,
+                "reason": reason,
+                "preview_digest": preview_digest,
+            },
+            operation=operation,
+        )
+        return {**result, "idempotent_replay": replayed}
+
+    @staticmethod
+    def _mutation_target_ids(value: Any) -> list[str]:
+        if not isinstance(value, list) or not value or len(value) > MUTATION_MAX_TARGETS:
+            raise LedgerError("invalid_input", f"target_ids 必须是 1 到 {MUTATION_MAX_TARGETS} 个 ID")
+        result = [_text(item, "target_id", 64, required=True) for item in value]
+        if len(set(result)) != len(result):
+            raise LedgerError("invalid_input", "target_ids 不能重复")
+        return result
+
+    @staticmethod
+    def _optional_id(value: Any, field: str) -> str | None:
+        if value is None or value == "":
+            return None
+        return _text(value, field, 64, required=True)
+
+    @classmethod
+    def _clean_mutation_patch(cls, target_type: str, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or not value:
+            raise LedgerError("invalid_input", "patch 必须是非空对象")
+        allowed = {
+            "project": {"name", "timezone", "budget_cents", "status"},
+            "stage": {"name", "position", "status", "color", "planned_start", "planned_end", "actual_start", "actual_end"},
+            "area": {"name", "position", "status"},
+            "event": {"project_id", "stage_id", "area_id", "event_type", "title", "description", "occurred_at", "status"},
+            "transaction": {"amount_cents", "occurred_on", "main_category", "merchant", "note", "is_deposit", "tags", "grouped_tags", "project_id", "stage_id", "area_id"},
+        }[target_type]
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise LedgerError("invalid_input", f"{target_type} 不支持字段：{', '.join(unknown)}")
+        if "tags" in value and "grouped_tags" in value:
+            raise LedgerError("invalid_input", "tags 与 grouped_tags 不能同时修改")
+
+        clean: dict[str, Any] = {}
+        for field, raw in value.items():
+            if field == "amount_cents":
+                clean[field] = _positive_cents(raw)
+            elif field == "budget_cents":
+                clean[field] = _non_negative_cents(raw)
+            elif field == "occurred_on":
+                clean[field] = _validate_date(raw, field)
+            elif field in {"planned_start", "planned_end", "actual_start", "actual_end"}:
+                clean[field] = None if raw is None or raw == "" else _validate_date(raw, field)
+            elif field == "occurred_at":
+                clean[field] = _datetime(raw)
+            elif field in {"project_id", "stage_id", "area_id"}:
+                clean[field] = cls._optional_id(raw, field) if target_type == "transaction" or field != "project_id" else _text(raw, field, 64, required=True)
+            elif field == "position":
+                clean[field] = _position(raw)
+            elif field == "status":
+                choices = {
+                    "project": PROJECT_STATUSES,
+                    "stage": STAGE_STATUSES,
+                    "area": AREA_STATUSES,
+                    "event": EVENT_STATUSES,
+                    "transaction": set(),
+                }[target_type]
+                if not choices:
+                    raise LedgerError("invalid_input", "流水状态不能通过统一变更工具修改")
+                clean[field] = _choice(raw, field, choices)
+            elif field == "event_type":
+                clean[field] = _choice(raw, field, EVENT_TYPES)
+            elif field == "is_deposit":
+                if not isinstance(raw, bool):
+                    raise LedgerError("invalid_input", "is_deposit 必须是布尔值")
+                clean[field] = raw
+            elif field == "tags":
+                clean[field] = normalize_tags(raw)
+            elif field == "grouped_tags":
+                clean[field] = normalize_grouped_tags(raw)[1]
+            elif field in {"name", "timezone", "color", "main_category", "merchant", "note", "title", "description"}:
+                maximum = {
+                    "name": 120 if target_type == "project" else 100,
+                    "timezone": 64,
+                    "color": 32,
+                    "main_category": 80,
+                    "merchant": 200,
+                    "note": 2000,
+                    "title": 160,
+                    "description": 4000,
+                }[field]
+                clean[field] = _text(raw, field, maximum, required=field in {"name", "main_category", "title"})
+            else:
+                raise LedgerError("invalid_input", f"不支持字段：{field}")
+        return clean
+
+    def _mutation_record(self, connection: sqlite3.Connection, target_type: str, object_id: str) -> dict[str, Any]:
+        if target_type == "transaction":
+            row = connection.execute(
+                "SELECT * FROM transactions WHERE id=? AND type='payment' AND status='active'",
+                (object_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerError("payment_not_found", "付款不存在或已撤销", status=404)
+            return self._row_json(connection, row)
+        table = {"project": "projects", "stage": "stages", "area": "areas", "event": "events"}[target_type]
+        return self._object(connection, table, object_id)
+
+    def _mutation_candidate(
+        self,
+        connection: sqlite3.Connection,
+        target_type: str,
+        before: dict[str, Any],
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        after = dict(before)
+        if target_type != "transaction":
+            after.update(patch)
+            self._validate_mutation_candidate(connection, target_type, before, after, patch)
+            return after
+
+        ledger_version = int(before.get("ledger_format_version") or 1)
+        if ledger_version == 1 and "grouped_tags" in patch:
+            raise LedgerError("invalid_input", "v1 付款不能使用 grouped_tags")
+        if ledger_version == 2 and ({"main_category", "tags"} & set(patch)):
+            raise LedgerError("invalid_input", "v2 付款不能使用 legacy 分类或标签")
+        for field, value in patch.items():
+            if field not in {"project_id", "stage_id", "area_id", "grouped_tags", "tags"}:
+                after[field] = value
+        if "grouped_tags" in patch:
+            after["grouped_tags"] = patch["grouped_tags"]
+        if "tags" in patch:
+            after["tags"] = patch["tags"]
+
+        context_fields = {"project_id", "stage_id", "area_id"}
+        if context_fields & set(patch):
+            current = before.get("context") or {}
+            project_id = patch.get("project_id", current.get("project_id"))
+            stage_id = patch.get("stage_id", current.get("stage_id"))
+            area_id = patch.get("area_id", current.get("area_id"))
+            if project_id is None and (stage_id or area_id):
+                raise LedgerError("invalid_input", "没有项目归属时不能保留阶段或空间")
+            after["context"] = (
+                None
+                if project_id is None
+                else {
+                    "project_id": project_id,
+                    "stage_id": stage_id,
+                    "area_id": area_id,
+                    "version": (int(current.get("version") or 0) + 1) if current else 1,
+                    "updated_at": current.get("updated_at"),
+                }
+            )
+        elif before.get("context"):
+            after["context"] = {
+                **before["context"],
+                "version": int(before["context"].get("version") or 0) + 1,
+            }
+        after["version"] = (after.get("context") or {}).get("version", 1)
+        self._validate_mutation_candidate(connection, target_type, before, after, patch)
+        return after
+
+    def _validate_mutation_candidate(
+        self,
+        connection: sqlite3.Connection,
+        target_type: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        patch: dict[str, Any],
+    ) -> None:
+        if target_type == "stage" and after.get("status") == "active":
+            conflict = connection.execute(
+                "SELECT 1 FROM stages WHERE project_id=? AND status='active' AND id<>?",
+                (before["project_id"], before["id"]),
+            ).fetchone()
+            if conflict:
+                raise LedgerError("stage_active_conflict", "同一项目只能有一个进行中阶段", status=409)
+        if target_type == "event":
+            self._validate_context_refs(
+                connection,
+                after["project_id"],
+                after.get("stage_id"),
+                after.get("area_id"),
+            )
+        if target_type == "transaction":
+            context = after.get("context")
+            if context:
+                self._validate_context_refs(
+                    connection,
+                    context["project_id"],
+                    context.get("stage_id"),
+                    context.get("area_id"),
+                )
+            if "amount_cents" in patch:
+                refunded = connection.execute(
+                    "SELECT coalesce(sum(amount_cents),0) FROM transactions WHERE type='refund' AND status='active' AND original_payment_id=?",
+                    (before["id"],),
+                ).fetchone()[0]
+                if patch["amount_cents"] < refunded:
+                    raise LedgerError("refund_exceeds_payment", "付款金额不能低于累计退款", status=409)
+
+    def _prepare_mutation(
+        self,
+        connection: sqlite3.Connection,
+        target_type: str,
+        target_ids: list[str],
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        items: list[dict[str, Any]] = []
+        for object_id in target_ids:
+            before = self._mutation_record(connection, target_type, object_id)
+            after = self._mutation_candidate(connection, target_type, before, patch)
+            items.append({
+                "id": object_id,
+                "before": before,
+                "after": after,
+                "diff": self._mutation_diff(target_type, object_id, before, after, patch),
+            })
+        digest = "sha256:" + digest_json({
+            "target_type": target_type,
+            "target_ids": target_ids,
+            "patch": patch,
+            "before": [item["before"] for item in items],
+        })
+        return {"items": items, "preview_digest": digest}
+
+    @staticmethod
+    def _mutation_diff(
+        target_type: str,
+        object_id: str,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for field in patch:
+            if target_type == "transaction" and field in {"project_id", "stage_id", "area_id"}:
+                before_value = (before.get("context") or {}).get(field)
+                after_value = (after.get("context") or {}).get(field)
+            else:
+                before_value = before.get(field)
+                after_value = after.get(field)
+            values[field] = {"before": before_value, "after": after_value}
+        return {"id": object_id, "version": before.get("version", 1), "changes": values}
+
+    @staticmethod
+    def _mutation_preview_result(
+        target_type: str,
+        target_ids: list[str],
+        patch: dict[str, Any],
+        reason: str,
+        prepared: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "mode": "preview",
+            "target_type": target_type,
+            "target_ids": target_ids,
+            "count": len(prepared["items"]),
+            "changes": [item["diff"] for item in prepared["items"]],
+            "patch": patch,
+            "reason": reason,
+            "preview_digest": prepared["preview_digest"],
+            "requires_confirmation": True,
+            "confirmation_hint": "回复“确认修改”后再应用这批变更",
+        }
+
+    def _apply_mutation(
+        self,
+        connection: sqlite3.Connection,
+        target_type: str,
+        items: list[dict[str, Any]],
+        patch: dict[str, Any],
+        *,
+        reason: str,
+        actor_hash: str,
+        idempotency_key: str,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for item in items:
+            object_id = item["id"]
+            before = item["before"]
+            if target_type == "transaction":
+                row = connection.execute(
+                    "SELECT * FROM transactions WHERE id=? AND type='payment' AND status='active'",
+                    (object_id,),
+                ).fetchone()
+                if row is None:
+                    raise LedgerError("payment_not_found", "付款不存在或已撤销", status=404)
+                columns = {
+                    field: value
+                    for field, value in patch.items()
+                    if field not in {"project_id", "stage_id", "area_id", "tags", "grouped_tags"}
+                }
+                if columns:
+                    columns["updated_at"] = utc_now()
+                    assignments = ",".join(f"{field}=?" for field in columns)
+                    connection.execute(
+                        f"UPDATE transactions SET {assignments} WHERE id=?",
+                        (*columns.values(), object_id),
+                    )
+                if "tags" in patch:
+                    self._set_tags(connection, object_id, patch["tags"])
+                if "grouped_tags" in patch:
+                    self._set_tags(
+                        connection,
+                        object_id,
+                        normalize_grouped_tags(patch["grouped_tags"])[0],
+                        ledger_format_version=2,
+                    )
+                context_patch = {field for field in patch if field in {"project_id", "stage_id", "area_id"}}
+                current_context = connection.execute(
+                    "SELECT project_id,stage_id,area_id,version FROM transaction_context WHERE transaction_id=?",
+                    (object_id,),
+                ).fetchone()
+                if context_patch or (columns or "tags" in patch or "grouped_tags" in patch):
+                    candidate_context = item["after"].get("context")
+                    if candidate_context is None:
+                        connection.execute("DELETE FROM transaction_context WHERE transaction_id=?", (object_id,))
+                    elif current_context:
+                        connection.execute(
+                            "UPDATE transaction_context SET project_id=?,stage_id=?,area_id=?,version=?,updated_at=? WHERE transaction_id=?",
+                            (
+                                candidate_context["project_id"],
+                                candidate_context.get("stage_id"),
+                                candidate_context.get("area_id"),
+                                int(current_context["version"]) + 1,
+                                utc_now(),
+                                object_id,
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            "INSERT INTO transaction_context(transaction_id,project_id,stage_id,area_id,version,updated_at) VALUES (?,?,?,?,1,?)",
+                            (
+                                object_id,
+                                candidate_context["project_id"],
+                                candidate_context.get("stage_id"),
+                                candidate_context.get("area_id"),
+                                utc_now(),
+                            ),
+                        )
+                updated = connection.execute("SELECT * FROM transactions WHERE id=?", (object_id,)).fetchone()
+                after = self._row_json(connection, updated)
+                self._audit(
+                    connection,
+                    action="mutate_transaction",
+                    target_id=object_id,
+                    actor_hash=actor_hash,
+                    idempotency_key=idempotency_key,
+                    reason=reason,
+                    before=before,
+                    after=after,
+                )
+                results.append(after)
+                continue
+
+            table = {"project": "projects", "stage": "stages", "area": "areas", "event": "events"}[target_type]
+            expected_version = int(before["version"])
+            self._validate_mutation_candidate(connection, target_type, before, item["after"], patch)
+            assignments = ",".join(f"{field}=?" for field in patch)
+            values = list(patch.values()) + [expected_version + 1, utc_now(), object_id, expected_version]
+            try:
+                cursor = connection.execute(
+                    f"UPDATE {table} SET {assignments},version=?,updated_at=? WHERE id=? AND version=?",
+                    values,
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LedgerError(f"{target_type}_conflict", "对象名称或状态冲突", status=409) from exc
+            if cursor.rowcount != 1:
+                raise LedgerError("version_conflict", "对象已被其他请求修改", status=409)
+            after = self._object(connection, table, object_id)
+            self._domain_audit(
+                connection,
+                action=f"mutate_{target_type}",
+                target_type=target_type,
+                target_id=object_id,
+                actor_hash=actor_hash,
+                idempotency_key=idempotency_key,
+                before=before,
+                after=after,
+                reason=reason,
+            )
+            results.append(after)
+        return results
 
     def _update_simple(
         self,

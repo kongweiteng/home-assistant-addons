@@ -16,7 +16,7 @@ from .portable import MAX_GROUPED_TAG_LENGTH, MAX_GROUPED_TAGS, TAG_DIMENSIONS
 MANIFEST_VERSION = 1
 MANIFEST_SERVICE = "renovation_hub"
 MANIFEST_SCOPE = "business"
-BUSINESS_CATALOG_REVISION = 2
+BUSINESS_CATALOG_REVISION = 3
 ALLOWED_TRANSPORTS = {"json", "gateway_attachment", "gateway_media_stream"}
 ALLOWED_RISK_TYPES = {"read", "write"}
 
@@ -176,6 +176,7 @@ def _store_call(method: str, *, result_key: str | None = None) -> ToolHandler:
             "update_area",
             "create_event",
             "update_event",
+            "mutate",
         }:
             result = function(arguments, actor_hash=actor_hash)
         else:
@@ -350,6 +351,36 @@ MEDIA_FILTERS = {
     "limit": LIMIT,
 }
 
+MUTATION_PATCH = _object(
+    {
+        "name": _string(120, minimum=1),
+        "timezone": _string(64, minimum=1),
+        "budget_cents": _integer(0, 100_000_000_000),
+        "status": _enum("active", "completed", "archived", "planned", "voided"),
+        "position": _integer(0, 10000),
+        "color": _string(32, minimum=1),
+        "planned_start": DATE,
+        "planned_end": DATE,
+        "actual_start": DATE,
+        "actual_end": DATE,
+        "project_id": ID,
+        "stage_id": ID,
+        "area_id": ID,
+        "event_type": _enum("progress", "note", "decision", "inspection", "milestone"),
+        "title": _string(160, minimum=1),
+        "description": _string(4000),
+        "occurred_at": DATETIME,
+        "amount_cents": _integer(1, 100_000_000_000),
+        "occurred_on": DATE,
+        "main_category": _string(80, minimum=1),
+        "merchant": _string(200),
+        "note": _string(2000),
+        "is_deposit": {"type": "boolean"},
+        "tags": TAGS,
+        "grouped_tags": GROUPED_TAGS,
+    }
+)
+
 
 BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
     _tool(
@@ -423,6 +454,32 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
         ),
         business_actions=("ledger.transaction.update",),
         handler=_store_call("correct_payment"),
+    ),
+    _tool(
+        "renovation_mutate",
+        "统一修改装修数据",
+        "先预览，再按明确对象 ID 批量修改项目、阶段、空间、时间线或付款及其项目归属；应用时必须提交预览摘要和明确确认。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "mode": _enum("preview", "apply"),
+                "target_type": _enum("project", "stage", "area", "event", "transaction"),
+                "target_ids": {
+                    "type": "array",
+                    "items": ID,
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "uniqueItems": True,
+                },
+                "patch": MUTATION_PATCH,
+                "reason": _string(500, minimum=1),
+                "preview_digest": _string(71, minimum=71),
+                "confirmed": {"type": "boolean"},
+            },
+            required=("mode", "target_type", "target_ids", "patch", "reason"),
+        ),
+        business_actions=("mutation.apply",),
+        handler=_store_call("mutate"),
     ),
     _tool(
         "ledger_undo",

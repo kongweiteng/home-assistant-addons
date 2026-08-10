@@ -52,11 +52,11 @@ class BusinessManifestTests(unittest.TestCase):
         self.assertEqual(manifest["service"], "renovation_hub")
         self.assertEqual(manifest["scope"], "business")
         self.assertGreater(manifest["catalog_revision"], 0)
-        self.assertEqual(len(manifest["tools"]), 30)
+        self.assertEqual(len(manifest["tools"]), 31)
         names = [tool["name"] for tool in manifest["tools"]]
         self.assertEqual(names, sorted(names))
         self.assertEqual(
-            {"renovation_search", "renovation_media_list", "renovation_media_show"} - set(names),
+            {"renovation_search", "renovation_media_list", "renovation_media_show", "renovation_mutate"} - set(names),
             set(),
         )
 
@@ -502,6 +502,42 @@ class BusinessDispatchTests(unittest.TestCase):
                     "SELECT (SELECT COUNT(*) FROM transactions), (SELECT COUNT(*) FROM audit_log)"
                 ).fetchone()
             self.assertEqual(tuple(current), tuple(baseline))
+
+    def test_mutation_dispatch_supports_preview_and_apply(self) -> None:
+        payment = self.store.add_payment(
+            {
+                "idempotency_key": key("dispatch-unscoped"),
+                "amount_cents": 7600,
+                "occurred_on": "2026-08-05",
+                "main_category": "主材",
+            }
+        )["transaction"]
+        arguments = {
+            "mode": "preview",
+            "target_type": "transaction",
+            "target_ids": [payment["id"]],
+            "patch": {"project_id": self.project["id"]},
+            "reason": "动态工具补充项目归属",
+        }
+        preview = dispatch_tool(
+            self.store,
+            {"name": "renovation_mutate", "actor_hash": "sha256:fixture", "arguments": arguments},
+        )
+        applied = dispatch_tool(
+            self.store,
+            {
+                "name": "renovation_mutate",
+                "actor_hash": "sha256:fixture",
+                "arguments": {
+                    **arguments,
+                    "mode": "apply",
+                    "preview_digest": preview["preview_digest"],
+                    "confirmed": True,
+                    "idempotency_key": key("dispatch-mutation-apply"),
+                },
+            },
+        )
+        self.assertEqual(applied["items"][0]["context"]["project_id"], self.project["id"])
 
 
 class ManifestEndpointTests(unittest.TestCase):

@@ -1,5 +1,5 @@
 name: Codex Controller
-version: "0.2.4"
+version: "0.3.0"
 slug: codex_controller
 description: "基于官方 Codex app-server 的持久任务、认证与受限工具控制器。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_controller"
@@ -38,6 +38,11 @@ options:
   max_queue: 200
   max_result_chars: 12000
   max_media_bytes: 1073741824
+  runner_center_v2_enabled: false
+  runner_online_seconds: 30
+  runner_offline_seconds: 90
+  runner_lease_ttl_seconds: 60
+  runner_task_ttl_seconds: 1800
 schema:
   internal_api_token: password
   intake_enabled: bool
@@ -55,3 +60,8 @@ schema:
   max_queue: "int(1,5000)"
   max_result_chars: "int(1000,32000)"
   max_media_bytes: "int(1048576,4294967296)"
+  runner_center_v2_enabled: bool
+  runner_online_seconds: "int(5,300)"
+  runner_offline_seconds: "int(10,900)"
+  runner_lease_ttl_seconds: "int(5,3600)"
+  runner_task_ttl_seconds: "int(60,86400)"

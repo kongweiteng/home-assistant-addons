@@ -15,6 +15,8 @@ from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 from .api import create_server
 from .app_server import AppServerClient
 from .media_input import TurnMediaManager
+from .runner_service import RunnerManagerService
+from .runner_store import RunnerStore
 from .service import ControllerService
 from .store import ControllerStore
 from .tool_catalog import ALL_TOOL_NAMES
@@ -221,10 +223,22 @@ def main() -> None:
         codex_model=codex_model,
     )
 
+    database_path = os.environ.get("CONTROLLER_DATABASE_PATH", data_dir / "controller.sqlite3")
     store = ControllerStore(
-        os.environ.get("CONTROLLER_DATABASE_PATH", data_dir / "controller.sqlite3"),
+        database_path,
         max_queue=int(os.environ.get("CONTROLLER_MAX_QUEUE", "200")),
         max_result_chars=int(os.environ.get("CONTROLLER_MAX_RESULT_CHARS", "12000")),
+    )
+    runner_store = RunnerStore(
+        database_path,
+        online_after_seconds=int(os.environ.get("CONTROLLER_RUNNER_ONLINE_SECONDS", "30")),
+        offline_after_seconds=int(os.environ.get("CONTROLLER_RUNNER_OFFLINE_SECONDS", "90")),
+        lease_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_LEASE_TTL_SECONDS", "60")),
+        task_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_TASK_TTL_SECONDS", "1800")),
+    )
+    runner_manager = RunnerManagerService(
+        runner_store,
+        enabled=os.environ.get("CONTROLLER_RUNNER_CENTER_V2_ENABLED", "false").lower() == "true",
     )
     router = ToolRouter(
         ledger_base_url=os.environ.get("CONTROLLER_LEDGER_BASE_URL", ""),
@@ -260,6 +274,7 @@ def main() -> None:
         codex_model_mode="custom" if codex_model else "default",
         turn_media=turn_media,
         tool_context=router,
+        runner_manager=runner_manager,
     )
     service.start()
     server = create_server(

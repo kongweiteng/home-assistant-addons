@@ -57,6 +57,7 @@ async def async_main() -> None:
         max_media_bytes=int(os.environ.get("WEIXIN_MAX_MEDIA_BYTES", str(20 * 1024 * 1024))),
         controller_ingress_base_url=os.environ.get("WEIXIN_CONTROLLER_INGRESS_BASE_URL", ""),
         remote_work_enabled=os.environ.get("WEIXIN_REMOTE_WORK_ENABLED", "false").lower() == "true",
+        runner_manager_v2_enabled=os.environ.get("WEIXIN_RUNNER_MANAGER_V2_ENABLED", "false").lower() == "true",
         remote_work_ttl_seconds=int(os.environ.get("WEIXIN_REMOTE_WORK_TTL_SECONDS", "1800")),
         max_active_identities=int(os.environ.get("WEIXIN_MAX_ACTIVE_IDENTITIES", "5")),
     )

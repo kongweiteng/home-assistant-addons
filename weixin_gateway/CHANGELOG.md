@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.4.0
+
+- 新增默认关闭的 Runner Manager v2 精确路由：active owner 的 start/status/continue/cancel 直接调用 Controller 确定性 API，不经过 Codex app-server，也不由 Gateway 选择 Runner。
+- v2 请求和响应使用稳定 request ID、严格字段/大小/时间/ID 校验和有界中文错误；Controller 失败或契约不匹配时不回退 v1 MQTT 或普通聊天，避免双投与重复执行。
+- `runner_manager_v2_enabled=false` 时普通聊天、Remote Work v1、通知、多身份 Poller、媒体和 Controller job 行为不变；本版本不启用真实 Relay、Runner、HAOS options 或微信生产链路。
+
 ## 0.3.3
 
 - 媒体归档安全修复：新增受认证的非消费流式附件读取和 ACK 消费接口，旧一次性附件接口保持兼容；流式或下游归档失败时，附件引用在 TTL 内保持可重试。

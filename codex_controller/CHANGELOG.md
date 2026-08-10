@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.3.0
+
+- 新增默认关闭的 Runner Center v2：独立 Runner Registry、一次性 enrollment、凭据摘要/轮换/吊销、心跳、自检、状态三元组、原子 lease、assignment epoch、任务审计和中文 Ingress 管理页面。
+- 新增 Runner 管理 API，写操作使用 HA Ingress 管理员身份、CSRF、revision 和 request ID；页面支持新增、启用、排空、紧急停用、轮换和删除，不提供网页终端、任意 Shell、任意路径或秘密回显。
+- Remote Work v2 消息校验覆盖 body digest、result hash、TTL、lease、epoch/sequence、项目、标签、能力、平台和 policy revision；已运行任务失联进入 `recovery_required`，禁止自动转移或被迟到结果覆盖。
+- v2 feature flag 默认关闭，Runner SQLite 表为 additive；普通 Codex job/Thread/MCP、装修账本、Operations 和 Remote Work v1 不改变。当前不包含真实公网 Relay、真实 Runner 安装、HAOS/微信启用或生产部署。
+
 ## 0.2.4
 
 - 媒体归档安全修复：普通附件默认只用于识别，不再因收到图片/视频就暴露装修归档工具；明确装修/施工/工地归档意图后才允许调用。新媒体链路改用 Gateway 非消费流式读取，Hub 成功后 ACK 消费，Hub 失败时保留原引用以便重试。

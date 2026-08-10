@@ -1,5 +1,5 @@
 name: Weixin Gateway
-version: "0.3.3"
+version: "0.4.0"
 slug: weixin_gateway
 description: "承载一人一个 ClawBot、多身份原路回复与安全多人 Codex 接入的微信网关。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"
@@ -46,6 +46,7 @@ options:
   notification_allowed_audiences:
     - "owner"
   remote_work_enabled: false
+  runner_manager_v2_enabled: false
   remote_work_mqtt_host: ""
   remote_work_mqtt_port: 1883
   remote_work_mqtt_username: ""
@@ -78,6 +79,7 @@ schema:
   notification_allowed_audiences:
     - str
   remote_work_enabled: bool
+  runner_manager_v2_enabled: bool
   remote_work_mqtt_host: str
   remote_work_mqtt_port: "int(1,65535)"
   remote_work_mqtt_username: "str?"

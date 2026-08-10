@@ -1281,7 +1281,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn("api/auth/api-key/retry", DASHBOARD_JS)
         self.assertIn("页面不会显示 URL 或 Key 内容", DASHBOARD_JS)
         self.assertIn("API 端点", DASHBOARD_JS)
-        self.assertNotIn("<input", DASHBOARD_HTML.lower())
+        self.assertNotIn('type="password"', DASHBOARD_HTML.lower())
         self.assertNotIn("openai_api_key", DASHBOARD_HTML + DASHBOARD_JS)
         self.assertNotIn("openai_base_url", DASHBOARD_HTML + DASHBOARD_JS)
         self.assertIn("意图示例不是固定关键词", DASHBOARD_HTML)
@@ -1304,7 +1304,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.2.4"
+        expected = "0.3.0"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",

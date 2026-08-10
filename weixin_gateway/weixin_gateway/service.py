@@ -33,6 +33,18 @@ from .remote_work import (
     build_command_document,
     parse_work_command,
 )
+from .remote_work_v2 import (
+    ROUTE_REJECT,
+    ROUTE_V1,
+    ROUTE_V2,
+    RunnerManagerContractError,
+    RunnerManagerRequest,
+    RunnerManagerResponseError,
+    RunnerManagerResult,
+    build_runner_manager_request,
+    parse_runner_manager_response,
+    select_work_route,
+)
 from .store import (
     GatewayStore,
     IdentityStore,
@@ -201,6 +213,55 @@ class ControllerClient:
         self.capability_state = "compatible" if capability in self._capabilities else "legacy_incompatible"
         return capability in self._capabilities
 
+    async def runner_manager(self, request: RunnerManagerRequest) -> RunnerManagerResult:
+        """Call the deterministic v2 API and validate its bounded response."""
+        if not self.configured:
+            raise StoreError("controller_unavailable", "Codex Controller 未配置", status=503)
+        if self.session is None:
+            await self.start()
+        assert self.session is not None
+        body = json.dumps(
+            request.body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            async with self.session.request(
+                request.method,
+                f"{self.base_url}{request.path}",
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-Body-Digest": request.body_digest,
+                },
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as response:
+                raw = await response.content.read(32 * 1024 + 1)
+                if len(raw) > 32 * 1024:
+                    raise StoreError("controller_invalid_response", "Runner Manager 响应过大", status=502)
+                try:
+                    document = json.loads(raw)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise StoreError("controller_invalid_response", "Runner Manager 响应 JSON 无效", status=502) from exc
+                try:
+                    return parse_runner_manager_response(
+                        response.status,
+                        document,
+                        expected_request_id=request.request_id,
+                        expected_operation=str(request.body["operation"]),
+                    )
+                except RunnerManagerResponseError as exc:
+                    raise StoreError(exc.code, str(exc), status=exc.status_code) from exc
+                except RunnerManagerContractError as exc:
+                    raise StoreError("controller_invalid_response", str(exc), status=502) from exc
+        except StoreError:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise StoreError("controller_unavailable", "Runner Manager 不可用", status=503) from exc
+
     async def _request(self, method: str, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
         if not self.configured:
             raise StoreError("controller_unavailable", "Codex Controller 未配置", status=503)
@@ -278,6 +339,7 @@ class GatewayService:
         max_media_bytes: int,
         controller_ingress_base_url: str = "",
         remote_work_enabled: bool = False,
+        runner_manager_v2_enabled: bool = False,
         remote_work_ttl_seconds: int = 1800,
         max_active_identities: int = 5,
     ):
@@ -308,6 +370,7 @@ class GatewayService:
             controller_ingress_base_url
         )
         self.remote_work_enabled = remote_work_enabled
+        self.runner_manager_v2_enabled = runner_manager_v2_enabled
         self.remote_work_ttl_seconds = remote_work_ttl_seconds
         if not isinstance(max_active_identities, int) or isinstance(max_active_identities, bool) or not 1 <= max_active_identities <= 32:
             raise StoreError("identity_limit_invalid", "活动 ClawBot 上限无效")
@@ -956,13 +1019,38 @@ class GatewayService:
         message["principal_id"] = user["principal_id"]
         if message["context_token"]:
             self.identity_store.set_context(current.identity, sender_id, message["context_token"])
-        try:
-            work_command = parse_work_command(str(message.get("text") or ""))
-        except WorkCommandError as exc:
+        route = select_work_route(
+            message.get("text"),
+            role=str(user["role"]),
+            has_attachments=bool(message["media"]),
+            v2_enabled=self.runner_manager_v2_enabled,
+            v1_available=True,
+        )
+        if route.route == ROUTE_REJECT:
             user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
-            await self._send_remote_work_text(message, user, str(exc), error_code=exc.code)
+            await self._send_remote_work_text(
+                message,
+                user,
+                str(route.public_message),
+                error_code=str(route.error_code),
+            )
             self._touch_runtime_message(current)
             return
+        if route.route == ROUTE_V2:
+            user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
+            assert route.command is not None
+            await self._handle_runner_manager_v2(message, user, route.command)
+            self._touch_runtime_message(current)
+            return
+        work_command: WorkCommand | None = None
+        if route.route == ROUTE_V1:
+            try:
+                work_command = parse_work_command(str(message.get("text") or ""))
+            except WorkCommandError as exc:
+                user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
+                await self._send_remote_work_text(message, user, str(exc), error_code=exc.code)
+                self._touch_runtime_message(current)
+                return
         if work_command is not None:
             user = self.store.touch_user(sender_id, identity_identifier=current.identity_id) or user
             if message["media"]:
@@ -1007,6 +1095,48 @@ class GatewayService:
             capability_profile="owner" if user["role"] == "owner" else "member_read_only",
         )
         self._touch_runtime_message(current)
+
+    async def _handle_runner_manager_v2(
+        self,
+        message: dict[str, Any],
+        user: dict[str, Any],
+        command: Any,
+    ) -> None:
+        request = build_runner_manager_request(
+            command,
+            identity_id=str(message["identity_id"]),
+            message_id=str(message["message_id"]),
+            principal_hash=str(user["user_hash"]),
+        )
+        try:
+            result = await self.controller.runner_manager(request)
+        except StoreError as exc:
+            await self._send_remote_work_text(
+                message,
+                user,
+                str(exc),
+                error_code=f"runner_manager_{exc.code}",
+            )
+            return
+        parts = [f"Runner task {result.task_id}：{result.state}"]
+        if result.stage:
+            parts.append(f"阶段：{result.stage}")
+        if result.summary:
+            parts.append(result.summary)
+        if result.test_summary:
+            parts.append(f"测试：{result.test_summary}")
+        if result.candidate_id:
+            parts.append(f"候选：{result.candidate_id}")
+        if result.action_required:
+            parts.append(f"需要处理：{result.action_required}")
+        if result.next_actions:
+            parts.append("下一步：" + "；".join(result.next_actions))
+        await self._send_remote_work_text(
+            message,
+            user,
+            "\n".join(parts),
+            error_code=f"runner_manager_{result.operation}",
+        )
 
     async def _handle_remote_work_command(
         self,
@@ -2320,7 +2450,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.3.3",
+            "version": "0.4.0",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],
@@ -2349,6 +2479,7 @@ class GatewayService:
             "queue": self.store.status(),
             "remote_work": {
                 "enabled": self.remote_work_enabled,
+                "runner_manager_v2_enabled": self.runner_manager_v2_enabled,
                 **self.store.remote_work_status(),
             },
         }

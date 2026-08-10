@@ -9,6 +9,7 @@ from typing import Any
 
 from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
+from .runner_service import RunnerManagerService
 from .store import ControllerStore, StoreError
 
 
@@ -59,6 +60,7 @@ class ControllerService:
         codex_model_mode: str = "default",
         turn_media: TurnMediaManager | None = None,
         tool_context: Any | None = None,
+        runner_manager: RunnerManagerService | None = None,
     ):
         if auth_mode not in self.AUTH_MODES:
             raise ValueError("Controller auth_mode 不受支持")
@@ -75,6 +77,7 @@ class ControllerService:
         self.codex_model_mode = codex_model_mode
         self.turn_media = turn_media
         self.tool_context = tool_context
+        self.runner_manager = runner_manager
         self.auth_error: str | None = None
         self.pending_login: dict[str, Any] | None = None
         self.start_error: str | None = None
@@ -94,9 +97,13 @@ class ControllerService:
             self._reconcile_initial_auth()
         self._scheduler = threading.Thread(target=self._scheduler_loop, name="codex-controller-scheduler", daemon=True)
         self._scheduler.start()
+        if self.runner_manager is not None:
+            self.runner_manager.start()
 
     def stop(self) -> None:
         self._stop.set()
+        if self.runner_manager is not None:
+            self.runner_manager.stop()
         self.app_server.stop()
 
     def submit(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -111,6 +118,7 @@ class ControllerService:
                 "thread_short_v1",
                 "mcp_tool_policy_v1",
                 "job_artifacts_v1",
+                "runner_manager_v2",
             ],
         }
 
@@ -202,7 +210,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.2.4",
+            "version": "0.3.0",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -236,6 +244,22 @@ class ControllerService:
             },
             "pending_login": self.pending_login,
             "queue": self.store.status(),
+            "runner_manager": (
+                self.runner_manager.status()
+                if self.runner_manager is not None
+                else {
+                    "enabled": False,
+                    "relay_configured": False,
+                    "last_error": None,
+                    "summary": {
+                        "total": 0,
+                        "enabled": 0,
+                        "online": 0,
+                        "busy": 0,
+                        "recovery_required": 0,
+                    },
+                }
+            ),
         }
 
     def handle_notification(self, message: dict[str, Any], *, allow_buffer: bool = True) -> None:

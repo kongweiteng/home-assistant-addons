@@ -30,7 +30,7 @@ export WEIXIN_MAX_ACTIVE_IDENTITIES=$(jq -r '.max_active_identities // 5' "$OPTI
 export WEIXIN_SPOOL_TTL_SECONDS=$(jq -r '.spool_ttl_seconds // 86400' "$OPTIONS_FILE")
 export WEIXIN_DATA_DIR=/data
 export WEIXIN_DATABASE_PATH=/data/gateway.sqlite3
-export WEIXIN_ADDON_VERSION=0.3.3
+export WEIXIN_ADDON_VERSION=0.4.0
 export WEIXIN_NOTIFICATION_BRIDGE_ENABLED=$(jq -r '.notification_bridge_enabled // false' "$OPTIONS_FILE")
 export WEIXIN_NOTIFICATION_MQTT_HOST=$(jq -r '.notification_mqtt_host // ""' "$OPTIONS_FILE")
 export WEIXIN_NOTIFICATION_MQTT_PORT=$(jq -r '.notification_mqtt_port // 1883' "$OPTIONS_FILE")
@@ -39,6 +39,7 @@ export WEIXIN_NOTIFICATION_MQTT_PASSWORD=$(jq -r '.notification_mqtt_password //
 export WEIXIN_NOTIFICATION_MQTT_TLS=$(jq -r '.notification_mqtt_tls // false' "$OPTIONS_FILE")
 export WEIXIN_NOTIFICATION_ALLOWED_AUDIENCES=$(jq -r '(.notification_allowed_audiences // ["owner"]) | join(",")' "$OPTIONS_FILE")
 export WEIXIN_REMOTE_WORK_ENABLED=$(jq -r '.remote_work_enabled // false' "$OPTIONS_FILE")
+export WEIXIN_RUNNER_MANAGER_V2_ENABLED=$(jq -r '.runner_manager_v2_enabled // false' "$OPTIONS_FILE")
 export WEIXIN_REMOTE_WORK_MQTT_HOST=$(jq -r '.remote_work_mqtt_host // ""' "$OPTIONS_FILE")
 export WEIXIN_REMOTE_WORK_MQTT_PORT=$(jq -r '.remote_work_mqtt_port // 1883' "$OPTIONS_FILE")
 export WEIXIN_REMOTE_WORK_MQTT_USERNAME=$(jq -r '.remote_work_mqtt_username // ""' "$OPTIONS_FILE")
@@ -68,5 +69,12 @@ if [ "$WEIXIN_REMOTE_WORK_ENABLED" = "true" ]; then
     fi
 fi
 
-bashio::log.info "启动 Weixin Gateway，poller_enabled=${WEIXIN_POLLER_ENABLED}，notification_bridge_enabled=${WEIXIN_NOTIFICATION_BRIDGE_ENABLED}，remote_work_enabled=${WEIXIN_REMOTE_WORK_ENABLED}"
+if [ "$WEIXIN_RUNNER_MANAGER_V2_ENABLED" = "true" ]; then
+    if [ -z "$WEIXIN_CONTROLLER_BASE_URL" ] || [ "${#WEIXIN_CONTROLLER_API_TOKEN}" -lt 32 ]; then
+        bashio::log.fatal "启用 Runner Manager v2 时必须配置 Controller base URL 和至少 32 字符的内部 API Token"
+        exit 1
+    fi
+fi
+
+bashio::log.info "启动 Weixin Gateway，poller_enabled=${WEIXIN_POLLER_ENABLED}，notification_bridge_enabled=${WEIXIN_NOTIFICATION_BRIDGE_ENABLED}，remote_work_enabled=${WEIXIN_REMOTE_WORK_ENABLED}，runner_manager_v2_enabled=${WEIXIN_RUNNER_MANAGER_V2_ENABLED}"
 exec python3 -m weixin_gateway.main

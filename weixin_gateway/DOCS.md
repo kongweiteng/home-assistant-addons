@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.3.3`。
+当前版本：`0.4.0`。
 
 ## 配置
 
@@ -23,6 +23,7 @@
 | `notification_mqtt_tls` | 是否使用 MQTT TLS |
 | `notification_allowed_audiences` | v1 固定只能为 `owner` |
 | `remote_work_enabled` | 是否启用 owner-only Remote Work MQTT 适配；默认关闭 |
+| `runner_manager_v2_enabled` | 是否把精确 owner `/work` 命令确定性路由到 Controller Runner Manager v2；默认关闭，启用后不再双投 v1 |
 | `remote_work_mqtt_host`、`remote_work_mqtt_port` | 专用 Remote Work Broker 地址和端口；不得猜测或复用通知配置 |
 | `remote_work_mqtt_username`、`remote_work_mqtt_password` | Gateway Remote Work 专用最小 ACL 凭据；启用时必填 |
 | `remote_work_mqtt_tls` | 是否使用 MQTT TLS |
@@ -168,6 +169,15 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 
 `remote_work_enabled=false` 时普通微信、Controller 和主动通知不受影响。正式启用必须另行完成专用 EMQX 用户/ACL、Mac Agent 安装、LaunchAgent、Gateway 升级、真实微信和睡眠/重启/TTL/断线验收；本地代码开发授权不包含这些动作。
 
+### Runner Manager v2
+
+当 `runner_manager_v2_enabled=true` 时，Gateway 仍只接受上述四种精确 owner 命令，但请求改为通过既有 Controller 内部 bearer 调用 Runner Manager v2。Gateway 不选择 Runner、不保存 Runner 凭据，也不接触 Relay。
+
+- v2 start/status/continue/cancel 使用有界 JSON、稳定 request ID、owner principal hash 和严格响应契约。
+- v2 命令不会同时进入 v1 MQTT；Controller 失败、超时、返回非法 DTO 或没有匹配 Runner 时，Gateway 只回复一次脱敏错误，不回退 v1 或普通聊天。
+- `runner_manager_v2_enabled=false` 时维持原 v1/普通聊天分流；`remote_work_enabled=false` 与 v2 开关相互独立，但正式迁移时必须保证同一精确命令只有一个执行路径。
+- 当前版本只提供本地候选和确定性路由；真实 Relay、Runner、HAOS options 和微信验收属于后续受控发布。
+
 ## 回滚
 
 1. 关闭新 Gateway 的 intake 和全部身份 Poller，等待当前长轮询退出并释放所有 Token 锁。
@@ -178,6 +188,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 6. 不删除 Gateway 私有数据，直到确认没有未回传消息、附件或需要恢复的成员身份。
 
 从 `0.3.3` 回退到 `0.3.2` 不需要数据库迁移；先停止全部 Poller 并确认没有 Controller 正在读取附件。旧版本会忽略新的非消费流式读取与 ACK 接口，原有一次性附件接口和私有 spool 数据保持兼容。
+
+从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
 
 真实凭据导入、停止 Hermes、启动新 poller 和微信端到端测试均属于独立 L3 人工闸门。
 

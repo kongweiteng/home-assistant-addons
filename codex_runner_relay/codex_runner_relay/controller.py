@@ -11,6 +11,10 @@ from urllib.parse import urlsplit
 import aiohttp
 
 
+CONTROLLER_HOST = "local-codex-controller"
+CONTROLLER_PORT = 8102
+
+
 class ControllerRelayError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -29,8 +33,8 @@ def validate_controller_base_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
         or parsed.path not in {"", "/"}
-        or parsed.port is None
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", parsed.hostname)
+        or parsed.hostname != CONTROLLER_HOST
+        or parsed.port != CONTROLLER_PORT
     ):
         raise ValueError("Controller base URL 必须是精确 Add-on 内部 HTTP 地址")
     return value.rstrip("/")

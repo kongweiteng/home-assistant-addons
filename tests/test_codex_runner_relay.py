@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 import aiohttp
 from aiohttp.test_utils import TestServer
 
+from codex_runner_relay import __version__
 from codex_runner_relay.app import ConnectionRate, RelayHub, create_app
+from codex_runner_relay.controller import validate_controller_base_url
 from codex_runner_relay.protocol import (
     RelayProtocolError,
     validate_event_message,
@@ -20,6 +23,29 @@ TOKEN = "ENROLL-" + "B" * 48
 
 
 class RelayProtocolUnitTests(unittest.TestCase):
+    def test_addon_version_and_controller_hostname_contract_are_exact(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
+        config = (root / "config.yaml").read_text(encoding="utf-8")
+        run_script = (root / "run.sh").read_text(encoding="utf-8")
+        self.assertEqual(__version__, "0.1.1")
+        self.assertIn('version: "0.1.1"', config)
+        self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
+        self.assertIn("local-codex-controller", run_script)
+        self.assertNotIn("http://codex-controller:8102", config + run_script)
+        self.assertEqual(
+            validate_controller_base_url("http://local-codex-controller:8102/"),
+            "http://local-codex-controller:8102",
+        )
+        for value in (
+            "http://codex-controller:8102",
+            "https://local-codex-controller:8102",
+            "http://local-codex-controller",
+            "http://local-codex-controller:8103",
+            "http://local-codex-controller:8102/admin",
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_controller_base_url(value)
+
     def test_first_frame_never_accepts_secret_in_url_or_extra_fields(self) -> None:
         authenticated = validate_first_message(
             {"type": "authenticate", "runner_id": RUNNER_ID, "credential": CREDENTIAL}

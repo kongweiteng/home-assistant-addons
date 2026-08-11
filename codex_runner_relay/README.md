@@ -4,4 +4,4 @@
 
 Relay 不拥有 Runner Registry、凭据摘要、任务 lease、Git、Codex、项目策略或生产部署权限。它没有 Ingress、host network、privileged、Docker socket、主机目录挂载或宿主端口默认映射。
 
-本版本只交付源码与本地验证候选。真实公网 hostname、TLS、NPM、DNS、HAOS 安装和 Runner 连接需要独立发布确认。
+`0.1.1` 将 Relay 到 Controller 的内部地址固定为真实 HAOS hostname `http://local-codex-controller:8102`。公网 hostname、TLS、NPM、DNS、HAOS 安装和 Runner 连接仍必须按受控发布流程分别验证。

@@ -1,5 +1,5 @@
 name: Codex Runner Relay
-version: "0.1.0"
+version: "0.1.1"
 slug: codex_runner_relay
 description: "Runner Center v2 的最小权限出站 WSS 传输中继。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_runner_relay"
@@ -18,7 +18,7 @@ ports:
 ports_description:
   8098/tcp: "仅供 Add-on 内部网络和经批准的反向代理使用"
 options:
-  controller_base_url: "http://codex-controller:8102"
+  controller_base_url: "http://local-codex-controller:8102"
   controller_api_token: ""
   relay_api_token: ""
   max_connections: 64

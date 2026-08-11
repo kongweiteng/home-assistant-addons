@@ -53,6 +53,7 @@ export CONTROLLER_RUNNER_RELAY_PUBLIC_URL=$(jq -r '.runner_relay_public_url // "
 export CONTROLLER_RUNNER_INSTALLER_MANIFEST_URL=$(jq -r '.runner_installer_manifest_url // ""' "$OPTIONS_FILE")
 export CONTROLLER_RUNNER_INSTALLER_MANIFEST_SHA256=$(jq -r '.runner_installer_manifest_sha256 // ""' "$OPTIONS_FILE")
 export CONTROLLER_RUNNER_RELAY_TIMEOUT_SECONDS=$(jq -r '.runner_relay_timeout_seconds // 10' "$OPTIONS_FILE")
+export NO_PROXY="localhost,127.0.0.1,::1,supervisor,homeassistant,hassio,renovation-hub,weixin-gateway,ha-operations-broker,local-renovation-hub,local-weixin-gateway,local-ha-operations-broker,local-codex-controller,local-codex-runner-relay"
 export CONTROLLER_DATA_DIR=/data
 export CONTROLLER_DATABASE_PATH=/data/controller.sqlite3
 export CONTROLLER_CODEX_HOME=/data/codex-home

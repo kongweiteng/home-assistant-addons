@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.4.0`。
+当前版本：`0.4.2`。
 
 ## 通用微信会话
 
@@ -21,7 +21,7 @@
 
 ## Runner Center v2
 
-`0.4.0` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。
+`0.4.2` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
@@ -161,7 +161,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.4.0` 回退到 `0.3.1` 前先关闭新增 enrollment 和任务入口，停止外部 Relay 流量，并核对没有活动 lease 或 `recovery_required` 任务。`0.3.1` 不识别 enrollment 的 `revoked_at`，因此必须等待所有已发出但未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档后再回退；只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。旧版会忽略新增 options 和 additive `revoked_at` 列，不要删除数据库、Runner 审计或服务器上的 worktree/Session。
+从 `0.4.2` 回退到 `0.3.1` 前先关闭新增 enrollment 和任务入口，停止外部 Relay 流量，并核对没有活动 lease 或 `recovery_required` 任务。`0.3.1` 不识别 enrollment 的 `revoked_at`，因此必须等待所有已发出但未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档后再回退；只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。旧版会忽略新增 options 和 additive `revoked_at` 列，不要删除数据库、Runner 审计或服务器上的 worktree/Session。
 
 继续从 `0.3.1` 回退到 `0.2.4` 前保持 `runner_center_v2_enabled=false`，确认没有 v2 活动 lease 或 `recovery_required` 任务。旧版本会忽略 additive Runner 表；不要删除 Controller 数据目录、Runner 审计或服务器上的 worktree/Session。普通 job/Thread/MCP 数据结构保持兼容。
 

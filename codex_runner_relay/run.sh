@@ -12,7 +12,7 @@ RELAY_CONTROLLER_API_TOKEN=$(jq -r '.controller_api_token // ""' "$OPTIONS_FILE"
 RELAY_API_TOKEN=$(jq -r '.relay_api_token // ""' "$OPTIONS_FILE")
 
 case "$RELAY_CONTROLLER_BASE_URL" in
-    http://[A-Za-z0-9_-]*:[0-9]*) ;;
+    http://local-codex-controller:8102|http://local-codex-controller:8102/) ;;
     *)
         bashio::log.fatal "controller_base_url 必须是 Add-on 内部 HTTP 地址"
         exit 1
@@ -31,7 +31,7 @@ export RELAY_MAX_MESSAGE_BYTES=$(jq -r '.max_message_bytes // 32768' "$OPTIONS_F
 export RELAY_FIRST_FRAME_TIMEOUT_SECONDS=$(jq -r '.first_frame_timeout_seconds // 10' "$OPTIONS_FILE")
 export RELAY_MESSAGES_PER_MINUTE=$(jq -r '.messages_per_minute // 120' "$OPTIONS_FILE")
 export RELAY_CONTROLLER_TIMEOUT_SECONDS=$(jq -r '.controller_timeout_seconds // 10' "$OPTIONS_FILE")
-export NO_PROXY="localhost,127.0.0.1,::1,supervisor,homeassistant,hassio,codex-controller,codex_runner_relay"
+export NO_PROXY="localhost,127.0.0.1,::1,supervisor,homeassistant,hassio,local-codex-controller,local-codex-runner-relay"
 
 bashio::log.info "启动 Codex Runner Relay；仅启用 WSS 数据面与内部发布接口"
 exec python3 -m codex_runner_relay.main

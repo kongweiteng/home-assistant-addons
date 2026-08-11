@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.4.2
+
+- 将 Controller 到 Relay 的内部 URL 契约固定为真实 HAOS Add-on hostname `http://local-codex-runner-relay:8098`，旧短主机名、其他端口、HTTPS 和附加路径全部 fail closed。
+- 为 Controller 运行环境补充内部服务 `NO_PROXY`，避免 Relay 与既有 Add-on 内部 HTTP 被外部代理接管；Runner Registry、API、页面、installer、Gateway/Hub 和 Remote Work 路由不变。
+
 ## 0.4.0
 
 - Runner Center 新增摘要固定的 Runner `0.2.0` installer manifest：固定 Codex `0.146.0`、Python `3.11.13` 和四个平台资产，HTTPS/WSS、DNS、公网地址、版本、字段和 SHA-256 任一不满足即 fail closed。

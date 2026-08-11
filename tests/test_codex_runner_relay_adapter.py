@@ -47,6 +47,8 @@ class RelayPublisherTests(unittest.TestCase):
         self.assertIn('runner_relay_controller_api_token: ""', config)
         self.assertIn("runner_relay_controller_api_token: password", config)
         self.assertIn("CONTROLLER_RUNNER_RELAY_CONTROLLER_API_TOKEN", run_script)
+        self.assertIn("local-codex-runner-relay", run_script)
+        self.assertNotIn("http://codex-runner-relay:", run_script)
         self.assertIn("CONTROLLER_RUNNER_RELAY_CONTROLLER_API_TOKEN", main_source)
         self.assertIn(
             "runner_relay_controller_api_token=relay_controller_api_token",
@@ -61,32 +63,34 @@ class RelayPublisherTests(unittest.TestCase):
         self.assertEqual(validate_relay_auth_config("", "", ""), "")
         self.assertEqual(
             validate_relay_auth_config(
-                "http://codex-runner-relay:8099/",
+                "http://local-codex-runner-relay:8098/",
                 publish_token,
                 controller_token,
             ),
-            "http://codex-runner-relay:8099",
+            "http://local-codex-runner-relay:8098",
         )
         for values in (
-            ("http://codex-runner-relay:8099", publish_token, ""),
-            ("http://codex-runner-relay:8099", "", controller_token),
+            ("http://local-codex-runner-relay:8098", publish_token, ""),
+            ("http://local-codex-runner-relay:8098", "", controller_token),
             ("", publish_token, controller_token),
-            ("http://codex-runner-relay:8099", publish_token, publish_token),
-            ("http://codex-runner-relay:8099", "short", controller_token),
-            ("http://codex-runner-relay:8099", publish_token, "short"),
+            ("http://local-codex-runner-relay:8098", publish_token, publish_token),
+            ("http://local-codex-runner-relay:8098", "short", controller_token),
+            ("http://local-codex-runner-relay:8098", publish_token, "short"),
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 validate_relay_auth_config(*values)
 
     def test_internal_url_is_exact_http_addon_endpoint(self) -> None:
         self.assertEqual(
-            validate_internal_relay_url("http://codex-runner-relay:8099/"),
-            "http://codex-runner-relay:8099",
+            validate_internal_relay_url("http://local-codex-runner-relay:8098/"),
+            "http://local-codex-runner-relay:8098",
         )
         for value in (
-            "https://codex-runner-relay:8099",
-            "http://codex-runner-relay",
-            "http://codex-runner-relay:8099/admin",
+            "http://codex-runner-relay:8098",
+            "https://local-codex-runner-relay:8098",
+            "http://local-codex-runner-relay",
+            "http://local-codex-runner-relay:8099",
+            "http://local-codex-runner-relay:8098/admin",
             "http://127.0.0.1:8099",
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
@@ -95,7 +99,7 @@ class RelayPublisherTests(unittest.TestCase):
     def test_publish_uses_bearer_and_exact_runner_path(self) -> None:
         opener = Opener()
         publisher = RelayPublisher(
-            "http://codex-runner-relay:8099",
+            "http://local-codex-runner-relay:8098",
             "t" * 32,
             opener=opener,
         )
@@ -106,7 +110,7 @@ class RelayPublisherTests(unittest.TestCase):
         request, timeout = opener.requests[0]
         self.assertEqual(
             request.full_url,
-            f"http://codex-runner-relay:8099/internal/v1/runners/{runner_id}/request",
+            f"http://local-codex-runner-relay:8098/internal/v1/runners/{runner_id}/request",
         )
         self.assertEqual(request.get_header("Authorization"), "Bearer " + "t" * 32)
         self.assertEqual(json.loads(request.data), {"document": document})
@@ -114,7 +118,7 @@ class RelayPublisherTests(unittest.TestCase):
 
     def test_non_202_and_oversized_documents_are_rejected(self) -> None:
         publisher = RelayPublisher(
-            "http://codex-runner-relay:8099",
+            "http://local-codex-runner-relay:8098",
             "t" * 32,
             opener=Opener(status=409),
         )

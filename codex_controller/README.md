@@ -38,7 +38,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.2.3` 使用 `codex app-server --disable goals --listen stdio://` 启动官方进程，禁止普通微信 Turn 派生后台 Goal 与后续消息竞争作业所有权；持续监控必须交给独立自动化服务。
 - `0.2.3` 的 bootstrap 付款目录与 Hub canonical v2 契约一致；Hub 返回白名单内、有界且结构化的校验错误时保留 `invalid_input` / `invalid_tags` 等可纠正语义，非 JSON、超长或未知错误仍统一脱敏。
 - `0.2.4` 将普通附件与装修档案意图分离：图片、视频和文件默认只用于识别，只有明确请求保存到装修/施工/工地档案时才暴露并允许媒体归档工具；媒体从 Gateway 非消费流式读取，Hub 成功后才 ACK 消费。
-- `0.4.0` 保持 Runner Center v2 管理面默认开启，并增加独立 Relay adapter、Relay enrollment/auth/event 内部接口和摘要固定的 Runner `0.2.0` 安装制品目录。Runner 调度仍是确定性控制面，不经过 Codex app-server。
+- `0.4.2` 保持 Runner Center v2 管理面默认开启，并将 Controller 到 Relay 的内部契约固定为真实 HAOS hostname `http://local-codex-runner-relay:8098`；独立 Relay adapter、Relay enrollment/auth/event 内部接口和摘要固定的 Runner `0.2.0` 安装制品目录保持不变。Runner 调度仍是确定性控制面，不经过 Codex app-server。
 - 页面只在 HTTPS manifest、固定 SHA-256 和公开 WSS URL 全部校验成功后允许创建 Runner；创建结果是可一键复制的完整安装命令，不再返回分散的 `runner_id + enrollment token`。命令 15 分钟后自动禁用复制，支持撤销和重新生成，列表持续显示 pending/claimed/expired/revoked enrollment 状态。
 - Relay 内部 URL 和两个最小权限 token 未配置时继续显示 `relay_configured=false`，等待任务不会被伪发布；`runner_relay_api_token` 只用于 Controller -> Relay 发布，`runner_relay_controller_api_token` 只用于 Relay -> Controller 回调，三项必须同时配置且 token 不得相同，否则拒绝启动。installer 未配置或摘要不匹配时仅关闭“生成安装命令”，既有 Runner Registry、列表和管理操作仍可使用。需要整体降级时可显式设置 `runner_center_v2_enabled=false`，普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。
 - 本源码候选不代表已经创建公网 WSS/NPM/DNS 路由、安装真实 Runner、升级 HAOS 或启用微信 v2；这些外部动作必须单独发布和验收。

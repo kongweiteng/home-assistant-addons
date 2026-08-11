@@ -27,7 +27,8 @@ PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 PLATFORM_KEYS = frozenset(
     {"linux-amd64", "linux-aarch64", "macos-amd64", "macos-aarch64"}
 )
-INTERNAL_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+INTERNAL_RELAY_HOST = "local-codex-runner-relay"
+INTERNAL_RELAY_PORT = 8098
 
 
 def validate_internal_relay_url(value: str) -> str:
@@ -42,8 +43,8 @@ def validate_internal_relay_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
         or parsed.path not in {"", "/"}
-        or parsed.port is None
-        or not INTERNAL_HOST_RE.fullmatch(parsed.hostname)
+        or parsed.hostname != INTERNAL_RELAY_HOST
+        or parsed.port != INTERNAL_RELAY_PORT
     ):
         raise ValueError("Runner Relay 内部 URL 必须是精确 Add-on HTTP 地址")
     return value.rstrip("/")
@@ -163,7 +164,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.4.0",
+                "User-Agent": "codex-controller/0.4.2",
             },
             method="POST",
         )
@@ -227,7 +228,7 @@ class RunnerInstallerCatalog:
             return self._cached
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.4.0"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.4.2"},
             method="GET",
         )
         try:

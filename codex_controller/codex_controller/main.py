@@ -15,6 +15,7 @@ from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 from .api import create_server
 from .app_server import AppServerClient
 from .media_input import TurnMediaManager
+from .runner_relay import RelayPublisher, RunnerInstallerCatalog, validate_relay_auth_config
 from .runner_service import RunnerManagerService
 from .runner_store import RunnerStore
 from .service import ControllerService
@@ -236,9 +237,49 @@ def main() -> None:
         lease_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_LEASE_TTL_SECONDS", "60")),
         task_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_TASK_TTL_SECONDS", "1800")),
     )
+    relay_base_url = os.environ.get("CONTROLLER_RUNNER_RELAY_BASE_URL", "")
+    relay_api_token = os.environ.get("CONTROLLER_RUNNER_RELAY_API_TOKEN", "")
+    relay_controller_api_token = os.environ.get(
+        "CONTROLLER_RUNNER_RELAY_CONTROLLER_API_TOKEN", ""
+    )
+    try:
+        relay_base_url = validate_relay_auth_config(
+            relay_base_url,
+            relay_api_token,
+            relay_controller_api_token,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    publisher = (
+        RelayPublisher(
+            relay_base_url,
+            relay_api_token,
+            timeout_seconds=int(os.environ.get("CONTROLLER_RUNNER_RELAY_TIMEOUT_SECONDS", "10")),
+        )
+        if relay_base_url
+        else None
+    )
+    installer_manifest_url = os.environ.get("CONTROLLER_RUNNER_INSTALLER_MANIFEST_URL", "")
+    installer_manifest_sha256 = os.environ.get("CONTROLLER_RUNNER_INSTALLER_MANIFEST_SHA256", "")
+    relay_public_url = os.environ.get("CONTROLLER_RUNNER_RELAY_PUBLIC_URL", "")
+    installer_values = (installer_manifest_url, installer_manifest_sha256, relay_public_url)
+    if any(installer_values) and not all(installer_values):
+        raise RuntimeError("Runner installer manifest URL、SHA-256 与公开 WSS URL 必须同时配置")
+    installer = (
+        RunnerInstallerCatalog(
+            installer_manifest_url,
+            installer_manifest_sha256,
+            relay_public_url,
+            timeout_seconds=int(os.environ.get("CONTROLLER_RUNNER_RELAY_TIMEOUT_SECONDS", "10")),
+        )
+        if installer_manifest_url
+        else None
+    )
     runner_manager = RunnerManagerService(
         runner_store,
         enabled=os.environ.get("CONTROLLER_RUNNER_CENTER_V2_ENABLED", "true").lower() == "true",
+        publisher=publisher,
+        installer=installer,
     )
     router = ToolRouter(
         ledger_base_url=os.environ.get("CONTROLLER_LEDGER_BASE_URL", ""),
@@ -282,6 +323,7 @@ def main() -> None:
         8102,
         service=service,
         api_token=os.environ["CONTROLLER_API_TOKEN"],
+        runner_relay_controller_api_token=relay_controller_api_token,
         max_request_bytes=int(os.environ.get("CONTROLLER_MAX_REQUEST_BYTES", "1048576")),
     )
     try:

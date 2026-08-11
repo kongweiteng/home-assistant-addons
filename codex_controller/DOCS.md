@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.3.1`。
+当前版本：`0.4.0`。
 
 ## 通用微信会话
 
@@ -21,14 +21,19 @@
 
 ## Runner Center v2
 
-`0.3.1` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。
+`0.4.0` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
-- 页面可新增 pending Runner、启用、排空停用、紧急停用、轮换凭据和吊销删除。enrollment 明文只显示一次；删除只吊销并归档，不删除服务器、Agent、worktree、分支或 Codex Session。
+- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。服务端先验证 manifest，再创建 enrollment；manifest 不可用、摘要不匹配、版本漂移、平台资产不完整或 URL 解析到非公网地址时 fail closed，不会留下无法安装的 Runner 记录。
+- manifest 固定 Runner `0.2.0`、Codex `0.146.0`、Python `3.11.13`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL 和 SHA-256。
+- 创建 API 只返回完整的一行安装命令、平台/版本和过期时间，不返回独立 enrollment token。页面使用 Clipboard API，权限不可用时回退到受限 `execCommand('copy')`；15 分钟倒计时归零后禁用复制。
+- enrollment 状态固定为 `pending`、`claimed`、`expired` 或 `revoked`。pending 可以撤销或重新生成；重新生成会吊销所有未领取旧 token。已领取长期凭据的 Runner 只能使用凭据轮换，不能重新生成 enrollment。相同 request ID 重放只返回脱敏状态，不恢复命令、token 或凭据。
+- 页面可启用、停用、排空停用、紧急停用、轮换凭据和吊销删除。凭据轮换值仍只显示一次；删除只吊销并归档，不删除服务器、Agent、worktree、分支或 Codex Session。
 - Scheduler 只向 `enabled + online + idle` 且项目、标签、能力和 policy revision 匹配的 Runner 原子分配一个 lease。已运行任务失联进入 `recovery_required`，禁止自动转移；未运行且 lease 过期的任务才可递增 assignment epoch 重新调度。
-- 页面与 API 不显示源码、diff、raw Codex JSONL、完整主机路径、Token 或私钥。写操作继续使用 HA 管理员 Ingress、短期 CSRF、revision 和 request ID。
-- 当前源码没有真实 Relay adapter；即使打开 feature flag，没有 Relay 时也不会向真实 Runner 分发。Relay、HAOS、真实 Runner、微信和生产启用必须使用后续受控发布包。
+- 页面与 API 不显示源码、diff、raw Codex JSONL、完整主机路径、私钥或独立 enrollment token；一次性 token 只存在于当前页面内存中的完整安装命令，列表、详情、状态、幂等重放和日志均不回显。写操作继续使用 HA 管理员 Ingress、短期 CSRF、revision 和 request ID。
+- Controller 使用带独立 bearer 的固定内部 HTTP URL 向 Relay 发布 request/control；Relay 通过受 bearer 保护的 `/internal/v2/runner-relay/enroll`、`authenticate` 和 heartbeat/status/result 入口回传。Relay 只负责传输，Registry、enrollment、长期凭据、lease、审计和任务状态仍由 Controller 单独拥有。
+- 本版本源码包含 Relay adapter，但 options 默认空值，不创建公网入口。实际 Relay Add-on、NPM/DNS/WSS、HAOS 升级、真实 Runner 安装、微信 v2 和生产启用必须使用独立受控发布步骤。
 
 ## 配置
 
@@ -55,6 +60,15 @@
 | `runner_offline_seconds` | 超过该阈值后判定 offline；中间状态为 stale 且禁止新任务 |
 | `runner_lease_ttl_seconds` | 单次 assignment lease TTL；已运行任务失联不会因 TTL 自动转移 |
 | `runner_task_ttl_seconds` | 等待或执行任务的总 TTL；终态与 recovery 仍按状态机处理 |
+| `runner_relay_base_url` | Relay Add-on 固定内部 HTTP 根地址，必须带显式端口且不能包含路径；与两个最小权限 token 同时配置 |
+| `runner_relay_api_token` | 仅供 Controller -> Relay 发布 request/control 的 bearer，至少 32 字符 |
+| `runner_relay_controller_api_token` | 仅供 Relay -> Controller 调用 enroll/authenticate/heartbeat/status/result 的 bearer，至少 32 字符 |
+| `runner_relay_public_url` | Runner 出站连接的公开 `wss://` URL；禁止凭据、query、fragment、内部域名或非公网解析结果 |
+| `runner_installer_manifest_url` | Runner `0.2.0` 安装制品 manifest 的公开 HTTPS URL |
+| `runner_installer_manifest_sha256` | 对 manifest 原始字节固定的 64 位小写 SHA-256；不接受浮动 latest |
+| `runner_relay_timeout_seconds` | Relay 发布和 installer manifest 读取超时，范围 2 到 60 秒 |
+
+`runner_relay_base_url`、`runner_relay_api_token` 和 `runner_relay_controller_api_token` 必须同时为空或同时配置，且两个 token 不得相同；任一缺失、过短、URL 非精确 Add-on 地址或身份复用都会拒绝启动。两个 token 均不进入页面、状态或日志，也不得复用 Gateway `internal_api_token`。
 
 内部服务地址只允许 `http://` 加固定主机名和可选端口，不允许用户信息、路径、查询、片段或 IP 字面量。模型不能提交或改变目标 URL。
 
@@ -147,7 +161,9 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.3.1` 回退到 `0.2.4` 前显式设置 `runner_center_v2_enabled=false`，确认没有 v2 活动 lease 或 `recovery_required` 任务。旧版本会忽略 additive Runner 表；不要删除 Controller 数据目录、Runner 审计或服务器上的 worktree/Session。普通 job/Thread/MCP 数据结构保持兼容。
+从 `0.4.0` 回退到 `0.3.1` 前先关闭新增 enrollment 和任务入口，停止外部 Relay 流量，并核对没有活动 lease 或 `recovery_required` 任务。`0.3.1` 不识别 enrollment 的 `revoked_at`，因此必须等待所有已发出但未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档后再回退；只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。旧版会忽略新增 options 和 additive `revoked_at` 列，不要删除数据库、Runner 审计或服务器上的 worktree/Session。
+
+继续从 `0.3.1` 回退到 `0.2.4` 前保持 `runner_center_v2_enabled=false`，确认没有 v2 活动 lease 或 `recovery_required` 任务。旧版本会忽略 additive Runner 表；不要删除 Controller 数据目录、Runner 审计或服务器上的 worktree/Session。普通 job/Thread/MCP 数据结构保持兼容。
 
 使用自定义 URL 回滚时，同时清空 `openai_base_url` 和 `openai_api_key` 或恢复升级前备份；不要把旧 Key 复制到普通文件。
 

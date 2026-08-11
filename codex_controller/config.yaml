@@ -1,5 +1,5 @@
 name: Codex Controller
-version: "0.3.1"
+version: "0.4.0"
 slug: codex_controller
 description: "基于官方 Codex app-server 的持久任务、认证与受限工具控制器。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_controller"
@@ -43,6 +43,13 @@ options:
   runner_offline_seconds: 90
   runner_lease_ttl_seconds: 60
   runner_task_ttl_seconds: 1800
+  runner_relay_base_url: ""
+  runner_relay_api_token: ""
+  runner_relay_controller_api_token: ""
+  runner_relay_public_url: ""
+  runner_installer_manifest_url: ""
+  runner_installer_manifest_sha256: ""
+  runner_relay_timeout_seconds: 10
 schema:
   internal_api_token: password
   intake_enabled: bool
@@ -65,3 +72,10 @@ schema:
   runner_offline_seconds: "int(10,900)"
   runner_lease_ttl_seconds: "int(5,3600)"
   runner_task_ttl_seconds: "int(60,86400)"
+  runner_relay_base_url: str
+  runner_relay_api_token: password
+  runner_relay_controller_api_token: password
+  runner_relay_public_url: str
+  runner_installer_manifest_url: str
+  runner_installer_manifest_sha256: str
+  runner_relay_timeout_seconds: "int(2,60)"

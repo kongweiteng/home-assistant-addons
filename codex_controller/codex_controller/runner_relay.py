@@ -1,0 +1,385 @@
+"""Controller adapters for the transport Relay and pinned Runner installer manifest."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import json
+import re
+import shlex
+import socket
+import time
+from typing import Any, Callable
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+
+from .store import StoreError
+
+
+RUNNER_VERSION = "0.2.0"
+CODEX_VERSION = "0.146.0"
+PYTHON_VERSION = "3.11.13"
+SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+RUNNER_ID_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
+PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+PLATFORM_KEYS = frozenset(
+    {"linux-amd64", "linux-aarch64", "macos-amd64", "macos-aarch64"}
+)
+INTERNAL_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+
+
+def validate_internal_relay_url(value: str) -> str:
+    if not isinstance(value, str) or value.strip() != value:
+        raise ValueError("Runner Relay 内部 URL 无效")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "http"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+        or parsed.port is None
+        or not INTERNAL_HOST_RE.fullmatch(parsed.hostname)
+    ):
+        raise ValueError("Runner Relay 内部 URL 必须是精确 Add-on HTTP 地址")
+    return value.rstrip("/")
+
+
+def validate_relay_auth_config(
+    base_url: str,
+    publisher_token: str,
+    controller_api_token: str,
+) -> str:
+    """Validate the two least-privilege Relay identities as one closed configuration."""
+
+    values = (base_url, publisher_token, controller_api_token)
+    if not any(values):
+        return ""
+    if not all(values):
+        raise ValueError("Runner Relay 内部 URL、发布 Token 与 Controller 回调 Token 必须同时配置")
+    normalized_url = validate_internal_relay_url(base_url)
+    for label, token in (
+        ("发布", publisher_token),
+        ("Controller 回调", controller_api_token),
+    ):
+        if not isinstance(token, str) or token.strip() != token or len(token) < 32:
+            raise ValueError(f"Runner Relay {label} Token 无效")
+    if hmac.compare_digest(publisher_token, controller_api_token):
+        raise ValueError("Runner Relay 发布 Token 与 Controller 回调 Token 必须不同")
+    return normalized_url
+
+
+def validate_public_url(
+    value: str,
+    *,
+    scheme: str,
+    resolver: Callable[..., list[tuple]] = socket.getaddrinfo,
+) -> str:
+    if not isinstance(value, str) or value.strip() != value or "\\" in value:
+        raise ValueError("Runner 公开 URL 无效")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Runner 公开 URL 结构无效") from exc
+    if (
+        parsed.scheme != scheme
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"Runner 公开 URL 必须使用 {scheme}")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname in {"localhost", "supervisor", "homeassistant", "hassio"} or hostname.endswith(
+        (".local", ".internal", ".home.arpa", ".localhost")
+    ):
+        raise ValueError("Runner 公开 URL 指向内部主机")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        try:
+            ascii_host = hostname.encode("idna").decode("ascii")
+            records = resolver(ascii_host, port or (443 if scheme in {"https", "wss"} else 80), type=socket.SOCK_STREAM)
+        except (UnicodeError, OSError) as exc:
+            raise ValueError("Runner 公开 URL DNS 解析失败") from exc
+        addresses: set[ipaddress.IPv4Address | ipaddress.IPv6Address] = set()
+        for record in records:
+            try:
+                addresses.add(ipaddress.ip_address(record[4][0]))
+            except (IndexError, TypeError, ValueError) as exc:
+                raise ValueError("Runner 公开 URL DNS 响应无效") from exc
+        if not addresses or any(not item.is_global for item in addresses):
+            raise ValueError("Runner 公开 URL 解析到非公网地址")
+    else:
+        if not address.is_global:
+            raise ValueError("Runner 公开 URL IP 不是公网地址")
+    return value
+
+
+class RelayPublisher:
+    """Transport-neutral publisher backed by Relay's authenticated internal HTTP API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout_seconds: int = 10,
+        opener: Callable[..., Any] = urlopen,
+    ) -> None:
+        self.base_url = validate_internal_relay_url(base_url)
+        if not isinstance(token, str) or len(token) < 32:
+            raise ValueError("Runner Relay API token 无效")
+        if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+            raise ValueError("Runner Relay timeout 无效")
+        self._token = token
+        self._timeout_seconds = timeout_seconds
+        self._opener = opener
+
+    def publish_request(self, runner_id: str, document: dict[str, Any]) -> None:
+        self._publish(runner_id, "request", document)
+
+    def publish_control(self, runner_id: str, document: dict[str, Any]) -> None:
+        self._publish(runner_id, "control", document)
+
+    def _publish(self, runner_id: str, kind: str, document: dict[str, Any]) -> None:
+        if not RUNNER_ID_RE.fullmatch(runner_id) or kind not in {"request", "control"}:
+            raise RuntimeError("Runner Relay publish target 无效")
+        body = json.dumps(
+            {"document": document}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if len(body) > 64 * 1024:
+            raise RuntimeError("Runner Relay publish document 过大")
+        request = Request(
+            f"{self.base_url}/internal/v1/runners/{runner_id}/{kind}",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "codex-controller/0.4.0",
+            },
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=self._timeout_seconds) as response:
+                raw = response.read(64 * 1024 + 1)
+                status = int(getattr(response, "status", 0))
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError("Runner Relay 发布状态未知") from exc
+        if status != 202 or len(raw) > 64 * 1024:
+            raise RuntimeError("Runner Relay 未确认发布")
+
+
+class RunnerInstallerCatalog:
+    """Fetches one digest-pinned manifest and renders a one-time install command."""
+
+    def __init__(
+        self,
+        manifest_url: str,
+        manifest_sha256: str,
+        relay_url: str,
+        *,
+        timeout_seconds: int = 10,
+        cache_seconds: int = 300,
+        opener: Callable[..., Any] = urlopen,
+        resolver: Callable[..., list[tuple]] = socket.getaddrinfo,
+    ) -> None:
+        self.manifest_url = validate_public_url(manifest_url, scheme="https", resolver=resolver)
+        if not SHA256_RE.fullmatch(manifest_sha256):
+            raise ValueError("Runner installer manifest SHA-256 无效")
+        self.manifest_sha256 = manifest_sha256
+        self.relay_url = validate_public_url(relay_url, scheme="wss", resolver=resolver)
+        if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds <= 60:
+            raise ValueError("Runner installer timeout 无效")
+        if not isinstance(cache_seconds, int) or isinstance(cache_seconds, bool) or cache_seconds < 0:
+            raise ValueError("Runner installer cache 无效")
+        self.timeout_seconds = timeout_seconds
+        self.cache_seconds = cache_seconds
+        self._opener = opener
+        self._resolver = resolver
+        self._cached: dict[str, Any] | None = None
+        self._cached_at = 0.0
+        self.last_error: str | None = None
+
+    def status(self) -> dict[str, Any]:
+        try:
+            manifest = self.manifest()
+        except StoreError as exc:
+            return {"ready": False, "error_code": exc.code, "runner_version": RUNNER_VERSION}
+        return {
+            "ready": True,
+            "error_code": None,
+            "runner_version": manifest["runner_version"],
+            "codex_version": manifest["codex_version"],
+            "python_version": manifest["python_version"],
+        }
+
+    def manifest(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if self._cached is not None and now - self._cached_at < self.cache_seconds:
+            return self._cached
+        request = Request(
+            self.manifest_url,
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.4.0"},
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=self.timeout_seconds) as response:
+                raw = response.read(64 * 1024 + 1)
+                status = int(getattr(response, "status", 0))
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            self.last_error = "installer_manifest_unavailable"
+            raise StoreError(
+                "installer_manifest_unavailable", "Runner 安装制品 manifest 当前不可用", status=503
+            ) from exc
+        if status != 200 or len(raw) > 64 * 1024:
+            self.last_error = "installer_manifest_invalid"
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest 响应无效", status=503)
+        if hashlib.sha256(raw).hexdigest() != self.manifest_sha256:
+            self.last_error = "installer_manifest_digest_mismatch"
+            raise StoreError(
+                "installer_manifest_digest_mismatch", "Runner 安装制品 manifest 摘要不匹配", status=503
+            )
+        try:
+            document = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.last_error = "installer_manifest_invalid"
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest JSON 无效", status=503) from exc
+        manifest = self._validate_manifest(document)
+        self._cached = manifest
+        self._cached_at = now
+        self.last_error = None
+        return manifest
+
+    def command(
+        self,
+        *,
+        runner_id: str,
+        enrollment_token: str,
+        os_name: str,
+        arch: str,
+        projects: list[str],
+        manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        manifest = self.manifest() if manifest is None else manifest
+        platform_key = f"{os_name}-{arch}"
+        if platform_key not in PLATFORM_KEYS:
+            raise StoreError("runner_platform_unsupported", "Runner 安装平台不受支持", status=409)
+        asset = manifest["assets"][platform_key]
+        installer = manifest["installer"]
+        if not RUNNER_ID_RE.fullmatch(runner_id):
+            raise StoreError("runner_payload_invalid", "Runner ID 无效")
+        if not isinstance(enrollment_token, str) or len(enrollment_token) < 32:
+            raise StoreError("runner_payload_invalid", "Runner enrollment 无效")
+        if not projects or any(not PROJECT_RE.fullmatch(value) for value in projects):
+            raise StoreError("runner_payload_invalid", "Runner 项目白名单无效")
+        quoted = shlex.quote
+        checksum = (
+            "printf '%s  %s\\n' "
+            + quoted(installer["sha256"])
+            + ' "$installer_tmp" | sha256sum -c -'
+            if os_name == "linux"
+            else "printf '%s  %s\\n' "
+            + quoted(installer["sha256"])
+            + ' "$installer_tmp" | shasum -a 256 -c -'
+        )
+        execute = "sh \"$installer_tmp\""
+        if os_name == "linux":
+            execute = (
+                "if [ \"$(id -u)\" -eq 0 ]; then sh \"$installer_tmp\"; "
+                "else sudo --preserve-env=CODEX_RUNNER_ENROLLMENT_TOKEN sh \"$installer_tmp\"; fi"
+            )
+        arguments = [
+            "--relay-url",
+            self.relay_url,
+            "--runner-id",
+            runner_id,
+            "--platform",
+            os_name,
+            "--arch",
+            arch,
+            "--asset-url",
+            asset["url"],
+            "--asset-sha256",
+            asset["sha256"],
+            "--projects",
+            ",".join(projects),
+        ]
+        command = (
+            "export CODEX_RUNNER_ENROLLMENT_TOKEN="
+            + quoted(enrollment_token)
+            + "; installer_tmp=$(mktemp \"${TMPDIR:-/tmp}/codex-runner-install.XXXXXX\"); "
+            + "trap 'rm -f \"$installer_tmp\"; unset CODEX_RUNNER_ENROLLMENT_TOKEN' EXIT; "
+            + "curl -fsSL --proto '=https' --tlsv1.2 "
+            + quoted(installer["url"])
+            + ' -o "$installer_tmp"; '
+            + checksum
+            + "; "
+            + execute.replace(
+                'sh "$installer_tmp"',
+                'sh "$installer_tmp" ' + " ".join(quoted(value) for value in arguments),
+            )
+        )
+        return {
+            "command": command,
+            "runner_version": manifest["runner_version"],
+            "codex_version": manifest["codex_version"],
+            "python_version": manifest["python_version"],
+            "platform": os_name,
+            "arch": arch,
+        }
+
+    def _validate_manifest(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != {
+            "version",
+            "runner_version",
+            "codex_version",
+            "python_version",
+            "installer",
+            "assets",
+        }:
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest 字段无效", status=503)
+        if (
+            value.get("version") != 1
+            or value.get("runner_version") != RUNNER_VERSION
+            or value.get("codex_version") != CODEX_VERSION
+            or value.get("python_version") != PYTHON_VERSION
+        ):
+            raise StoreError("installer_manifest_version_mismatch", "Runner 安装制品版本不匹配", status=503)
+        installer = self._validate_asset(value.get("installer"))
+        assets = value.get("assets")
+        if not isinstance(assets, dict) or set(assets) != PLATFORM_KEYS:
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品平台不完整", status=503)
+        normalized_assets = {key: self._validate_asset(assets[key]) for key in sorted(assets)}
+        return {**value, "installer": installer, "assets": normalized_assets}
+
+    def _validate_asset(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict) or set(value) != {"url", "sha256"}:
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品条目无效", status=503)
+        digest = value.get("sha256")
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品摘要无效", status=503)
+        try:
+            url = validate_public_url(str(value.get("url")), scheme="https", resolver=self._resolver)
+        except ValueError as exc:
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品 URL 无效", status=503) from exc
+        return {"url": url, "sha256": digest}
+
+
+__all__ = [
+    "CODEX_VERSION",
+    "PYTHON_VERSION",
+    "RUNNER_VERSION",
+    "RelayPublisher",
+    "RunnerInstallerCatalog",
+    "validate_relay_auth_config",
+    "validate_internal_relay_url",
+    "validate_public_url",
+]

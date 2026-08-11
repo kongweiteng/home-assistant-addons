@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Protocol
 
+from .runner_relay import RunnerInstallerCatalog
 from .runner_store import RunnerStore
 from .store import StoreError
 
@@ -26,10 +27,12 @@ class RunnerManagerService:
         *,
         enabled: bool = True,
         publisher: RunnerPublisher | None = None,
+        installer: RunnerInstallerCatalog | None = None,
     ) -> None:
         self.store = store
         self.enabled = bool(enabled)
         self.publisher = publisher
+        self.installer = installer
         self.last_error: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -51,13 +54,24 @@ class RunnerManagerService:
             return {
                 "enabled": False,
                 "relay_configured": False,
+                "installer": {
+                    "ready": False,
+                    "error_code": "runner_manager_disabled",
+                    "runner_version": "0.2.0",
+                },
                 "last_error": None,
                 "summary": {"total": 0, "enabled": 0, "online": 0, "busy": 0, "recovery_required": 0},
             }
         document = self.store.list_runners()
+        installer_status = (
+            {"ready": False, "error_code": "installer_not_configured", "runner_version": "0.2.0"}
+            if self.installer is None
+            else self.installer.status()
+        )
         return {
             "enabled": True,
             "relay_configured": self.publisher is not None,
+            "installer": installer_status,
             "last_error": self.last_error,
             "summary": document["summary"],
         }
@@ -72,7 +86,10 @@ class RunnerManagerService:
 
     def create_enrollment(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
-        return self.store.create_enrollment(payload)
+        installer = self._require_installer()
+        manifest = installer.manifest()
+        result = self.store.create_enrollment(payload)
+        return self._attach_installation(result, manifest=manifest)
 
     def update_runner(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
@@ -108,6 +125,44 @@ class RunnerManagerService:
         self._require_enabled()
         return self.store.request_self_check(runner_id, payload)
 
+    def revoke_enrollment(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_enabled()
+        return self.store.revoke_enrollment(runner_id, payload)
+
+    def regenerate_enrollment(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_enabled()
+        installer = self._require_installer()
+        manifest = installer.manifest()
+        result = self.store.regenerate_enrollment(runner_id, payload)
+        return self._attach_installation(result, manifest=manifest)
+
+    def _attach_installation(
+        self,
+        result: dict[str, Any],
+        *,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        installer = self._require_installer()
+        enrollment = result.get("enrollment")
+        if not isinstance(enrollment, dict) or not enrollment.get("secret_available"):
+            return result
+        token = enrollment.pop("token", None)
+        if not isinstance(token, str):
+            raise StoreError("installer_command_unavailable", "Runner 安装命令无法生成", status=503)
+        enrollment["secret_available"] = False
+        installation = installer.command(
+            runner_id=str(result["runner"]["runner_id"]),
+            enrollment_token=token,
+            os_name=str(result["runner"]["os"]),
+            arch=str(result["runner"]["arch"]),
+            projects=list(result["runner"]["allowed_projects"]),
+            manifest=manifest,
+        )
+        installation["expires_at"] = enrollment["expires_at"]
+        installation["command_available"] = True
+        result["installation"] = installation
+        return result
+
     def list_tasks(self) -> dict[str, Any]:
         self._require_enabled()
         return self.store.list_tasks()
@@ -115,6 +170,15 @@ class RunnerManagerService:
     def redeem_enrollment(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
         return self.store.redeem_enrollment(payload)
+
+    def authenticate_runner(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_enabled()
+        if set(payload) != {"runner_id", "credential"}:
+            raise StoreError("runner_payload_invalid", "Runner 认证字段无效")
+        runner_id = payload.get("runner_id")
+        credential = payload.get("credential")
+        self.store.verify_credential(runner_id, credential)
+        return {"authenticated": True, "runner_id": runner_id}
 
     def heartbeat(self, payload: dict[str, Any], *, credential: str) -> dict[str, Any]:
         self._require_enabled()
@@ -204,6 +268,15 @@ class RunnerManagerService:
                 "Runner Center v2 已由 Add-on 配置关闭；现有 Controller 与 Remote Work v1 不受影响",
                 status=409,
             )
+
+    def _require_installer(self) -> RunnerInstallerCatalog:
+        if self.installer is None:
+            raise StoreError(
+                "installer_not_configured",
+                "Runner 安装制品尚未配置，不能创建不可用的一次性 enrollment",
+                status=503,
+            )
+        return self.installer
 
     @staticmethod
     def _gateway_result(task: dict[str, Any], *, request_id: str, operation: str) -> dict[str, Any]:

@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.4.0
+
+- Runner Center 新增摘要固定的 Runner `0.2.0` installer manifest：固定 Codex `0.146.0`、Python `3.11.13` 和四个平台资产，HTTPS/WSS、DNS、公网地址、版本、字段和 SHA-256 任一不满足即 fail closed。
+- 新增 Runner 一键安装命令响应和现有深色 Ingress 交互：Clipboard API 加受限回退、15 分钟倒计时、过期禁用、撤销、重新生成和 enrollment 状态；API 不再返回分散的 enrollment token，幂等重放不会恢复命令。
+- 新增 Controller Relay publisher 和受 bearer 保护的 enrollment/authenticate/heartbeat/status/result 内部接口；发布使用 `runner_relay_api_token`，Relay 回调使用独立 `runner_relay_controller_api_token`，URL/双 token 配置不完整或身份复用时拒绝启动。Relay 只传输，Registry、凭据、lease、审计和任务状态继续由 Controller 唯一拥有。
+- Runner enrollment schema additive 升级到 4，支持 `revoked_at`、pending/claimed/expired/revoked 状态、旧 token 失效和已领取后禁止重新生成；既有 job/Thread/MCP、Gateway、Remote Work v1/v2 和 Runner 调度契约不改变。
+- 新增 installer、Relay adapter、Store/Service/API/UI、迁移、撤销、过期、重放和重新生成的确定性回归。本候选不执行 HAOS/NPM/DNS 写入、不创建 Release、不安装真实 Runner、不启用微信 v2 或生产部署。
+
 ## 0.3.1
 
 - Runner Center v2 管理面改为默认开启；页面、API、Registry 和增删启停在未配置 Relay 时可直接使用。

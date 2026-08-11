@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import unittest
+
+import aiohttp
+from aiohttp.test_utils import TestServer
+
+from codex_runner_relay.app import ConnectionRate, RelayHub, create_app
+from codex_runner_relay.protocol import (
+    RelayProtocolError,
+    validate_event_message,
+    validate_first_message,
+    validate_publish,
+)
+
+
+RUNNER_ID = "RN-ABCDEFGHIJKLMNOPQRST"
+CREDENTIAL = "CRED-" + "A" * 48
+TOKEN = "ENROLL-" + "B" * 48
+
+
+class RelayProtocolUnitTests(unittest.TestCase):
+    def test_first_frame_never_accepts_secret_in_url_or_extra_fields(self) -> None:
+        authenticated = validate_first_message(
+            {"type": "authenticate", "runner_id": RUNNER_ID, "credential": CREDENTIAL}
+        )
+        self.assertEqual(authenticated["runner_id"], RUNNER_ID)
+        with self.assertRaises(RelayProtocolError):
+            validate_first_message(
+                {
+                    "type": "authenticate",
+                    "runner_id": RUNNER_ID,
+                    "credential": CREDENTIAL,
+                    "query_token": TOKEN,
+                }
+            )
+
+    def test_event_and_publish_are_bound_to_one_runner(self) -> None:
+        event_type, document = validate_event_message(
+            {
+                "type": "event",
+                "event_type": "heartbeat",
+                "document": {"message_type": "heartbeat", "runner_id": RUNNER_ID},
+            },
+            runner_id=RUNNER_ID,
+        )
+        self.assertEqual((event_type, document["runner_id"]), ("heartbeat", RUNNER_ID))
+        with self.assertRaises(RelayProtocolError):
+            validate_publish(
+                "request",
+                RUNNER_ID,
+                {
+                    "document": {
+                        "message_type": "request",
+                        "runner_id": "RN-ZYXWVUTSRQPONMLKJIHG",
+                    }
+                },
+            )
+
+    def test_rate_limit_is_bounded_per_connection(self) -> None:
+        rate = ConnectionRate(2)
+        self.assertTrue(rate.allow(1.0))
+        self.assertTrue(rate.allow(2.0))
+        self.assertFalse(rate.allow(3.0))
+        self.assertTrue(rate.allow(62.0))
+
+
+class FakeController:
+    def __init__(self) -> None:
+        self.started = False
+        self.closed = False
+        self.enrollments: list[dict] = []
+        self.authentications: list[tuple[str, str]] = []
+        self.events: list[tuple[str, dict, str]] = []
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def enroll(self, payload: dict) -> dict:
+        self.enrollments.append(dict(payload))
+        return {
+            "runner": {"runner_id": payload["runner_id"], "admin_state": "pending"},
+            "credential": {"credential_id": "CR-" + "C" * 24, "secret": CREDENTIAL},
+        }
+
+    async def authenticate(self, runner_id: str, credential: str) -> dict:
+        self.authentications.append((runner_id, credential))
+        return {"authenticated": True, "runner_id": runner_id}
+
+    async def event(self, event_type: str, document: dict, *, credential: str) -> dict:
+        self.events.append((event_type, dict(document), credential))
+        return {"accepted": True}
+
+
+class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.controller = FakeController()
+        self.hub = RelayHub(
+            self.controller,  # type: ignore[arg-type]
+            api_token="R" * 32,
+            max_connections=4,
+            max_message_bytes=32768,
+            first_frame_timeout_seconds=2,
+            messages_per_minute=10,
+        )
+        self.server = TestServer(create_app(self.hub))
+        await self.server.start_server()
+        self.session = aiohttp.ClientSession()
+
+    async def asyncTearDown(self) -> None:
+        await self.session.close()
+        await self.server.close()
+
+    def ws_url(self) -> str:
+        return str(self.server.make_url("/v1/runner")).replace("http://", "ws://", 1)
+
+    async def enroll(self) -> aiohttp.ClientWebSocketResponse:
+        ws = await self.session.ws_connect(self.ws_url())
+        await ws.send_json(
+            {
+                "type": "enroll",
+                "runner_id": RUNNER_ID,
+                "token": TOKEN,
+                "payload": {
+                    "runner_id": RUNNER_ID,
+                    "protocol_version": 2,
+                    "agent_version": "0.2.0",
+                },
+            }
+        )
+        response = await ws.receive_json(timeout=2)
+        self.assertEqual(response["type"], "enrolled")
+        self.assertEqual(response["credential"], CREDENTIAL)
+        return ws
+
+    async def test_enrollment_publish_and_event_round_trip(self) -> None:
+        ws = await self.enroll()
+        request = {"message_type": "request", "runner_id": RUNNER_ID, "task_id": "RW-FIXTURE"}
+        async with self.session.post(
+            self.server.make_url(f"/internal/v1/runners/{RUNNER_ID}/request"),
+            json={"document": request},
+            headers={"Authorization": "Bearer " + "R" * 32},
+        ) as response:
+            self.assertEqual(response.status, 202)
+        delivered = await ws.receive_json(timeout=2)
+        self.assertEqual(delivered, {"type": "request", "document": request})
+
+        heartbeat = {
+            "message_type": "heartbeat",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "a" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
+        ack = await ws.receive_json(timeout=2)
+        self.assertEqual(ack["type"], "ack")
+        self.assertEqual(self.controller.events, [("heartbeat", heartbeat, CREDENTIAL)])
+        await ws.close()
+
+    async def test_internal_publish_requires_bearer_and_runner_must_be_online(self) -> None:
+        async with self.session.post(
+            self.server.make_url(f"/internal/v1/runners/{RUNNER_ID}/request"),
+            json={"document": {"message_type": "request", "runner_id": RUNNER_ID}},
+        ) as response:
+            self.assertEqual(response.status, 401)
+        async with self.session.post(
+            self.server.make_url(f"/internal/v1/runners/{RUNNER_ID}/request"),
+            json={"document": {"message_type": "request", "runner_id": RUNNER_ID}},
+            headers={"Authorization": "Bearer " + "R" * 32},
+        ) as response:
+            self.assertEqual(response.status, 503)
+
+    async def test_second_connection_for_same_runner_is_rejected(self) -> None:
+        first = await self.enroll()
+        second = await self.session.ws_connect(self.ws_url())
+        await second.send_json(
+            {"type": "authenticate", "runner_id": RUNNER_ID, "credential": CREDENTIAL}
+        )
+        error = await second.receive_json(timeout=2)
+        self.assertEqual(error, {"type": "error", "code": "runner_already_connected"})
+        self.assertEqual(self.controller.authentications, [])
+        await first.close()
+        await second.close()
+
+    async def test_duplicate_enrollment_is_rejected_before_token_consumption(self) -> None:
+        first = await self.enroll()
+        second = await self.session.ws_connect(self.ws_url())
+        await second.send_json(
+            {
+                "type": "enroll",
+                "runner_id": RUNNER_ID,
+                "token": TOKEN,
+                "payload": {
+                    "runner_id": RUNNER_ID,
+                    "protocol_version": 2,
+                    "agent_version": "0.2.0",
+                },
+            }
+        )
+        error = await second.receive_json(timeout=2)
+        self.assertEqual(error, {"type": "error", "code": "runner_already_connected"})
+        self.assertEqual(len(self.controller.enrollments), 1)
+        await first.close()
+        await second.close()
+
+    async def test_pending_first_frame_counts_toward_connection_capacity(self) -> None:
+        self.hub.max_connections = 1
+        first = await self.session.ws_connect(self.ws_url())
+        with self.assertRaises(aiohttp.WSServerHandshakeError) as raised:
+            await self.session.ws_connect(self.ws_url())
+        self.assertEqual(raised.exception.status, 503)
+        await first.close()
+
+    async def test_health_contains_no_runner_identity_or_secret(self) -> None:
+        ws = await self.enroll()
+        async with self.session.get(self.server.make_url("/healthz")) as response:
+            body = await response.text()
+            self.assertEqual(response.status, 200)
+            self.assertNotIn(RUNNER_ID, body)
+            self.assertNotIn(CREDENTIAL, body)
+        await ws.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

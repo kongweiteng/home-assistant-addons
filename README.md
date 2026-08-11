@@ -7,6 +7,7 @@ Canonical Home Assistant add-on repository for every application maintained and 
 | Add-on | Purpose | Architectures | Upstream |
 | --- | --- | --- | --- |
 | [Codex Controller](codex_controller/) | Persistent task controller built on the official Codex app-server, with constrained tool routing | `amd64`, `aarch64` | [openai/codex](https://github.com/openai/codex) |
+| [Codex Runner Relay](codex_runner_relay/) | Minimal-permission outbound WSS transport for Runner Center v2 | `amd64`, `aarch64` | Self-maintained |
 | [DDNS-GO](ddns_go/) | Update Aliyun DNS and other providers with the current public IP | `amd64`, `aarch64` | [jeessy2/ddns-go](https://github.com/jeessy2/ddns-go) |
 | [DrawIO](drawio/) | Browser-based diagram editor through Home Assistant Ingress | `amd64`, `aarch64` | [jgraph/docker-drawio](https://github.com/jgraph/docker-drawio) |
 | [ESLink Gas](eslink_gas/) | Read-only multi-account gas balance and meter status through Ingress and MQTT Discovery | `amd64`, `aarch64` | Undocumented ESLink mobile service hall |

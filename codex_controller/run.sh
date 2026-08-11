@@ -46,11 +46,18 @@ export CONTROLLER_RUNNER_ONLINE_SECONDS=$(jq -r '.runner_online_seconds // 30' "
 export CONTROLLER_RUNNER_OFFLINE_SECONDS=$(jq -r '.runner_offline_seconds // 90' "$OPTIONS_FILE")
 export CONTROLLER_RUNNER_LEASE_TTL_SECONDS=$(jq -r '.runner_lease_ttl_seconds // 60' "$OPTIONS_FILE")
 export CONTROLLER_RUNNER_TASK_TTL_SECONDS=$(jq -r '.runner_task_ttl_seconds // 1800' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_RELAY_BASE_URL=$(jq -r '.runner_relay_base_url // ""' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_RELAY_API_TOKEN=$(jq -r '.runner_relay_api_token // ""' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_RELAY_CONTROLLER_API_TOKEN=$(jq -r '.runner_relay_controller_api_token // ""' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_RELAY_PUBLIC_URL=$(jq -r '.runner_relay_public_url // ""' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_INSTALLER_MANIFEST_URL=$(jq -r '.runner_installer_manifest_url // ""' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_INSTALLER_MANIFEST_SHA256=$(jq -r '.runner_installer_manifest_sha256 // ""' "$OPTIONS_FILE")
+export CONTROLLER_RUNNER_RELAY_TIMEOUT_SECONDS=$(jq -r '.runner_relay_timeout_seconds // 10' "$OPTIONS_FILE")
 export CONTROLLER_DATA_DIR=/data
 export CONTROLLER_DATABASE_PATH=/data/controller.sqlite3
 export CONTROLLER_CODEX_HOME=/data/codex-home
 export CONTROLLER_WORKSPACE=/data/workspace
 export CONTROLLER_MCP_SOCKET=/data/runtime/tool-proxy.sock
 
-bashio::log.info "启动 Codex Controller；auth_mode=${CONTROLLER_AUTH_MODE}，intake_enabled=${CONTROLLER_INTAKE_ENABLED}，runner_center_v2_enabled=${CONTROLLER_RUNNER_CENTER_V2_ENABLED}"
+bashio::log.info "启动 Codex Controller；auth_mode=${CONTROLLER_AUTH_MODE}，intake_enabled=${CONTROLLER_INTAKE_ENABLED}，runner_center_v2_enabled=${CONTROLLER_RUNNER_CENTER_V2_ENABLED}，relay_configured=$([ -n "$CONTROLLER_RUNNER_RELAY_BASE_URL" ] && printf true || printf false)"
 exec python3 -m codex_controller.main

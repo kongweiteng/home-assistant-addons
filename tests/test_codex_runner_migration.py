@@ -49,6 +49,43 @@ class RunnerMigrationTests(unittest.TestCase):
                 row = connection.execute("SELECT id,state FROM remote_work_agent").fetchone()
             self.assertEqual(row, (1, "offline"))
 
+    def test_schema_three_enrollment_table_adds_revocation_column_without_data_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "CREATE TABLE runner_enrollments("
+                    "enrollment_id TEXT PRIMARY KEY,runner_id TEXT NOT NULL,"
+                    "token_digest TEXT NOT NULL UNIQUE,request_id TEXT NOT NULL UNIQUE,"
+                    "request_digest TEXT NOT NULL,expires_at TEXT NOT NULL,"
+                    "claimed_at TEXT,created_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO runner_enrollments VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        "ENR-LEGACY",
+                        "RN-" + "A" * 20,
+                        "sha256:" + "b" * 64,
+                        "legacy-enrollment-request",
+                        "sha256:" + "c" * 64,
+                        "2026-08-11T01:15:00+00:00",
+                        None,
+                        "2026-08-11T01:00:00+00:00",
+                    ),
+                )
+            store = RunnerStore(path)
+            with sqlite3.connect(path) as connection:
+                columns = {
+                    row[1]
+                    for row in connection.execute("PRAGMA table_info(runner_enrollments)")
+                }
+                row = connection.execute(
+                    "SELECT enrollment_id,revoked_at FROM runner_enrollments"
+                ).fetchone()
+            self.assertIn("revoked_at", columns)
+            self.assertEqual(row, ("ENR-LEGACY", None))
+            self.assertEqual(store.schema_version(), SCHEMA_VERSION)
+
 
 if __name__ == "__main__":
     unittest.main()

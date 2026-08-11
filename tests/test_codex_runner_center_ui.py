@@ -33,13 +33,58 @@ class App:
         return None
 
 
+class Installer:
+    def __init__(self) -> None:
+        self.tokens: dict[str, str] = {}
+
+    @staticmethod
+    def status() -> dict:
+        return {
+            "ready": True,
+            "error_code": None,
+            "runner_version": "0.2.0",
+            "codex_version": "0.146.0",
+            "python_version": "3.11.13",
+        }
+
+    @staticmethod
+    def manifest() -> dict:
+        return {"fixture": True}
+
+    def command(
+        self,
+        *,
+        runner_id: str,
+        enrollment_token: str,
+        os_name: str,
+        arch: str,
+        projects: list[str],
+        manifest: dict,
+    ) -> dict:
+        if manifest != {"fixture": True}:
+            raise AssertionError(f"unexpected fixture manifest: {manifest!r}")
+        self.tokens[runner_id] = enrollment_token
+        return {
+            "command": (
+                f"CODEX_RUNNER_ENROLLMENT_TOKEN={enrollment_token} install-runner "
+                f"--runner-id {runner_id} --relay-url wss://runner.example.com/connect "
+                f"--platform {os_name} --arch {arch} --projects {','.join(projects)}"
+            ),
+            "runner_version": "0.2.0",
+            "codex_version": "0.146.0",
+            "python_version": "3.11.13",
+            "platform": os_name,
+            "arch": arch,
+        }
+
 class RunnerCenterUiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         path = Path(self.temporary.name) / "controller.sqlite3"
         self.controller_store = ControllerStore(path)
         self.runner_store = RunnerStore(path)
-        self.manager = RunnerManagerService(self.runner_store)
+        self.installer = Installer()
+        self.manager = RunnerManagerService(self.runner_store, installer=self.installer)
         self.service = ControllerService(
             self.controller_store,
             App(),  # type: ignore[arg-type]
@@ -49,11 +94,14 @@ class RunnerCenterUiTests(unittest.TestCase):
             runner_manager=self.manager,
         )
         self.token = "t" * 32
+        self.relay_publish_token = "p" * 32
+        self.relay_controller_token = "c" * 32
         self.server = create_server(
             "127.0.0.1",
             0,
             service=self.service,
             api_token=self.token,
+            runner_relay_controller_api_token=self.relay_controller_token,
             max_request_bytes=1024 * 1024,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -109,7 +157,13 @@ class RunnerCenterUiTests(unittest.TestCase):
             {"X-CSRF-Token": csrf},
         )
         self.assertEqual(status, 201)
-        return document["result"]["runner"], document["result"]["enrollment"]["token"]
+        result = document["result"]
+        self.assertNotIn("token", result["enrollment"])
+        self.assertFalse(result["enrollment"]["secret_available"])
+        self.assertTrue(result["installation"]["command_available"])
+        self.assertIn("install-runner", result["installation"]["command"])
+        runner = result["runner"]
+        return runner, self.installer.tokens[runner["runner_id"]]
 
     def test_page_contains_complete_runner_management_without_terminal(self) -> None:
         combined = DASHBOARD_HTML + DASHBOARD_JS
@@ -126,14 +180,41 @@ class RunnerCenterUiTests(unittest.TestCase):
             "runnerStateFilter",
             "runnerPlatformFilter",
             "runnerRelayMissing",
+            "runnerInstallerMissing",
             "管理功能已启用，任务执行 Relay 尚未接入",
             "Runner Center v2 已由 Add-on 配置关闭",
+            "navigator.clipboard",
+            "document.execCommand('copy')",
+            "installationState",
+            "runnerInstallCountdown",
+            "enrollment-revocation",
+            "enrollment-regeneration",
+            "注册已过期",
             "@media(max-width:700px)",
         ):
             self.assertIn(text, combined)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
+        self.assertNotIn("showRunnerSecret", DASHBOARD_JS)
         self.assertNotIn('type="password"', DASHBOARD_HTML.lower())
         self.assertNotIn("xterm", combined.lower())
+
+    def test_controller_version_is_consistent_across_runtime_surfaces(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "codex_controller"
+        expected = "0.4.0"
+        self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
+        for relative in (
+            "codex_controller/__init__.py",
+            "codex_controller/api.py",
+            "codex_controller/service.py",
+            "codex_controller/app_server.py",
+            "codex_controller/mcp_proxy.py",
+            "codex_controller/runner_relay.py",
+            "README.md",
+            "DOCS.md",
+            "CHANGELOG.md",
+        ):
+            with self.subTest(relative=relative):
+                self.assertIn(expected, (root / relative).read_text(encoding="utf-8"))
 
     def test_default_enabled_without_relay_and_explicit_false_fail_closed(self) -> None:
         status, document = self.request("GET", "/api/status")
@@ -143,6 +224,13 @@ class RunnerCenterUiTests(unittest.TestCase):
             {
                 "enabled": True,
                 "relay_configured": False,
+                "installer": {
+                    "ready": True,
+                    "error_code": None,
+                    "runner_version": "0.2.0",
+                    "codex_version": "0.146.0",
+                    "python_version": "3.11.13",
+                },
                 "last_error": None,
                 "summary": {
                     "total": 0,
@@ -156,6 +244,7 @@ class RunnerCenterUiTests(unittest.TestCase):
         runners_status, runners = self.request("GET", "/api/runners")
         self.assertEqual(runners_status, 200)
         self.assertEqual(runners["result"]["summary"]["total"], 0)
+        self.assertEqual(document["version"], "0.4.0")
 
         disabled_manager = RunnerManagerService(self.runner_store, enabled=False)
         disabled_service = ControllerService(
@@ -263,6 +352,139 @@ class RunnerCenterUiTests(unittest.TestCase):
         )
         self.assertEqual(deleted_status, 200)
         self.assertEqual(deleted["result"]["runner"]["admin_state"], "revoked")
+
+    def test_enrollment_revoke_regenerate_and_internal_relay_auth_are_fail_closed(self) -> None:
+        csrf = self.csrf()
+        runner, old_token = self.create_runner(csrf)
+        revoke_status, revoked = self.request(
+            "POST",
+            f"/api/runners/{runner['runner_id']}/enrollment-revocation",
+            {"revision": runner["revision"], "request_id": "ui-revoke-enrollment-0001"},
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(revoke_status, 200)
+        self.assertEqual(revoked["result"]["runner"]["enrollment"]["state"], "revoked")
+
+        regenerate_payload = {
+            "revision": revoked["result"]["runner"]["revision"],
+            "request_id": "ui-regenerate-enrollment-0001",
+        }
+        regenerate_status, regenerated = self.request(
+            "POST",
+            f"/api/runners/{runner['runner_id']}/enrollment-regeneration",
+            regenerate_payload,
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(regenerate_status, 200)
+        self.assertNotIn("token", regenerated["result"]["enrollment"])
+        self.assertIn("installation", regenerated["result"])
+        new_token = self.installer.tokens[runner["runner_id"]]
+        self.assertNotEqual(old_token, new_token)
+
+        replay_status, replay = self.request(
+            "POST",
+            f"/api/runners/{runner['runner_id']}/enrollment-regeneration",
+            regenerate_payload,
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(replay_status, 200)
+        self.assertNotIn("installation", replay["result"])
+
+        unauthorized_status, unauthorized = self.request(
+            "POST",
+            "/internal/v2/runner-relay/enroll",
+            {
+                "token": new_token,
+                "runner_id": runner["runner_id"],
+                "protocol_version": 2,
+                "agent_version": "0.2.0",
+                "codex_version": "0.146.0",
+                "os": "linux",
+                "arch": "amd64",
+                "capabilities": ["registered_projects", "worktree"],
+                "projects": ["renovation-hub"],
+                "self_check": {"ok": True, "checks": ["codex", "git"]},
+            },
+        )
+        self.assertEqual((unauthorized_status, unauthorized["error"]["code"]), (401, "not_authorized"))
+
+        publisher_identity_status, publisher_identity = self.request(
+            "POST",
+            "/internal/v2/runner-relay/enroll",
+            {
+                "token": new_token,
+                "runner_id": runner["runner_id"],
+                "protocol_version": 2,
+                "agent_version": "0.2.0",
+                "codex_version": "0.146.0",
+                "os": "linux",
+                "arch": "amd64",
+                "capabilities": ["registered_projects", "worktree"],
+                "projects": ["renovation-hub"],
+                "self_check": {"ok": True, "checks": ["codex", "git"]},
+            },
+            {"Authorization": f"Bearer {self.relay_publish_token}"},
+        )
+        self.assertEqual(
+            (publisher_identity_status, publisher_identity["error"]["code"]),
+            (401, "not_authorized"),
+        )
+
+        enroll_status, enrolled = self.request(
+            "POST",
+            "/internal/v2/runner-relay/enroll",
+            {
+                "token": new_token,
+                "runner_id": runner["runner_id"],
+                "protocol_version": 2,
+                "agent_version": "0.2.0",
+                "codex_version": "0.146.0",
+                "os": "linux",
+                "arch": "amd64",
+                "capabilities": ["registered_projects", "worktree"],
+                "projects": ["renovation-hub"],
+                "self_check": {"ok": True, "checks": ["codex", "git"]},
+            },
+            {"Authorization": f"Bearer {self.relay_controller_token}"},
+        )
+        self.assertEqual(enroll_status, 200)
+        credential = enrolled["result"]["credential"]["secret"]
+        auth_status, authenticated = self.request(
+            "POST",
+            "/internal/v2/runner-relay/authenticate",
+            {"runner_id": runner["runner_id"], "credential": credential},
+            {"Authorization": f"Bearer {self.relay_controller_token}"},
+        )
+        self.assertEqual(auth_status, 200)
+        self.assertEqual(authenticated["result"]["authenticated"], True)
+
+        unconfigured_server = create_server(
+            "127.0.0.1",
+            0,
+            service=self.service,
+            api_token=self.token,
+            max_request_bytes=1024 * 1024,
+        )
+        unconfigured_thread = threading.Thread(
+            target=unconfigured_server.serve_forever, daemon=True
+        )
+        unconfigured_thread.start()
+        try:
+            unconfigured_status, unconfigured = self.request(
+                "POST",
+                "/internal/v2/runner-relay/authenticate",
+                {"runner_id": runner["runner_id"], "credential": credential},
+                {"Authorization": f"Bearer {self.relay_controller_token}"},
+                server=unconfigured_server,
+            )
+            self.assertEqual(
+                (unconfigured_status, unconfigured["error"]["code"]),
+                (503, "runner_relay_not_configured"),
+            )
+        finally:
+            unconfigured_server.shutdown()
+            unconfigured_server.server_close()
+            unconfigured_thread.join(timeout=3)
 
     def test_revision_conflict_and_internal_v2_auth_are_fail_closed(self) -> None:
         csrf = self.csrf()

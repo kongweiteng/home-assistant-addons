@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable
 from .store import StoreError
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ADMIN_STATES = frozenset({"pending", "enabled", "draining", "disabled", "revoked"})
 WORK_STATES = frozenset({"idle", "busy", "recovery_required", "error"})
 RUNNER_CAPABILITIES = frozenset(
@@ -208,6 +208,7 @@ class RunnerStore:
                     request_digest TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     claimed_at TEXT,
+                    revoked_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(runner_id) REFERENCES runner_registry(runner_id)
                 );
@@ -305,6 +306,12 @@ class RunnerStore:
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE runner_tasks ADD COLUMN {name} {declaration}")
+            enrollment_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(runner_enrollments)").fetchall()
+            }
+            if "revoked_at" not in enrollment_columns:
+                connection.execute("ALTER TABLE runner_enrollments ADD COLUMN revoked_at TEXT")
             connection.execute(
                 "INSERT INTO runner_meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -344,7 +351,7 @@ class RunnerStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT request_digest,runner_id FROM runner_enrollments WHERE request_id=?",
+                "SELECT * FROM runner_enrollments WHERE request_id=?",
                 (request_id,),
             ).fetchone()
             if existing is not None:
@@ -356,7 +363,9 @@ class RunnerStore:
                 ).fetchone()
                 connection.commit()
                 result = self._public_runner(row, now=now)
-                return {"runner": result, "enrollment": {"state": "configured", "secret_available": False}}
+                enrollment = self._public_enrollment(existing, now=now)
+                result["enrollment"] = enrollment
+                return {"runner": result, "enrollment": enrollment}
             connection.execute(
                 "INSERT INTO runner_registry(runner_id,display_name,admin_state,work_state,os,arch,labels_json,allowed_projects_json,capabilities_json,max_concurrency,created_at,updated_at) "
                 "VALUES(?,?,'pending','idle',?,?,?,?, '[]',1,?,?)",
@@ -369,8 +378,14 @@ class RunnerStore:
             self._event(connection, "runner_enrollment_created", runner_id=runner_id, metadata={"os": os_name, "arch": arch})
             row = connection.execute("SELECT * FROM runner_registry WHERE runner_id=?", (runner_id,)).fetchone()
             connection.commit()
+        runner = self._public_runner(row, now=now)
+        runner["enrollment"] = {
+            "state": "pending",
+            "expires_at": expires_at,
+            "secret_available": False,
+        }
         return {
-            "runner": self._public_runner(row, now=now),
+            "runner": runner,
             "enrollment": {
                 "state": "pending",
                 "secret_available": True,
@@ -415,6 +430,9 @@ class RunnerStore:
             if enrollment["claimed_at"] is not None:
                 connection.rollback()
                 raise StoreError("enrollment_replayed", "Runner enrollment 已领取", status=409)
+            if enrollment["revoked_at"] is not None:
+                connection.rollback()
+                raise StoreError("enrollment_revoked", "Runner enrollment 已撤销", status=409)
             if _parse_time(enrollment["expires_at"]) <= _parse_time(now):
                 connection.rollback()
                 raise StoreError("enrollment_expired", "Runner enrollment 已过期", status=409)
@@ -439,8 +457,14 @@ class RunnerStore:
             self._event(connection, "runner_enrollment_redeemed", runner_id=runner_id, metadata={"self_check_ok": self_check["ok"]})
             row = connection.execute("SELECT * FROM runner_registry WHERE runner_id=?", (runner_id,)).fetchone()
             connection.commit()
+        runner = self._public_runner(row, now=now)
+        runner["enrollment"] = {
+            "state": "claimed",
+            "expires_at": enrollment["expires_at"],
+            "secret_available": False,
+        }
         return {
-            "runner": self._public_runner(row, now=now),
+            "runner": runner,
             "credential": {"credential_id": credential_id, "secret": credential, "secret_available": True},
         }
 
@@ -450,6 +474,8 @@ class RunnerStore:
         with self._connect() as connection:
             rows = connection.execute(f"SELECT * FROM runner_registry {where} ORDER BY created_at,runner_id").fetchall()
         runners = [self._public_runner(row, now=now) for row in rows]
+        for runner in runners:
+            runner["enrollment"] = self._latest_enrollment(str(runner["runner_id"]), now=now)
         return {
             "revision": max((runner["revision"] for runner in runners), default=0),
             "summary": {
@@ -473,6 +499,7 @@ class RunnerStore:
                 (runner_id,),
             ).fetchall()
         result = self._public_runner(row, now=self.clock())
+        result["enrollment"] = self._latest_enrollment(runner_id, now=self.clock())
         result["events"] = [
             {"event_type": event["event_type"], "metadata": json.loads(event["metadata_json"]), "created_at": event["created_at"]}
             for event in events
@@ -556,6 +583,156 @@ class RunnerStore:
     def request_self_check(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return self._admin_action(runner_id, payload, "self_check")
 
+    def revoke_enrollment(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"revision", "request_id"}:
+            raise StoreError("runner_payload_invalid", "撤销注册请求字段无效")
+        runner_id = self._runner_id(runner_id)
+        revision = self._revision(payload.get("revision"))
+        request_id = self._request_id(payload.get("request_id"))
+        body_digest = _digest(payload)
+        now = self.clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._admin_replay(connection, request_id, "revoke_enrollment", body_digest, runner_id)
+            if replay is not None:
+                connection.commit()
+                return replay
+            row = self._locked_runner(connection, runner_id, revision)
+            enrollment = connection.execute(
+                "SELECT * FROM runner_enrollments WHERE runner_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                (runner_id,),
+            ).fetchone()
+            if (
+                row["admin_state"] == "revoked"
+                or enrollment is None
+                or self._public_enrollment(enrollment, now=now)["state"] != "pending"
+            ):
+                connection.rollback()
+                raise StoreError("enrollment_state_conflict", "当前 Runner 没有可撤销的 enrollment", status=409)
+            connection.execute(
+                "UPDATE runner_enrollments SET revoked_at=? WHERE enrollment_id=?",
+                (now, enrollment["enrollment_id"]),
+            )
+            connection.execute(
+                "UPDATE runner_registry SET revision=revision+1,updated_at=? WHERE runner_id=?",
+                (now, runner_id),
+            )
+            self._event(connection, "runner_enrollment_revoked", runner_id=runner_id, metadata={})
+            updated = connection.execute(
+                "SELECT * FROM runner_registry WHERE runner_id=?", (runner_id,)
+            ).fetchone()
+            revoked = connection.execute(
+                "SELECT * FROM runner_enrollments WHERE enrollment_id=?",
+                (enrollment["enrollment_id"],),
+            ).fetchone()
+            result = {"runner": self._public_runner(updated, now=now)}
+            result["runner"]["enrollment"] = self._public_enrollment(revoked, now=now)
+            self._save_admin_replay(
+                connection, request_id, "revoke_enrollment", body_digest, runner_id, result
+            )
+            connection.commit()
+        return result
+
+    def regenerate_enrollment(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"revision", "request_id"}:
+            raise StoreError("runner_payload_invalid", "重新生成注册请求字段无效")
+        runner_id = self._runner_id(runner_id)
+        revision = self._revision(payload.get("revision"))
+        request_id = self._request_id(payload.get("request_id"))
+        body_digest = _digest(payload)
+        now = self.clock()
+        expires_at = (_parse_time(now) + dt.timedelta(minutes=15)).isoformat()
+        enrollment_id = _opaque("ENR", 12)
+        enrollment_token = _opaque("ENROLL", 24)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._admin_replay(
+                connection, request_id, "regenerate_enrollment", body_digest, runner_id
+            )
+            if replay is not None:
+                connection.commit()
+                return replay
+            row = self._locked_runner(connection, runner_id, revision)
+            claimed = connection.execute(
+                "SELECT 1 FROM runner_enrollments WHERE runner_id=? AND claimed_at IS NOT NULL LIMIT 1",
+                (runner_id,),
+            ).fetchone()
+            active_credential = connection.execute(
+                "SELECT 1 FROM runner_credentials WHERE runner_id=? AND state='active' LIMIT 1",
+                (runner_id,),
+            ).fetchone()
+            if (
+                row["admin_state"] not in {"pending", "disabled"}
+                or row["current_task_id"] is not None
+                or claimed is not None
+                or active_credential is not None
+            ):
+                connection.rollback()
+                raise StoreError(
+                    "enrollment_state_conflict",
+                    "已注册 Runner 不能重新生成 enrollment，请使用凭据轮换",
+                    status=409,
+                )
+            connection.execute(
+                "UPDATE runner_enrollments SET revoked_at=? WHERE runner_id=? AND claimed_at IS NULL AND revoked_at IS NULL",
+                (now, runner_id),
+            )
+            connection.execute(
+                "INSERT INTO runner_enrollments(enrollment_id,runner_id,token_digest,request_id,request_digest,expires_at,created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    enrollment_id,
+                    runner_id,
+                    _secret_digest(enrollment_token),
+                    request_id,
+                    body_digest,
+                    expires_at,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE runner_registry SET revision=revision+1,updated_at=? WHERE runner_id=?",
+                (now, runner_id),
+            )
+            self._event(connection, "runner_enrollment_regenerated", runner_id=runner_id, metadata={})
+            updated = connection.execute(
+                "SELECT * FROM runner_registry WHERE runner_id=?", (runner_id,)
+            ).fetchone()
+            runner = self._public_runner(updated, now=now)
+            runner["enrollment"] = {
+                "state": "pending",
+                "expires_at": expires_at,
+                "secret_available": False,
+            }
+            result = {
+                "runner": runner,
+                "enrollment": {
+                    "state": "pending",
+                    "secret_available": True,
+                    "token": enrollment_token,
+                    "expires_at": expires_at,
+                    "runner_id": runner_id,
+                },
+            }
+            replay_result = {
+                "runner": runner,
+                "enrollment": {
+                    "state": "pending",
+                    "secret_available": False,
+                    "expires_at": expires_at,
+                    "runner_id": runner_id,
+                },
+            }
+            self._save_admin_replay(
+                connection,
+                request_id,
+                "regenerate_enrollment",
+                body_digest,
+                runner_id,
+                replay_result,
+            )
+            connection.commit()
+        return result
+
     def _admin_action(self, runner_id: str, payload: dict[str, Any], action: str) -> dict[str, Any]:
         if set(payload) != {"revision", "request_id"}:
             raise StoreError("runner_payload_invalid", "Runner 管理请求字段无效")
@@ -614,6 +791,17 @@ class RunnerStore:
                 if row["admin_state"] == "revoked":
                     connection.rollback()
                     raise StoreError("runner_state_conflict", "已吊销 Runner 不能轮换凭据", status=409)
+                active_credential = connection.execute(
+                    "SELECT 1 FROM runner_credentials WHERE runner_id=? AND state='active' LIMIT 1",
+                    (runner_id,),
+                ).fetchone()
+                if active_credential is None:
+                    connection.rollback()
+                    raise StoreError(
+                        "runner_state_conflict",
+                        "Runner 尚未领取长期凭据，不能执行凭据轮换",
+                        status=409,
+                    )
                 secret = _opaque("CRED", 24)
                 credential_id = _opaque("CR", 12)
                 connection.execute(
@@ -1441,6 +1629,32 @@ class RunnerStore:
             "archived": row["archived_at"] is not None,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+        }
+
+    def _latest_enrollment(self, runner_id: str, *, now: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM runner_enrollments WHERE runner_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+                (runner_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._public_enrollment(row, now=now)
+
+    @staticmethod
+    def _public_enrollment(row: sqlite3.Row, *, now: str) -> dict[str, Any]:
+        if row["claimed_at"] is not None:
+            state = "claimed"
+        elif row["revoked_at"] is not None:
+            state = "revoked"
+        elif _parse_time(row["expires_at"]) <= _parse_time(now):
+            state = "expired"
+        else:
+            state = "pending"
+        return {
+            "state": state,
+            "expires_at": row["expires_at"],
+            "secret_available": False,
         }
 
     @staticmethod

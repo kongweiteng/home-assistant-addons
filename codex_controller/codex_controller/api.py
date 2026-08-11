@@ -22,6 +22,7 @@ from .runner_api import (
     patch_runner_api,
     post_runner_api,
 )
+from .runner_dashboard import DASHBOARD_JS
 from .service import ControllerService
 from .store import StoreError
 
@@ -31,6 +32,9 @@ ARTIFACT_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/artifacts/(AR
 DOWNLOAD_PATH_RE = re.compile(r"^/downloads/artifacts/([A-Za-z0-9_-]{43})$")
 RECOVERY_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/recovery-resolution$")
 TOOL_PATH_RE = re.compile(r"^/api/tools/([a-z0-9_]{1,96})$")
+RUNNER_RELAY_EVENT_RE = re.compile(
+    r"^/internal/v2/runner-relay/events/(heartbeat|status|result)$"
+)
 
 
 def create_server(
@@ -39,6 +43,7 @@ def create_server(
     *,
     service: ControllerService,
     api_token: str,
+    runner_relay_controller_api_token: str = "",
     max_request_bytes: int,
 ) -> ThreadingHTTPServer:
     csrf_state: dict[str, Any] = {"token": "", "expires_at": 0.0}
@@ -56,7 +61,7 @@ def create_server(
             }
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.3.1"
+        server_version = "CodexController/0.4.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -174,6 +179,45 @@ def create_server(
                 if payload is not None:
                     self._call(service.logout)
                 return
+            if path in {
+                "/internal/v2/runner-relay/enroll",
+                "/internal/v2/runner-relay/authenticate",
+            } or RUNNER_RELAY_EVENT_RE.fullmatch(path):
+                if not self._runner_relay_authorized():
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                if service.runner_manager is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                    return
+                if path == "/internal/v2/runner-relay/enroll":
+                    self._call(lambda: service.runner_manager.redeem_enrollment(payload))
+                    return
+                if path == "/internal/v2/runner-relay/authenticate":
+                    self._call(lambda: service.runner_manager.authenticate_runner(payload))
+                    return
+                event_match = RUNNER_RELAY_EVENT_RE.fullmatch(path)
+                assert event_match is not None
+                credential = self.headers.get("X-Runner-Credential", "")
+                event_type = event_match.group(1)
+                if event_type == "heartbeat":
+                    self._call(
+                        lambda: service.runner_manager.heartbeat(payload, credential=credential)
+                    )
+                elif event_type == "status":
+                    self._call(
+                        lambda: service.runner_manager.receive_status(
+                            payload, credential=credential
+                        )
+                    )
+                else:
+                    self._call(
+                        lambda: service.runner_manager.receive_result(
+                            payload, credential=credential
+                        )
+                    )
+                return
             if path == "/api/runner-enrollments" or RUNNER_ACTION_RE.fullmatch(path):
                 payload = self._read_json()
                 if payload is None:
@@ -245,6 +289,20 @@ def create_server(
             actual = self.headers.get("X-CSRF-Token", "")
             if not isinstance(actual, str) or not hmac.compare_digest(actual, expected):
                 self._json(HTTPStatus.FORBIDDEN, {"error": {"code": "csrf_required"}})
+                return False
+            return True
+
+        def _runner_relay_authorized(self) -> bool:
+            if len(runner_relay_controller_api_token) < 32:
+                self._json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": {"code": "runner_relay_not_configured"}},
+                )
+                return False
+            expected = f"Bearer {runner_relay_controller_api_token}"
+            actual = self.headers.get("Authorization", "")
+            if not hmac.compare_digest(actual, expected):
+                self._json(HTTPStatus.UNAUTHORIZED, {"error": {"code": "not_authorized"}})
                 return False
             return True
 
@@ -358,7 +416,7 @@ def create_server(
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Codex 控制器</title><style>
-:root{color-scheme:dark;--bg:#0b1220;--card:#121c2e;--line:#263751;--text:#edf4ff;--muted:#91a4bd;--blue:#4f9cff;--green:#42d392;--amber:#f1b84b;--red:#ef6b73}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,sans-serif}main{max-width:1240px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}.metric{font-size:24px;font-weight:720;display:block;margin-top:8px}.muted{color:var(--muted)}code{color:var(--green);overflow-wrap:anywhere}button,select,input{border:1px solid #375174;border-radius:9px;padding:9px 12px;background:#17253a;color:var(--text)}input{min-width:160px}button{cursor:pointer;background:#2374e1;border-color:#2374e1}button.secondary{background:#263751;border-color:#375174}button.danger{background:#9d3035;border-color:#9d3035}button.toggle{min-width:76px;background:#263751;border-color:#375174}button.toggle.on{background:#176c50;border-color:#2a9d75}button:disabled{opacity:.5;cursor:not-allowed}a{color:#7eb6ff}.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}.notice{border-left:4px solid var(--blue);padding:12px 14px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:980px;background:var(--card)}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#b8c8dc;background:#101a2a;position:sticky;top:0}.tool-name{font-weight:700}.technical{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);margin-top:4px}.badges,.runner-actions{display:flex;flex-wrap:wrap;gap:5px}.runner-actions button{font-size:12px;padding:6px 8px}.badge{font-size:12px;border:1px solid #3a4c65;border-radius:999px;padding:3px 7px;color:#c7d4e5}.badge.good{border-color:#28775d;color:#69deb3}.badge.warn{border-color:#8c6723;color:#f6cb72}.badge.bad{border-color:#8f3d44;color:#ff969c}.intent{max-width:310px;white-space:normal}.error{color:#ff969c}.success{color:#69deb3}.hidden{display:none}.secret-box{border-color:#8c6723;background:#211b10}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}.form-grid label{display:grid;gap:5px;color:var(--muted)}@media(max-width:700px){main{padding:14px}h1{font-size:25px}.runner-actions{min-width:230px}}
+:root{color-scheme:dark;--bg:#0b1220;--card:#121c2e;--line:#263751;--text:#edf4ff;--muted:#91a4bd;--blue:#4f9cff;--green:#42d392;--amber:#f1b84b;--red:#ef6b73}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,sans-serif}main{max-width:1240px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}.metric{font-size:24px;font-weight:720;display:block;margin-top:8px}.muted{color:var(--muted)}code{color:var(--green);overflow-wrap:anywhere}button,select,input{border:1px solid #375174;border-radius:9px;padding:9px 12px;background:#17253a;color:var(--text)}input{min-width:160px}button{cursor:pointer;background:#2374e1;border-color:#2374e1}button.secondary{background:#263751;border-color:#375174}button.danger{background:#9d3035;border-color:#9d3035}button.toggle{min-width:76px;background:#263751;border-color:#375174}button.toggle.on{background:#176c50;border-color:#2a9d75}button:disabled{opacity:.5;cursor:not-allowed}a{color:#7eb6ff}.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}.notice{border-left:4px solid var(--blue);padding:12px 14px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:980px;background:var(--card)}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#b8c8dc;background:#101a2a;position:sticky;top:0}.tool-name{font-weight:700}.technical{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);margin-top:4px}.badges,.runner-actions,.installation-actions,.installation-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.runner-actions button{font-size:12px;padding:6px 8px}.badge{font-size:12px;border:1px solid #3a4c65;border-radius:999px;padding:3px 7px;color:#c7d4e5}.badge.good{border-color:#28775d;color:#69deb3}.badge.warn{border-color:#8c6723;color:#f6cb72}.badge.bad{border-color:#8f3d44;color:#ff969c}.intent{max-width:310px;white-space:normal}.error{color:#ff969c}.success{color:#69deb3}.hidden{display:none}.secret-box{border-color:#8c6723;background:#211b10}.secret-box.expired{border-color:#8f3d44}.install-command{margin:14px 0;padding:14px;border:1px solid #5d4b24;border-radius:10px;background:#0d1420;color:var(--green);white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.installation-meta{color:var(--muted);margin-top:10px}.installation-meta strong{color:var(--text)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}.form-grid label{display:grid;gap:5px;color:var(--muted)}@media(max-width:700px){main{padding:14px}h1{font-size:25px}.runner-actions{min-width:230px}.install-command{font-size:12px}}
 </style></head><body><main>
 <h1>Codex 控制器</h1><p class="muted">官方 app-server · 多 Thread · 全局单活动 Turn · MCP 工具服务端门禁</p>
 <div class="grid"><div class="card">服务<span class="metric" id="ready">加载中</span></div><div class="card">认证<span class="metric" id="auth">加载中</span></div><div class="card">排队<span class="metric" id="queued">-</span></div><div class="card">实际发布工具<span class="metric" id="published">-</span></div><div class="card">当前 Thread<span class="metric" id="threadShort">无活动</span></div></div>
@@ -370,9 +428,11 @@ DASHBOARD_HTML = """<!doctype html>
 <div class="table-wrap"><table><thead><tr><th>工具</th><th>服务 / 风险</th><th>状态</th><th>意图示例</th><th>最近调用</th><th>开关</th></tr></thead><tbody id="toolRows"></tbody></table></div>
 <section id="runnerCenter" class="hidden"><h2>Runner Center</h2><div class="card notice">Runner Center 只管理已注册的 Mac/Linux 执行器和确定性任务 lease，不提供网页终端、任意 Shell、SSH、路径、源码、diff、日志或秘密回显。</div>
 <div id="runnerRelayMissing" class="card notice"><strong>管理功能已启用，任务执行 Relay 尚未接入</strong><p class="muted">当前可以新增、启用、排空、停用、轮换和删除 Runner；在独立 Relay 配置完成前不会向真实 Runner 发布任务。</p></div>
+<div id="runnerInstallerMissing" class="card notice"><strong>安装制品尚未就绪</strong><p id="runnerInstallerHelp" class="muted">必须先配置完整、摘要匹配的公开 installer manifest 和 WSS Relay URL；否则不会创建无法使用的一次性 enrollment。</p></div>
 <div class="grid"><div class="card">Runner<span class="metric" id="runnerTotal">0</span></div><div class="card">已启用<span class="metric" id="runnerEnabled">0</span></div><div class="card">在线<span class="metric" id="runnerOnline">0</span></div><div class="card">忙碌<span class="metric" id="runnerBusy">0</span></div><div class="card">需恢复<span class="metric" id="runnerRecovery">0</span></div></div>
-<h3>新增 Runner</h3><form id="runnerForm" class="card form-grid"><label>名称<input id="runnerName" maxlength="80" required placeholder="常驻 Linux Runner"></label><label>平台<select id="runnerOs"><option value="linux">Linux</option><option value="macos">macOS</option></select></label><label>架构<select id="runnerArch"><option value="amd64">amd64</option><option value="aarch64">aarch64</option></select></label><label>项目白名单<input id="runnerProjects" required value="renovation-hub"></label><label>标签<input id="runnerLabels" value="always-on,tests"></label><button type="submit">生成一次性注册材料</button></form>
-<div id="runnerSecret" class="card secret-box hidden"><strong>一次性注册材料</strong><p class="muted">只显示一次。请在目标 Runner 的安全入口使用；页面刷新后无法恢复。</p><code id="runnerSecretValue"></code><div><button id="closeRunnerSecret" class="secondary">我已安全保存</button></div></div>
+<h3>新增 Runner</h3><form id="runnerForm" class="card form-grid"><label>名称<input id="runnerName" maxlength="80" required placeholder="常驻 Linux Runner"></label><label>平台<select id="runnerOs"><option value="linux">Linux</option><option value="macos">macOS</option></select></label><label>架构<select id="runnerArch"><option value="amd64">amd64</option><option value="aarch64">aarch64</option></select></label><label>项目白名单<input id="runnerProjects" required value="renovation-hub"></label><label>标签<input id="runnerLabels" value="always-on,tests"></label><button id="createRunner" type="submit" disabled>生成安装命令</button></form>
+<div id="runnerSecret" class="card secret-box hidden"><strong>Runner 一键安装命令</strong><p class="muted">命令包含 15 分钟有效的一次性 enrollment，只显示在当前页面内存中。请在目标主机的安全终端执行；页面刷新后无法恢复。</p><div class="installation-meta"><span>平台 <strong id="runnerInstallPlatform">-</strong></span><span>Agent <strong id="runnerInstallVersion">-</strong></span><span>注册 <strong id="runnerInstallStatus">待领取</strong></span><span>剩余 <strong id="runnerInstallCountdown">--:--</strong></span></div><pre id="runnerSecretValue" class="install-command"></pre><div class="installation-actions"><button id="copyRunnerCommand" type="button">复制命令</button><button id="revokeRunnerEnrollment" type="button" class="danger">撤销注册</button><button id="regenerateRunnerEnrollment" type="button" class="secondary">重新生成</button><button id="closeRunnerSecret" type="button" class="secondary">关闭</button><span id="runnerInstallFeedback" class="muted"></span></div></div>
+<div id="runnerCredentialSecret" class="card secret-box hidden"><strong>Runner 新凭据</strong><p class="muted">凭据只显示一次，用于既有 Runner 的受控凭据轮换；关闭或刷新页面后无法恢复。</p><pre id="runnerCredentialValue" class="install-command"></pre><div class="installation-actions"><button id="copyRunnerCredential" type="button">复制凭据</button><button id="closeRunnerCredential" type="button" class="secondary">关闭</button><span id="runnerCredentialFeedback" class="muted"></span></div></div>
 <div class="toolbar"><label>管理状态 <select id="runnerStateFilter"><option value="all">全部</option><option value="pending">待启用</option><option value="enabled">已启用</option><option value="draining">排空中</option><option value="disabled">已停用</option></select></label><label>平台 <select id="runnerPlatformFilter"><option value="all">全部</option><option value="linux">Linux</option><option value="macos">macOS</option></select></label><button id="reloadRunners">刷新 Runner</button><span id="runnerFeedback" class="muted"></span></div>
 <div class="table-wrap"><table><thead><tr><th>Runner</th><th>平台</th><th>状态</th><th>项目 / 标签</th><th>当前任务 / 心跳</th><th>操作</th></tr></thead><tbody id="runnerRows"></tbody></table></div>
 <div id="runnerDetail" class="card hidden"><strong id="runnerDetailTitle">Runner 详情</strong><p id="runnerDetailBody" class="muted"></p></div></section>
@@ -380,7 +440,7 @@ DASHBOARD_HTML = """<!doctype html>
 <h2>安全状态</h2><p id="details" class="muted">加载中</p><script src="app.js"></script></main></body></html>"""
 
 
-DASHBOARD_JS = r"""const q=id=>document.getElementById(id);let csrf='',catalog=null,statusDoc=null;
+_LEGACY_DASHBOARD_JS_031 = r"""const q=id=>document.getElementById(id);let csrf='',catalog=null,statusDoc=null;
 function requestId(){const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('')}
 async function jsonFetch(path,options={}){const r=await fetch(path,{cache:'no-store',...options});const j=await r.json();if(!r.ok)throw new Error(j.error?.message||j.error?.code||'请求失败');return j}
 async function call(path){const j=await jsonFetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:'{}'});return j.result}

@@ -38,8 +38,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.2.3` 使用 `codex app-server --disable goals --listen stdio://` 启动官方进程，禁止普通微信 Turn 派生后台 Goal 与后续消息竞争作业所有权；持续监控必须交给独立自动化服务。
 - `0.2.3` 的 bootstrap 付款目录与 Hub canonical v2 契约一致；Hub 返回白名单内、有界且结构化的校验错误时保留 `invalid_input` / `invalid_tags` 等可纠正语义，非 JSON、超长或未知错误仍统一脱敏。
 - `0.2.4` 将普通附件与装修档案意图分离：图片、视频和文件默认只用于识别，只有明确请求保存到装修/施工/工地档案时才暴露并允许媒体归档工具；媒体从 Gateway 非消费流式读取，Hub 成功后才 ACK 消费。
-- `0.3.0` 新增默认关闭的 Runner Center v2：在现有中文 Ingress 中管理 pending/enabled/draining/disabled/revoked Runner，使用独立 SQLite 注册表、一次性 enrollment、revision/request_id、原子 lease/assignment epoch 和脱敏任务审计。Runner 调度是确定性控制面，不经过 Codex app-server。
-- Runner Center v2 只有在 `runner_center_v2_enabled=true` 且后续配置独立 Relay adapter 时才可能分发任务；本版本未内置真实公网 Relay，默认关闭时普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。
+- `0.3.1` 默认启用 Runner Center v2 管理面：在现有中文 Ingress 中直接管理 pending/enabled/draining/disabled/revoked Runner，使用独立 SQLite 注册表、一次性 enrollment、revision/request_id、原子 lease/assignment epoch 和脱敏任务审计。Runner 调度是确定性控制面，不经过 Codex app-server。
+- 当前版本未内置真实公网 Relay。无 Relay 时页面、API、Registry 和增删启停仍可直接使用，并明确显示 `relay_configured=false`；任务不会被伪发布。需要降级时可显式设置 `runner_center_v2_enabled=false`，普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。
 - artifact 下载分为 Gateway bearer 内部接口和 HA Ingress 高熵短期 token 接口；默认保留 24 小时，单图 20 MiB、总配额 100 MiB、每 job 最多 4 个，过期和孤立文件自动清理。模型被明确禁止自行构造图片或下载链接。
 - 默认仍不启用正式微信任务入口。
 - 旧 Hermes iLink 身份已经失效；正式装修 writer 已迁移到 Renovation Hub，Hermes 已停止，微信恢复不能依赖恢复旧 Hermes 进程，也不得形成双 poller 或双 writer。

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.3.1
+
+- Runner Center v2 管理面改为默认开启；页面、API、Registry 和增删启停在未配置 Relay 时可直接使用。
+- 页面明确区分“管理功能已启用”和“任务执行 Relay 尚未接入”，状态返回 `relay_configured=false`，不会把等待任务伪装为已分发或成功。
+- 保留显式 `runner_center_v2_enabled=false` 降级开关；普通 Codex job/Thread/MCP、装修账本、Operations、Gateway 和 Remote Work v1/v2 路由不改变。
+
 ## 0.3.0
 
 - 新增默认关闭的 Runner Center v2：独立 Runner Registry、一次性 enrollment、凭据摘要/轮换/吊销、心跳、自检、状态三元组、原子 lease、assignment epoch、任务审计和中文 Ingress 管理页面。

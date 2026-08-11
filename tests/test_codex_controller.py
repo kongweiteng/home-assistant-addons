@@ -1293,6 +1293,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_controller"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
+        main_source = (root / "codex_controller/main.py").read_text(encoding="utf-8")
         self.assertIn('auth_mode: "list(chatgpt_device_code|api_key)"', config)
         self.assertIn("openai_api_key: password", config)
         self.assertIn("openai_base_url: str", config)
@@ -1301,10 +1302,15 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn("CONTROLLER_OPENAI_BASE_URL", run_script)
         self.assertIn("CONTROLLER_CODEX_MODEL", run_script)
         self.assertNotIn("export CONTROLLER_OPENAI_API_KEY=", run_script)
+        self.assertIn("runner_center_v2_enabled: true", config)
+        self.assertIn(".runner_center_v2_enabled // true", run_script)
+        self.assertIn(
+            'CONTROLLER_RUNNER_CENTER_V2_ENABLED", "true"', main_source
+        )
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.3.0"
+        expected = "0.3.1"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",

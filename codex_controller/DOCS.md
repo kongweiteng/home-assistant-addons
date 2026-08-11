@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.3.0`。
+当前版本：`0.3.1`。
 
 ## 通用微信会话
 
@@ -21,9 +21,10 @@
 
 ## Runner Center v2
 
-`0.3.0` 在 Controller 内增加确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。
+`0.3.1` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。
 
-- `runner_center_v2_enabled=false` 是默认兼容状态：Runner API 和调度失败关闭，现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
+- 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
+- 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
 - 页面可新增 pending Runner、启用、排空停用、紧急停用、轮换凭据和吊销删除。enrollment 明文只显示一次；删除只吊销并归档，不删除服务器、Agent、worktree、分支或 Codex Session。
 - Scheduler 只向 `enabled + online + idle` 且项目、标签、能力和 policy revision 匹配的 Runner 原子分配一个 lease。已运行任务失联进入 `recovery_required`，禁止自动转移；未运行且 lease 过期的任务才可递增 assignment epoch 重新调度。
 - 页面与 API 不显示源码、diff、raw Codex JSONL、完整主机路径、Token 或私钥。写操作继续使用 HA 管理员 Ingress、短期 CSRF、revision 和 request ID。
@@ -49,7 +50,7 @@
 | `max_request_bytes` | 单个内部 JSON 请求上限 |
 | `max_queue` | 排队与恢复中作业数量上限 |
 | `max_result_chars` | 保存并返回微信的最终文本上限 |
-| `runner_center_v2_enabled` | 是否启用 Runner Center v2 API、页面和调度；默认关闭 |
+| `runner_center_v2_enabled` | 是否启用 Runner Center v2 API、页面和调度；默认开启，显式 false 可降级 |
 | `runner_online_seconds` | 心跳保持 online 的新鲜阈值 |
 | `runner_offline_seconds` | 超过该阈值后判定 offline；中间状态为 stale 且禁止新任务 |
 | `runner_lease_ttl_seconds` | 单次 assignment lease TTL；已运行任务失联不会因 TTL 自动转移 |
@@ -146,7 +147,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.3.0` 回退到 `0.2.4` 前保持 `runner_center_v2_enabled=false`，确认没有 v2 活动 lease 或 `recovery_required` 任务。旧版本会忽略 additive Runner 表；不要删除 Controller 数据目录、Runner 审计或服务器上的 worktree/Session。普通 job/Thread/MCP 数据结构保持兼容。
+从 `0.3.1` 回退到 `0.2.4` 前显式设置 `runner_center_v2_enabled=false`，确认没有 v2 活动 lease 或 `recovery_required` 任务。旧版本会忽略 additive Runner 表；不要删除 Controller 数据目录、Runner 审计或服务器上的 worktree/Session。普通 job/Thread/MCP 数据结构保持兼容。
 
 使用自定义 URL 回滚时，同时清空 `openai_base_url` 和 `openai_api_key` 或恢复升级前备份；不要把旧 Key 复制到普通文件。
 

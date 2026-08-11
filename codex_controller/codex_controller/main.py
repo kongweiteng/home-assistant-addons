@@ -238,7 +238,7 @@ def main() -> None:
     )
     runner_manager = RunnerManagerService(
         runner_store,
-        enabled=os.environ.get("CONTROLLER_RUNNER_CENTER_V2_ENABLED", "false").lower() == "true",
+        enabled=os.environ.get("CONTROLLER_RUNNER_CENTER_V2_ENABLED", "true").lower() == "true",
     )
     router = ToolRouter(
         ledger_base_url=os.environ.get("CONTROLLER_LEDGER_BASE_URL", ""),

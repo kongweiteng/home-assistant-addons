@@ -39,7 +39,7 @@ class RunnerCenterUiTests(unittest.TestCase):
         path = Path(self.temporary.name) / "controller.sqlite3"
         self.controller_store = ControllerStore(path)
         self.runner_store = RunnerStore(path)
-        self.manager = RunnerManagerService(self.runner_store, enabled=True)
+        self.manager = RunnerManagerService(self.runner_store)
         self.service = ControllerService(
             self.controller_store,
             App(),  # type: ignore[arg-type]
@@ -71,8 +71,11 @@ class RunnerCenterUiTests(unittest.TestCase):
         path: str,
         payload: dict | None = None,
         headers: dict[str, str] | None = None,
+        *,
+        server: object | None = None,
     ) -> tuple[int, dict]:
-        connection = HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        target = self.server if server is None else server
+        connection = HTTPConnection("127.0.0.1", target.server_port, timeout=3)
         body = None if payload is None else json.dumps(payload).encode()
         request_headers = dict(headers or {})
         if body is not None:
@@ -122,12 +125,73 @@ class RunnerCenterUiTests(unittest.TestCase):
             "credential-rotation",
             "runnerStateFilter",
             "runnerPlatformFilter",
+            "runnerRelayMissing",
+            "管理功能已启用，任务执行 Relay 尚未接入",
+            "Runner Center v2 已由 Add-on 配置关闭",
             "@media(max-width:700px)",
         ):
             self.assertIn(text, combined)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
         self.assertNotIn('type="password"', DASHBOARD_HTML.lower())
         self.assertNotIn("xterm", combined.lower())
+
+    def test_default_enabled_without_relay_and_explicit_false_fail_closed(self) -> None:
+        status, document = self.request("GET", "/api/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            document["runner_manager"],
+            {
+                "enabled": True,
+                "relay_configured": False,
+                "last_error": None,
+                "summary": {
+                    "total": 0,
+                    "enabled": 0,
+                    "online": 0,
+                    "busy": 0,
+                    "recovery_required": 0,
+                },
+            },
+        )
+        runners_status, runners = self.request("GET", "/api/runners")
+        self.assertEqual(runners_status, 200)
+        self.assertEqual(runners["result"]["summary"]["total"], 0)
+
+        disabled_manager = RunnerManagerService(self.runner_store, enabled=False)
+        disabled_service = ControllerService(
+            self.controller_store,
+            App(),  # type: ignore[arg-type]
+            intake_enabled=False,
+            auth_mode="api_key",
+            api_key="fixture-api-key",
+            runner_manager=disabled_manager,
+        )
+        disabled_server = create_server(
+            "127.0.0.1",
+            0,
+            service=disabled_service,
+            api_token=self.token,
+            max_request_bytes=1024 * 1024,
+        )
+        disabled_thread = threading.Thread(target=disabled_server.serve_forever, daemon=True)
+        disabled_thread.start()
+        try:
+            disabled_status, disabled = self.request(
+                "GET", "/api/status", server=disabled_server
+            )
+            self.assertEqual(disabled_status, 200)
+            self.assertFalse(disabled["runner_manager"]["enabled"])
+            blocked_status, blocked = self.request(
+                "GET", "/api/runners", server=disabled_server
+            )
+            self.assertEqual(
+                (blocked_status, blocked["error"]["code"]),
+                (409, "runner_manager_disabled"),
+            )
+        finally:
+            disabled_server.shutdown()
+            disabled_server.server_close()
+            disabled_thread.join(timeout=3)
 
     def test_runner_api_requires_csrf_and_supports_create_list_enable_drain_delete(self) -> None:
         missing_status, missing = self.request(

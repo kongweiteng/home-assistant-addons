@@ -24,7 +24,7 @@ class RunnerManagerService:
         self,
         store: RunnerStore,
         *,
-        enabled: bool = False,
+        enabled: bool = True,
         publisher: RunnerPublisher | None = None,
     ) -> None:
         self.store = store
@@ -201,7 +201,7 @@ class RunnerManagerService:
         if not self.enabled:
             raise StoreError(
                 "runner_manager_disabled",
-                "Runner Center v2 当前未启用；现有 Controller 与 Remote Work v1 不受影响",
+                "Runner Center v2 已由 Add-on 配置关闭；现有 Controller 与 Remote Work v1 不受影响",
                 status=409,
             )
 

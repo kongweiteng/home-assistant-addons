@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.4.1
+
+- 修复 Ingress 多身份列表把状态文档命名为 `document`、覆盖浏览器全局对象后触发 `document.createElement is not a function` 的页面错误。
+- 新增有界维护暂停/恢复 API：发布、备份和升级可临时停止 Poller，但不再写入长期 `disabled` 覆盖；最长 30 分钟后自动恢复，Gateway 重启后按长期 desired state 启动。
+- 页面显式“关闭全部 Poller”仍持久生效；Runner Manager v2、Remote Work、通知、多身份、媒体、队列和权限契约保持不变。
+
 ## 0.4.0
 
 - 新增默认关闭的 Runner Manager v2 精确路由：active owner 的 start/status/continue/cancel 直接调用 Controller 确定性 API，不经过 Codex app-server，也不由 Gateway 选择 Runner。

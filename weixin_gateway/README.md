@@ -16,6 +16,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.2.3` 将 Ingress 明确划分为全局机器人身份、条件式 Owner 初始化和用户级权限管理；首次扫码不增加确认，已有身份的替换才提示影响，Owner 已绑定后不再显示首次绑定操作。
 - `0.3.0` 升级为“一人一个 ClawBot”：每个 Owner/Member 使用独立 iLink 身份、Token 锁、Poller、游标、上下文和发送锁，但继续共享同一 Controller/Codex 与全局单活动 Turn。
 - `0.4.0` 新增默认关闭的 Runner Manager v2 确定性路由：精确 owner `/work` 命令直接调用 Controller Runner Manager，不经过模型；member、近似命令、附件和 deploy 继续失败关闭。v2 请求失败不会回退到 v1 或普通聊天，避免双投和重复执行。
+- `0.4.1` 修复多身份页面变量覆盖导致的 `document.createElement is not a function`，并新增不改长期 desired state 的有界维护暂停/恢复接口；维护超时或 Gateway 重启后会按原长期状态自动恢复。
 - 新成员由 Owner 在 Ingress 生成独立二维码和一次性接入码；扫码微信与发送接入码的微信必须一致，绑定消息不会进入 Controller。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。
 - 当前新 Gateway 是唯一真实 poller；旧 Hermes iLink 身份已失效且不再是运行依赖，不能作为微信回滚目标。

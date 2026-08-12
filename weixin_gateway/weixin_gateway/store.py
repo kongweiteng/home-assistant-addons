@@ -928,6 +928,14 @@ class GatewayStore:
             return response
 
     @staticmethod
+    def validate_request_id(request_id: str) -> None:
+        if not isinstance(request_id, str) or not 16 <= len(request_id) <= 128 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            for character in request_id
+        ):
+            raise StoreError("request_id_invalid", "request_id 无效")
+
+    @staticmethod
     def _request_digest(scope: str, payload: dict[str, Any]) -> str:
         return hashlib.sha256(f"{scope}\n{canonical_json(payload)}".encode("utf-8")).hexdigest()
 
@@ -939,10 +947,7 @@ class GatewayStore:
         scope: str,
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if not isinstance(request_id, str) or not 16 <= len(request_id) <= 128 or any(
-            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in request_id
-        ):
-            raise StoreError("request_id_invalid", "request_id 无效")
+        self.validate_request_id(request_id)
         digest = self._request_digest(scope, payload)
         row = connection.execute(
             "SELECT scope,request_digest,response_json FROM admin_mutations WHERE request_id=?",

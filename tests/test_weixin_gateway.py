@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import secrets
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -218,7 +219,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.0"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.1"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -387,6 +388,34 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("X-CSRF-Token", DASHBOARD_JS)
         self.assertIn("脱敏短标识", DASHBOARD_HTML)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
+
+    def test_dashboard_identity_renderer_executes_without_shadowing_browser_document(self) -> None:
+        script = f"""
+const created = [];
+const tableBody = {{replaceChildren() {{}}, append(value) {{ created.push(value); }}}};
+globalThis.document = {{
+  getElementById() {{ return tableBody; }},
+  createElement(tag) {{ return {{tag, append() {{}}, set textContent(value) {{}}, set colSpan(value) {{}}}}; }}
+}};
+const q = id => document.getElementById(id);
+const cell = text => document.createElement('td');
+const formatTime = value => value || '';
+const source = {json.dumps(DASHBOARD_JS)};
+const start = source.indexOf('function renderIdentities(statusDocument)');
+const end = source.indexOf('function renderConversations', start);
+if (start < 0 || end < 0) throw new Error('renderer_not_found');
+eval(source.slice(start, end));
+renderIdentities({{identities:[{{identity_short:'CB-FIXTURE',state:'active',runtime_state:'polling',bindings:[],last_seen_at:null,last_error:null}}]}});
+if (created.length !== 1) throw new Error('identity_row_not_rendered');
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 class StoreTests(unittest.TestCase):
@@ -2825,6 +2854,118 @@ class ServiceTests(unittest.TestCase):
         reopened = GatewayStore(self.root / "data" / "gateway.sqlite3", data_dir=self.root / "data")
         self.assertEqual(reopened.poller_control(), {"override": "disabled", "revision": 1})
 
+    def test_maintenance_pause_does_not_change_desired_state_and_resumes_explicitly(self) -> None:
+        async def scenario() -> None:
+            service = self.service(poller_enabled=True)
+            service.poller_state = "polling"
+            transitions: list[str] = []
+
+            async def stop_pollers() -> None:
+                transitions.append("stop")
+                service.poller_state = "stopped"
+
+            async def start_pollers() -> None:
+                transitions.append("start")
+                service.poller_state = "polling"
+
+            service._stop_pollers_unlocked = stop_pollers  # type: ignore[method-assign]
+            service._start_pollers_unlocked = start_pollers  # type: ignore[method-assign]
+            paused = await service.pause_poller_maintenance(
+                {"request_id": "maintenance-pause-explicit-01", "duration_seconds": 300}
+            )
+            self.assertTrue(paused["active"])
+            self.assertTrue(paused["resume_enabled"])
+            self.assertEqual(self.store.poller_control(), {"override": None, "revision": 0})
+            self.assertTrue(service.poller_enabled)
+            resumed = await service.resume_poller_maintenance(
+                {"request_id": "maintenance-pause-explicit-01"}
+            )
+            self.assertFalse(resumed["active"])
+            self.assertEqual(transitions, ["stop", "start"])
+
+        self.run_async(scenario())
+
+    def test_maintenance_pause_timeout_restores_and_restart_follows_long_term_desired_state(self) -> None:
+        async def scenario() -> None:
+            service = self.service(poller_enabled=True)
+            service.poller_state = "polling"
+            transitions: list[str] = []
+
+            async def stop_pollers() -> None:
+                transitions.append("stop")
+                service.poller_state = "stopped"
+
+            async def start_pollers() -> None:
+                transitions.append("start")
+                service.poller_state = "polling"
+
+            async def immediate_sleep(_seconds: float) -> None:
+                return None
+
+            service._stop_pollers_unlocked = stop_pollers  # type: ignore[method-assign]
+            service._start_pollers_unlocked = start_pollers  # type: ignore[method-assign]
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=immediate_sleep):
+                await service.pause_poller_maintenance(
+                    {"request_id": "maintenance-timeout-auto-01", "duration_seconds": 30}
+                )
+                await asyncio.wait_for(service._poller_maintenance_task, timeout=1)
+            self.assertEqual(transitions, ["stop", "start"])
+            self.assertFalse(service.status()["poller_maintenance"]["active"])
+            restarted = self.service(poller_enabled=True)
+            self.assertTrue(restarted.poller_enabled)
+
+        self.run_async(scenario())
+
+    def test_explicit_poller_stop_remains_persistent_and_cancels_maintenance_resume(self) -> None:
+        async def scenario() -> None:
+            service = self.service(poller_enabled=True)
+            service.poller_state = "polling"
+
+            async def stop_pollers() -> None:
+                service.poller_state = "stopped"
+
+            service._stop_pollers_unlocked = stop_pollers  # type: ignore[method-assign]
+            await service.pause_poller_maintenance(
+                {"request_id": "maintenance-before-user-stop", "duration_seconds": 300}
+            )
+            result = await service.stop_poller(
+                {"revision": 0, "request_id": "explicit-user-poller-stop"}
+            )
+            self.assertEqual(result["override"], "disabled")
+            self.assertFalse(service.status()["poller_maintenance"]["active"])
+            restarted = self.service(poller_enabled=True)
+            self.assertFalse(restarted.poller_enabled)
+
+        self.run_async(scenario())
+
+    def test_stale_explicit_poller_revision_does_not_cancel_active_maintenance(self) -> None:
+        async def scenario() -> None:
+            service = self.service(poller_enabled=True)
+            service.poller_state = "polling"
+
+            async def stop_pollers() -> None:
+                service.poller_state = "stopped"
+
+            service._stop_pollers_unlocked = stop_pollers  # type: ignore[method-assign]
+            await service.pause_poller_maintenance(
+                {"request_id": "maintenance-before-stale-stop", "duration_seconds": 300}
+            )
+            self.store.set_poller_enabled(
+                True,
+                expected_revision=0,
+                request_id="advance-poller-revision",
+            )
+            with self.assertRaises(StoreError) as context:
+                await service.stop_poller(
+                    {"revision": 0, "request_id": "stale-explicit-user-stop"}
+                )
+            self.assertEqual(context.exception.code, "poller_revision_conflict")
+            self.assertTrue(service.status()["poller_maintenance"]["active"])
+            self.assertEqual(service.poller_state, "stopped")
+            service._cancel_poller_maintenance_unlocked()
+
+        self.run_async(scenario())
+
     def test_poller_override_wins_over_addon_default_on_restart(self) -> None:
         self.store.set_poller_enabled(
             False,
@@ -2906,6 +3047,21 @@ class AdminApiTests(unittest.TestCase):
                 started = json.loads(connection.getresponse().read())
                 self.assertEqual(started["result"]["override"], "enabled")
                 self.assertEqual(started["result"]["poller_state"], "polling")
+
+                pause_body = json.dumps(
+                    {"duration_seconds": 300, "request_id": "api-maintenance-pause-01"}
+                )
+                connection.request("POST", "/api/poller/maintenance/pause", pause_body, headers)
+                paused = json.loads(connection.getresponse().read())
+                self.assertTrue(paused["result"]["active"])
+                self.assertEqual(paused["result"]["poller_state"], "stopped")
+                self.assertEqual(store.poller_control(), {"override": "enabled", "revision": 2})
+
+                resume_body = json.dumps({"request_id": "api-maintenance-pause-01"})
+                connection.request("POST", "/api/poller/maintenance/resume", resume_body, headers)
+                resumed = json.loads(connection.getresponse().read())
+                self.assertFalse(resumed["result"]["active"])
+                self.assertEqual(resumed["result"]["poller_state"], "polling")
 
                 body = json.dumps(
                     {"revision": revision, "request_id": "api-invite-request-01", "ttl_seconds": 900}

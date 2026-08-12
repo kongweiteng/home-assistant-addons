@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.0`。
+当前版本：`0.4.1`。
 
 ## 配置
 
@@ -37,6 +37,8 @@
 2. 有效 Poller desired state 为 `enabled`（无页面覆盖时跟随 `poller_enabled` 默认值）。
 3. 每个准备启动的身份分别取得 token 哈希对应的本地独占锁；冲突身份进入 `token_conflict`，其他身份继续运行。
 4. 页面关闭操作会持久化 `disabled`，页面开启操作会持久化 `enabled`；两者都使用 CSRF、revision 和 request_id。
+
+发布、备份和升级脚本不得调用页面的长期关闭接口。`0.4.1` 提供独立的维护暂停租约：`POST /api/poller/maintenance/pause` 只停止当前进程的 Poller，不修改 SQLite desired state；`resume` 恢复进入维护前的状态。租约最长 30 分钟，超时自动恢复；进程重启后也按原长期 desired state 启动。页面会显示维护暂停截止时间。
 
 本地锁只保护当前 Gateway 进程，不能证明其他 Add-on 或主机没有使用同一 token；正式发布前仍需完成一次外部运行态清点，确认同一身份只有一个有效 Poller。
 
@@ -190,6 +192,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 从 `0.3.3` 回退到 `0.3.2` 不需要数据库迁移；先停止全部 Poller 并确认没有 Controller 正在读取附件。旧版本会忽略新的非消费流式读取与 ACK 接口，原有一次性附件接口和私有 spool 数据保持兼容。
 
 从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
+
+从 `0.4.1` 回退到 `0.4.0` 前先确认没有活动维护暂停。`0.4.0` 不识别维护租约 API，但长期 Poller desired state、身份、消息、通知和 Remote Work 状态均兼容；回退后发布脚本必须避免调用持久 `/api/poller/stop` 作为临时维护动作。
 
 真实凭据导入、停止 Hermes、启动新 poller 和微信端到端测试均属于独立 L3 人工闸门。
 

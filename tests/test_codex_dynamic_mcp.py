@@ -136,7 +136,7 @@ class DynamicMcpTests(unittest.TestCase):
 
     def test_current_hub_manifest_and_non_monotonic_revisions_are_accepted(self) -> None:
         current = validate_hub_manifest(business_manifest())
-        self.assertEqual(len(current.definitions), 30)
+        self.assertEqual(len(current.definitions), 31)
 
         endpoint = ManifestEndpoint(signed_manifest(catalog_revision=9))
         router = self.router(endpoint)

@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.0`。
+当前版本：`0.4.3`。
 
 ## 配置
 
@@ -37,6 +37,8 @@
 2. 有效 Poller desired state 为 `enabled`（无页面覆盖时跟随 `poller_enabled` 默认值）。
 3. 每个准备启动的身份分别取得 token 哈希对应的本地独占锁；冲突身份进入 `token_conflict`，其他身份继续运行。
 4. 页面关闭操作会持久化 `disabled`，页面开启操作会持久化 `enabled`；两者都使用 CSRF、revision 和 request_id。
+
+发布、备份和升级脚本不得调用页面的长期关闭接口。`0.4.3` 提供独立的维护暂停租约：`POST /api/poller/maintenance/pause` 只停止当前进程的 Poller，不修改 SQLite desired state；`resume` 恢复进入维护前的状态。租约最长 30 分钟，超时自动恢复；进程重启后也按原长期 desired state 启动。页面会显示维护暂停截止时间。
 
 本地锁只保护当前 Gateway 进程，不能证明其他 Add-on 或主机没有使用同一 token；正式发布前仍需完成一次外部运行态清点，确认同一身份只有一个有效 Poller。
 
@@ -118,8 +120,11 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 - 入站图片、文件、视频和语音使用固定微信 CDN、大小限制与 AES 解密，生成短期一次性 `attachment_ref`。
 - Controller 可通过同一 bearer 调用 `/internal/v1/attachments/<ref>/preview` 非消费读取正文，用于官方 Codex `localImage`；预览后原引用仍可由账本或媒体归档工具消费。
 - `/internal/v1/attachments/<ref>` 保持一次性消费语义。新媒体归档使用 `/internal/v1/attachments/<ref>/stream` 非消费流式读取，并在 Renovation Hub 成功后调用 `/internal/v1/attachments/<ref>/ack` 消费引用；流式失败或 Hub 拒绝时，原引用在 TTL 内保持可重试。所有接口都核验文件路径、大小和 SHA-256。
+- `0.4.1` 增加 additive `media_archive_requests`、附件映射和入站消息上下文字段。pending 固定 15 分钟、单批最多 16 个，并按 identity + principal + conversation 三重作用域隔离；重启后仍可恢复未过期请求。
+- image-first 只选择当前会话最近连续、未消费、未过期且未被 pending/bound/completed 请求占用的附件；用户给出数量时必须精确匹配。intent-first 有数量时收齐精确数量才绑定；没有数量时只绑定下一条附件消息，不会无限自动归档。
+- 明确“取消归档”会取消当前作用域 pending；过期、数量不匹配、无最近附件和超上限都返回非授权上下文。Gateway 只把 authorized 上下文及对应附件提交给 Controller，摘要绑定指令消息、来源消息和附件 SHA-256；Hub 成功后才沿用既有 ACK 消费。
 - 出站文本按最多 4000 字符分块，并使用确定性 client ID，重试不会生成新发送键。
-- Controller completed job 含 `artifacts[]` 时，Gateway 先用内部 bearer 预取图片，并再次核验 `image/png`、Content-Length、响应 SHA-256、DTO 大小/摘要和 PNG 正文；临时文件写入私有 outbound spool，权限 `0600`，发送或抑制后立即删除。
+- Controller completed job 含 `artifacts[]` 时，Gateway 先用内部 bearer 预取图片或 `application/zip` 文件，并再次核验 MIME、Content-Length、响应 SHA-256、DTO 大小/摘要以及 PNG/ZIP 正文签名；临时文件写入私有 outbound spool，权限 `0600`，发送或抑制后立即删除。文件制品使用微信原生 file item。
 - 预取完成后在同一“出站锁 -> 授权锁”临界区重新核对用户，再发送一条 `result_summary` 中文摘要，随后调用 iLink 原生图片上传/发送。文本、图片和失败链接分别使用持久确定性 client ID；成功图片不附下载链接。
 - 图片预取、上传或发送明确失败时，发送“图片发送失败”短期链接；最终 send 请求超时或传输结果未知时记录 `delivery_state_unknown`，不盲目重发图片，改发“状态暂无法确认”链接。链接只允许由私有 `controller_ingress_base_url` 与 Controller 固定 `/downloads/artifacts/<opaque-token>` 拼接。
 - `controller_ingress_base_url` 必须为无 userinfo/query/fragment 的 HTTPS 地址，生产发布前必须在 Add-on options 直接填写真实 Controller Ingress 基址，不得写入 Git、聊天或普通日志。为空时图片失败回退会保持未完成并返回 `artifact_fallback_unconfigured`。
@@ -188,6 +193,12 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 6. 不删除 Gateway 私有数据，直到确认没有未回传消息、附件或需要恢复的成员身份。
 
 从 `0.3.3` 回退到 `0.3.2` 不需要数据库迁移；先停止全部 Poller 并确认没有 Controller 正在读取附件。旧版本会忽略新的非消费流式读取与 ACK 接口，原有一次性附件接口和私有 spool 数据保持兼容。
+
+从 `0.4.1` 回退到 `0.4.0` 前先停止全部 Poller、关闭 Controller intake，并确认没有携带跨消息归档上下文的 queued/running/recovery 作业。旧 Gateway 会忽略 additive 请求表和入站上下文字段，未完成 pending 会暂时休眠而不会被旧版执行；不要删除表或附件 spool，恢复 `0.4.1` 后再按过期/取消状态核对。建议 Gateway 与 Controller 成对回退，避免 intent-first 请求在旧 Controller 下丢失受控历史指令。
+
+从 `0.4.2` 回退到 `0.4.1` 前，先停止全部 Poller、关闭 Controller intake，并核对没有待发送或状态未知的 `file` artifact。旧 Gateway 会忽略文件制品的 additive 状态，但不会继续发送 ZIP；保留 outbound artifact 状态、临时 spool 和 Controller/Hub 导出记录，恢复 `0.4.2` 后再按原 artifact ID、SHA-256 和发送状态核对。Gateway 与 Controller 应成对回退，避免旧 Controller 产生的 PNG-only 预期误处理 ZIP 制品。
+
+从 `0.4.3` 回退到 `0.4.2` 前先确认没有活动维护暂停。`0.4.2` 不识别维护租约 API，但长期 Poller desired state、身份、消息、归档请求和 artifact 状态均兼容；回退后发布脚本必须避免调用持久 `/api/poller/stop` 作为临时维护动作。
 
 从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
 

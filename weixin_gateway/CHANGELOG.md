@@ -1,5 +1,23 @@
 # 更新记录
 
+## 0.4.3
+
+- 修复 Ingress 多身份列表把状态文档命名为 `document`、覆盖浏览器全局对象后触发 `document.createElement is not a function` 的页面错误。
+- 新增有界维护暂停/恢复 API：发布、备份和升级可临时停止 Poller，但不再写入长期 `disabled` 覆盖；最长 30 分钟后自动恢复，Gateway 重启后按长期 desired state 启动。
+- 页面显式“关闭全部 Poller”仍持久生效；跨消息媒体归档、ZIP 文件投递、Runner Manager v2、Remote Work、通知、身份和队列契约保持不变。
+
+## 0.4.2
+
+- completed job 支持 `application/zip` 文件 artifact，Gateway 预取后校验 ZIP、长度和 SHA-256，再使用微信原生 file item 发送。
+- 图片与文件共用持久幂等 client ID、`sent` / `failed` / `delivery_state_unknown` 和短期回退，不把内部路径写入微信正文。
+- 本版本只完成本地源码与测试，不部署、不重启、不发送真实微信消息。
+
+## 0.4.1
+
+- 新增持久化跨消息媒体归档请求和附件映射，支持 image-first、intent-first、精确数量、取消、15 分钟过期、16 个上限、重启恢复与失败后重新明确授权重试。
+- 请求按 identity + principal + conversation 隔离；只选择未消费、未过期且未被活动/完成请求占用的附件，数量不匹配、模糊指令和单独附件均不授权归档。
+- 向 Controller 传递严格的 `media_archive_context@1`，其幂等摘要绑定指令消息、来源图片消息和附件 SHA-256。SQLite 表与入站消息字段均为 additive；Runner Manager、Remote Work、通知、多身份 Poller 和旧附件接口不变。
+
 ## 0.4.0
 
 - 新增默认关闭的 Runner Manager v2 精确路由：active owner 的 start/status/continue/cancel 直接调用 Controller 确定性 API，不经过 Codex app-server，也不由 Gateway 选择 Runner。

@@ -125,6 +125,55 @@ class AttachmentBridgeIntegrationTests(unittest.TestCase):
 
 
 class ControllerGatewayCapabilityIntegrationTests(unittest.TestCase):
+    def test_gateway_cross_message_archive_context_is_accepted_by_controller_job_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gateway = GatewayStore(root / "gateway.sqlite3", data_dir=root / "gateway")
+            spec = {"media_type": "image", "filename": "site.jpg", "mime_type": "image/jpeg"}
+            conversation = "sha256:" + hashlib.sha256(b"integration-media-archive").hexdigest()
+            gateway.store_message(
+                message_id="integration-image-1",
+                sender_id="fixture-owner",
+                conversation_key=conversation,
+                text="",
+                media=[(spec, b"integration-one")],
+            )
+            gateway.store_message(
+                message_id="integration-image-2",
+                sender_id="fixture-owner",
+                conversation_key=conversation,
+                text="",
+                media=[(spec, b"integration-two")],
+            )
+            command = gateway.store_message(
+                message_id="integration-archive-command",
+                sender_id="fixture-owner",
+                conversation_key=conversation,
+                text="刚才两张图片全部归档",
+                media=[],
+            )
+            self.assertTrue(command["media_archive_context"]["authorized"])
+
+            payload = {
+                "version": 1,
+                "message_id": command["message_id"],
+                "conversation_key": command["conversation_key"],
+                "received_at": command["received_at"],
+                "text": command["text"],
+                "attachments": command["attachments"],
+                "media_archive_context": command["media_archive_context"],
+                "reply_capabilities": ["text", "image", "file"],
+            }
+            controller = ControllerStore(root / "controller.sqlite3")
+            accepted = controller.create_job(payload)
+            claimed = controller.claim_next()
+            assert claimed is not None
+            self.assertEqual(len(claimed["input"]["attachments"]), 2)
+            self.assertEqual(
+                claimed["input"]["media_archive_context"]["idempotency_scope"],
+                command["media_archive_context"]["idempotency_scope"],
+            )
+
     def test_controller_capability_shape_is_consumed_and_old_gateway_payload_stays_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = ControllerStore(Path(temporary) / "controller.sqlite3")
@@ -374,6 +423,155 @@ class ChartArtifactDeliveryIntegrationTests(unittest.TestCase):
                     self.assertIn("共 1 笔记录", ilink.events[0][1]["text"])
                     self.assertTrue(ilink.events[1][1]["content"].startswith(b"\x89PNG\r\n\x1a\n"))
                     self.assertNotIn("http", ilink.events[0][1]["text"])
+
+            try:
+                asyncio.run(scenario())
+            finally:
+                controller.shutdown()
+                controller.server_close()
+                controller_thread.join(timeout=2)
+                ledger.shutdown()
+                ledger.server_close()
+                ledger_thread.join(timeout=2)
+
+    def test_hub_export_is_captured_by_controller_and_sent_as_native_wechat_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ledger_store = LedgerStore(
+                root / "ledger" / "ledger.sqlite3",
+                data_dir=root / "ledger",
+                share_dir=root / "share",
+            )
+            ledger_store.set_writer_mode("read_only", force_initial=True)
+            ledger_store.set_writer_mode("shadow_validated")
+            ledger_store.set_writer_mode("cutover_ready")
+            ledger_store.set_writer_mode("primary_writer")
+            ledger_store.add_payment(
+                {
+                    "idempotency_key": "export-artifact-payment",
+                    "amount_cents": 23456,
+                    "occurred_on": "2026-08-05",
+                    "main_category": "门窗",
+                }
+            )
+            ledger_token = "l" * 32
+            ledger = create_ledger_server(
+                "127.0.0.1",
+                0,
+                store=ledger_store,
+                api_token=ledger_token,
+                max_request_bytes=32 * 1024 * 1024,
+            )
+            ledger_thread = threading.Thread(target=ledger.serve_forever, daemon=True)
+            ledger_thread.start()
+            controller_store = ControllerStore(root / "controller" / "controller.sqlite3")
+            payload = controller_job("export-artifact-message")
+            payload["reply_capabilities"] = ["text", "file"]
+            controller_store.create_job(payload)
+            running = controller_store.claim_next()
+            assert running is not None
+            router = ToolRouter(
+                ledger_base_url=f"http://localhost:{ledger.server_port}",
+                ledger_token=ledger_token,
+                store=controller_store,
+            )
+            router.begin_job(running["job_id"], payload["message_id"], "owner")
+            tool_result = router.call("ledger_export", {})
+            self.assertEqual(tool_result["delivery"], "weixin_gateway_automatic")
+            self.assertEqual(tool_result["artifact"]["type"], "file")
+            self.assertEqual(tool_result["artifact"]["mime_type"], "application/zip")
+            self.assertNotIn("/share", str(tool_result))
+            controller_store.assign_turn(running["job_id"], "export-artifact-turn")
+            controller_store.complete_turn("export-artifact-turn", "completed")
+
+            class ControllerService:
+                def __init__(self) -> None:
+                    self.store = controller_store
+
+                @staticmethod
+                def capabilities() -> dict:
+                    return {"capabilities": ["job_artifacts_v1"]}
+
+            controller_token = "c" * 32
+            controller = create_controller_server(
+                "127.0.0.1",
+                0,
+                service=ControllerService(),  # type: ignore[arg-type]
+                api_token=controller_token,
+                max_request_bytes=32 * 1024 * 1024,
+            )
+            controller_thread = threading.Thread(target=controller.serve_forever, daemon=True)
+            controller_thread.start()
+
+            class Ilink:
+                def __init__(self) -> None:
+                    self.events: list[tuple[str, object]] = []
+
+                async def send_text(self, _user: str, text: str, _context: str | None, client_id: str) -> dict:
+                    self.events.append(("text", {"text": text, "client_id": client_id}))
+                    return {"ret": 0}
+
+                async def send_media(self, _user: str, path: Path, _context: str | None, client_id: str) -> str:
+                    self.events.append(("media", {"content": path.read_bytes(), "name": path.name, "client_id": client_id}))
+                    return client_id
+
+                async def close(self) -> None:
+                    return None
+
+            async def scenario() -> None:
+                async with aiohttp.ClientSession(trust_env=False) as session:
+                    controller_client = ControllerClient(
+                        f"http://localhost:{controller.server_port}",
+                        controller_token,
+                        session=session,
+                    )
+                    public_job = await controller_client.job(running["job_id"])
+                    self.assertEqual(public_job["state"], "completed")
+                    self.assertEqual(public_job["artifacts"][0]["type"], "file")
+                    self.assertEqual(public_job["artifacts"][0]["filename"], "kanhuwan-renovation-ledger.zip")
+                    identity_store = IdentityStore(root / "gateway")
+                    identity_store.save_identity(
+                        {
+                            "account_id": "fixture-account",
+                            "token": "fixture-ilink-token-0000000000000000",
+                            "base_url": "https://ilinkai.weixin.qq.com",
+                            "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+                            "user_id": "fixture-bot-user",
+                            "allowed_user_ids": ["fixture-owner"],
+                            "get_updates_buf": "",
+                            "context_tokens": {},
+                        }
+                    )
+                    gateway_store = GatewayStore(root / "gateway" / "gateway.sqlite3", data_dir=root / "gateway")
+                    gateway_service = GatewayService(
+                        identity_store=identity_store,
+                        store=gateway_store,
+                        controller=controller_client,
+                        bootstrap_identity={},
+                        poller_enabled=False,
+                        owner_pairing_enabled=False,
+                        activation_confirmation="",
+                        max_media_bytes=20 * 1024 * 1024,
+                        controller_ingress_base_url="https://ha.example/api/hassio_ingress/controller",
+                    )
+                    ilink = Ilink()
+                    gateway_service.client = ilink  # type: ignore[assignment]
+                    owner = gateway_store.user_by_private_id("fixture-owner")
+                    assert owner is not None
+                    suppression = await gateway_service._send_completed_job(
+                        {
+                            "controller_job_id": running["job_id"],
+                            "sender_id": "fixture-owner",
+                            "user_hash": owner["user_hash"],
+                            "capability_profile": "owner",
+                        },
+                        public_job,
+                    )
+                    self.assertIsNone(suppression)
+                    self.assertEqual([event[0] for event in ilink.events], ["text", "media"])
+                    self.assertTrue(ilink.events[1][1]["content"].startswith(b"PK"))
+                    self.assertTrue(ilink.events[1][1]["name"].endswith(".zip"))
+                    self.assertNotIn("/share", ilink.events[0][1]["text"])
 
             try:
                 asyncio.run(scenario())

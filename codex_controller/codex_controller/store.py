@@ -17,6 +17,7 @@ import uuid
 
 from .tool_catalog import (
     BOOTSTRAP_HUB_DEFINITIONS,
+    MEMO_DEFINITIONS,
     OPERATION_DEFINITIONS,
     TOOL_DEFINITIONS,
     ToolDefinition,
@@ -426,6 +427,35 @@ class ControllerStore:
             completed = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
             return self._job_document(connection, completed)
 
+    def complete_direct_result(
+        self,
+        job_id: str,
+        result_text: str,
+        *,
+        item_type: str,
+    ) -> dict[str, Any]:
+        """Complete one deterministic Controller action without creating an app-server Turn."""
+
+        bounded = result_text[: self.max_result_chars]
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE jobs SET state='completed',result_text=?,error_code=NULL,finished_at=? "
+                "WHERE job_id=? AND state='running'",
+                (bounded, utc_now(), job_id),
+            ).rowcount
+            if updated != 1:
+                raise StoreError("job_state_conflict", "作业不在运行状态", status=409)
+            self._event(
+                connection,
+                job_id,
+                "completed",
+                item_type=item_type,
+                content_length=len(result_text),
+            )
+            completed = connection.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+            return self._job_document(connection, completed)
+
     def conversation_thread(self, conversation_key: str) -> str | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -817,7 +847,11 @@ class ControllerStore:
             if document is None
             else self._manifest_names(document)
         )
-        return hub_names | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
+        return (
+            hub_names
+            | frozenset(definition.name for definition in MEMO_DEFINITIONS)
+            | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
+        )
 
     def historical_tool_names(self) -> frozenset[str]:
         try:
@@ -826,7 +860,11 @@ class ControllerStore:
         except sqlite3.DatabaseError as exc:
             raise StoreError("hub_manifest_invalid", "Hub 工具历史读取失败", status=503) from exc
         hub_names = {row["tool_name"] for row in rows if isinstance(row["tool_name"], str)}
-        return frozenset(hub_names) | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
+        return (
+            frozenset(hub_names)
+            | frozenset(definition.name for definition in MEMO_DEFINITIONS)
+            | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
+        )
 
     def apply_hub_manifest(self, document: dict[str, Any]) -> dict[str, Any]:
         names = self._manifest_names(document)

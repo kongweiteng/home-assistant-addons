@@ -1,22 +1,25 @@
 # Codex Controller 使用说明
 
-当前版本：`0.4.2`。
+当前版本：`0.4.3`。
 
 ## 通用微信会话
 
 - 微信入口默认是通用 Codex 助手，可处理普通问答、讨论、分析、写作、规划和其他不需要外部执行的任务。
 - 不会把所有消息默认解释为装修事项，也不会因为消息来自现有 Hermes/iLink 身份就自动调用账本。
-- 只有用户意图确实需要装修账本或 Home Assistant 操作时，才调用对应的结构化 MCP 工具；Codex UI 不再二次审批固定内部工具，但角色权限、逐工具策略、幂等、writer 和 Operations 执行边界仍由各组件服务端强制。
+- 只有用户意图确实需要装修账本、家庭备忘录或 Home Assistant 操作时，才调用对应的结构化 MCP 工具；Codex UI 不再二次审批固定内部工具，但角色权限、逐工具策略、幂等、writer 和 Operations 执行边界仍由各组件服务端强制。
 - 每次新建或恢复持久 Thread 都会重新注入当前 developer instructions、只读 sandbox 和 `approvalPolicy=never`。即使历史会话曾讨论 Mac 代理、Hermes 或旧迁移状态，当前能力也必须以本轮 MCP 工具目录和实际调用结果为准。
 - 微信 owner 发送无附件且文本精确为“打开新会话”或 `/new` 时，Controller 会在既有队列与幂等门禁内创建新 Thread，并返回确定性确认。近似文本或带附件消息不会触发重置；旧 Thread 不删除，下一条普通消息才进入新 Thread。
 - 新 Thread 在当前 app-server 进程中已经处于加载状态，下一条消息不会重复调用 `thread/resume`；Controller/app-server 重启后进程内状态清空，持久 Thread 才会重新执行一次安全恢复。
 - Ingress 的 MCP 工具控制台显示当前静态 Operations 工具与 Renovation Hub 动态 manifest 的并集，并分别展示内部服务配置、管理员策略、MCP 进程真实 `tools/list` 发布状态和当前可调用状态；不会显示 URL、bearer、完整 Thread 或会话标识。
+- app-server 协议初始化后，Controller 在开放 intake 前主动调用 `mcpServerStatus/list`，并要求 `home_assistant_tools` 已包含当前 owner 可用工具；目录缺失或不完整时启动失败关闭，不让首条消息承担 MCP 懒加载。
 - 工具旁的自然语言意图只是能力示例，不是固定关键词。Codex 根据整句话语义和本轮目录决定是否调用；普通讨论仍可直接回答。
 - 管理员可逐工具开启或关闭。页面写请求必须同时携带短期 CSRF token、JSON、当前 catalog revision 和随机 request ID；并发旧 revision 会被拒绝，相同 request ID 的相同正文幂等返回原结果。
 - `/new` 确认和内部作业状态会返回稳定 `TH-*` 短标识，便于排查旧 Thread；完整 Thread、Turn 和 conversation key 不进入页面 DTO。
 - Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；用户自然语言提出查询、查看、核验、汇总或明细请求，即授权本次无副作用只读调用，不需要 Passkey、写入确认或额外征求授权。不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
 - 对 owner，清晰的图表、导出、记账、退款、更正、撤销、导入检查和装修媒体/事件归档请求也视为本次匹配工具调用授权，不再询问“是否确认/授权”。只有缺少必填字段或语义确有多种合理解释时才澄清；讨论、假设、举例和方案比较不能推断为写入命令。收到图片、视频或文件本身不构成装修归档授权；只有文本明确包含装修/施工/工地档案目标和正向归档动作时，Controller 才向本轮 Codex 暴露媒体归档工具。
-- app-server 启动时显式禁用 `goals`。普通微信 Turn 不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；需要持续监控时应建立独立 automation/monitor 服务、生命周期和通知通道。
+- 家庭备忘录工具固定调用 Node-RED `/endpoint/api/memos`。新增时 Controller 使用当前 Gateway `message_id` 的 SHA-256 派生 `source_message_id`，不会把原始消息 ID、Basic Auth 或模块 Token 交给模型。`memo_create + due_at` 由 Node-RED 独立持久化、调度和通知，不属于 Codex Goal 或当前 Turn 后台等待；owner 明确说“记一下”或“提醒我”并给出可确定时间时必须调用，不得误报不能主动提醒或建议改用手机日历。完成、取消或修改只有自然语言标题时先查询 pending 候选；唯一匹配才执行，多个候选必须消歧。所有到期时间使用 `Asia/Shanghai` 和 `+08:00`。
+- “记一下/提醒我 + 可确定时间”、明确的未完成/今天/逾期查询，以及 owner 的明确完成命令由 Controller 在进入 app-server 前确定性处理，用于消除旧 Thread 历史对模型工具选择的影响。创建只接受明确前缀、无附件、合法相对/绝对日期和中文或数字时间；查询调用有界 `memo_list`；完成先查询 pending，唯一匹配才调用 `memo_complete`，零条或多条直接返回提示而不修改。其他讨论、模糊日期和成员写请求仍走原有能力与澄清边界。
+- app-server 启动时显式禁用 `goals`。普通微信 Turn 不得创建 Codex Goal，也不得让当前 Turn 自身在后台持续监控或稍后主动跟进；该限制不禁止调用具有独立生命周期和通知通道的家庭备忘录等自动化服务。
 - bootstrap `ledger_add_payment` 与 Hub manifest 一致，只发布 canonical v2 金额分、日期和九维 `grouped_tags`。Hub 的白名单结构化校验错误会在长度、JSON 形态、错误码和消息控制字符检查后保留；非结构化、超长、未知或敏感错误继续返回通用上游拒绝。
 
 ## Runner Center v2
@@ -52,6 +55,10 @@
 | `max_media_bytes` | Gateway 到 Renovation Hub 流式媒体的单文件上限，默认 1 GiB |
 | `operations_base_url` | HA Operations Broker 的固定内部服务根地址 |
 | `operations_api_token` | Broker 独立 bearer；不会传给 app-server |
+| `memo_base_url` | Node-RED 的固定内部 HTTP 根地址；只允许主机名和可选端口，不含 `/endpoint` 路径 |
+| `memo_http_username` | Node-RED `http_node` Basic Auth 用户名；不会传给 app-server 或模型 |
+| `memo_http_password` | Node-RED `http_node` Basic Auth 密码；Supervisor `password` option，不回显 |
+| `memo_api_token` | 家庭备忘录写 API Token；通过 `X-Family-Memo-Token` 发送，不进入 URL |
 | `max_request_bytes` | 单个内部 JSON 请求上限 |
 | `max_queue` | 排队与恢复中作业数量上限 |
 | `max_result_chars` | 保存并返回微信的最终文本上限 |
@@ -119,11 +126,11 @@ MCP `tools/list` 只返回“内部服务已配置且策略开启”的交集，
 
 已加载 Thread 只在 developer instructions 指纹未变化时复用。角色或有效工具上下文变化时，Controller 会替换当前 conversation 的 Thread：刚由 `/new` 或首次接入创建、尚未发生 Turn 的空 Thread 在官方 Codex `0.146.0` 中没有可 fork 的 rollout，因此重新执行 `thread/start`；已经发生 Turn 并持久化的 Thread 才执行官方 `thread/fork` 保留既有历史。两条路径都会生成新的 `TH-*`，避免旧角色或旧工具提示继续影响下一轮。
 
-Gateway 作业缺少 `capability_profile` 时按旧版唯一 owner 兼容为 `owner_legacy`；新版 owner 使用 `owner`。`member_read_only` 只允许 `ledger_show`、`ledger_query`、`ledger_summary`、`renovation_dashboard`、`renovation_project_list`、`renovation_stage_list`、`renovation_area_list` 和 `renovation_timeline`，其他账本写入、导出、媒体和 Operations 在 Controller 服务端返回 `tool_not_allowed_for_profile`。
+Gateway 作业缺少 `capability_profile` 时按旧版唯一 owner 兼容为 `owner_legacy`；新版 owner 使用 `owner`。`member_read_only` 只允许 `ledger_show`、`ledger_query`、`ledger_summary`、`renovation_dashboard`、`renovation_project_list`、`renovation_stage_list`、`renovation_area_list`、`renovation_timeline` 和 `memo_list`，其他账本/备忘录写入、导出、媒体和 Operations 在 Controller 服务端返回 `tool_not_allowed_for_profile`。
 
 私有 `config.toml` 为当前目录中的每个内部 MCP 工具写入单工具 `approval_mode="approve"`，同时 Thread/Turn 保持 `approvalPolicy=never`。运行期新增合法 Hub 工具会在 app-server 重新 `tools/list` 后出现，无需重启；这只消除微信无法响应的 Codex UI 审批步骤，不会因此获得额外业务权限。
 
-账本只读工具仍带明确的只读、非破坏、幂等和封闭世界 annotations。写工具只允许当前 active owner 作业/Turn，Controller 生成稳定幂等键，Renovation Hub 继续执行字段校验、单 writer、审计和业务约束；member 即使看见同一 app-server 配置，也只能调用 8 个 allowlist 查询。
+账本和家庭备忘录只读工具仍带明确的只读、非破坏、幂等和封闭世界 annotations。写工具只允许当前 active owner 作业/Turn，Controller 生成稳定幂等键，Renovation Hub 与 Node-RED 继续执行各自字段校验、幂等、审计和业务约束；member 即使看见同一 app-server 配置，也只能调用 8 个装修 allowlist 查询和 `memo_list`。
 
 app-server 本身继续运行在不继承宿主 `PYTHONPATH` 的净化环境中；MCP 配置仅为固定的本地代理进程注入 `/opt/codex-controller`，避免外部 Python 路径进入模型进程，同时保证官方 app-server 的真实 `tools/list` 能装载工具目录。
 

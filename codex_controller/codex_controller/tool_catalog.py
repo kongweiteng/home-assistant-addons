@@ -114,6 +114,28 @@ def _operation(
     )
 
 
+def _memo(
+    name: str,
+    display_name: str,
+    risk_type: str,
+    description: str,
+    schema: dict[str, Any],
+    *intent_examples: str,
+) -> ToolDefinition:
+    read_only = risk_type == "read_only"
+    return ToolDefinition(
+        name=name,
+        display_name=display_name,
+        service="family_memo",
+        risk_type=risk_type,
+        description=description,
+        intent_examples=tuple(intent_examples),
+        input_schema=schema,
+        requires_job_context=not read_only,
+        idempotent_write=name == "memo_create",
+    )
+
+
 PAYMENT_TAG_DIMENSIONS = (
     "主题",
     "空间",
@@ -234,7 +256,104 @@ OPERATION_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 
-TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = BOOTSTRAP_HUB_DEFINITIONS + OPERATION_DEFINITIONS
+MEMO_ID_SCHEMA: dict[str, Any] = {
+    "type": "string",
+    "pattern": r"^memo-[a-f0-9]{32}$",
+}
+MEMO_DUE_AT_SCHEMA: dict[str, Any] = {
+    "type": ["string", "null"],
+    "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$",
+}
+MEMO_DEFINITIONS: tuple[ToolDefinition, ...] = (
+    _memo(
+        "memo_create",
+        "新增家庭备忘录",
+        "write",
+        "在家庭备忘录中新增事项。微信来源和幂等消息标识由 Controller 根据当前消息确定性注入，模型不得提供或覆盖。",
+        {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                "content": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
+                "category": {"type": "string", "minLength": 1, "maxLength": 100},
+                "due_at": MEMO_DUE_AT_SCHEMA,
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+        "记一下明天上午十点询问铝瓦进度",
+        "新增一个周末买滤芯的备忘录",
+    ),
+    _memo(
+        "memo_list",
+        "查询家庭备忘录",
+        "read_only",
+        "只读查询家庭备忘录，可按状态、分类、今天或逾期筛选；不会创建、修改或完成事项。",
+        {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["pending", "completed", "cancelled"]},
+                "category": {"type": "string", "minLength": 1, "maxLength": 100},
+                "date": {"type": "string", "enum": ["today"]},
+                "overdue": {"type": "boolean"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "additionalProperties": False,
+        },
+        "显示今天的事情",
+        "有哪些逾期备忘录",
+    ),
+    _memo(
+        "memo_update",
+        "修改家庭备忘录",
+        "write",
+        "修改一条已唯一确认的家庭备忘录。只允许更新标题、内容、优先级、分类和上海时区到期时间。",
+        {
+            "type": "object",
+            "properties": {
+                "id": MEMO_ID_SCHEMA,
+                "title": {"type": ["string", "null"], "maxLength": 200},
+                "content": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
+                "category": {"type": ["string", "null"], "maxLength": 100},
+                "due_at": MEMO_DUE_AT_SCHEMA,
+            },
+            "required": ["id"],
+            "anyOf": [
+                {"required": ["title"]},
+                {"required": ["content"]},
+                {"required": ["priority"]},
+                {"required": ["category"]},
+                {"required": ["due_at"]},
+            ],
+            "additionalProperties": False,
+        },
+        "把询问铝瓦进度改到下午三点",
+        "把这条备忘录优先级改成高",
+    ),
+    _memo(
+        "memo_complete",
+        "完成家庭备忘录",
+        "write",
+        "将一条已唯一确认的家庭备忘录标记为完成；存在多个候选时不得猜测。",
+        {"type": "object", "properties": {"id": MEMO_ID_SCHEMA}, "required": ["id"], "additionalProperties": False},
+        "完成询问铝瓦进度",
+    ),
+    _memo(
+        "memo_cancel",
+        "取消家庭备忘录",
+        "write",
+        "将一条已唯一确认的家庭备忘录标记为取消；存在多个候选时不得猜测。",
+        {"type": "object", "properties": {"id": MEMO_ID_SCHEMA}, "required": ["id"], "additionalProperties": False},
+        "取消周末买滤芯",
+    ),
+)
+
+
+TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
+    BOOTSTRAP_HUB_DEFINITIONS + MEMO_DEFINITIONS + OPERATION_DEFINITIONS
+)
 
 
 TOOL_BY_NAME = {definition.name: definition for definition in TOOL_DEFINITIONS}
@@ -251,7 +370,10 @@ NATURAL_QUERY_READ_ONLY_TOOLS = frozenset(
         "renovation_timeline",
     }
 )
+MEMO_TOOLS = frozenset(definition.name for definition in MEMO_DEFINITIONS)
+MEMO_MEMBER_READ_ONLY_TOOL_NAMES = frozenset({"memo_list"})
 MEMBER_READ_ONLY_TOOL_NAMES = NATURAL_QUERY_READ_ONLY_TOOLS
+MEMBER_ALLOWED_TOOL_NAMES = MEMBER_READ_ONLY_TOOL_NAMES | MEMO_MEMBER_READ_ONLY_TOOL_NAMES
 LEDGER_TOOLS = frozenset(name for name in ALL_TOOL_NAMES if name.startswith("ledger_"))
 RENOVATION_TOOLS = frozenset(name for name in ALL_TOOL_NAMES if name.startswith("renovation_"))
 OPERATIONS_TOOLS = frozenset(name for name in ALL_TOOL_NAMES if name.startswith("ha_operations_"))

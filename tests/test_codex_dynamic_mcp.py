@@ -127,7 +127,7 @@ class DynamicMcpTests(unittest.TestCase):
         router = self.router(endpoint)
 
         self.assertEqual(len(BOOTSTRAP_MANIFEST.definitions), 27)
-        self.assertEqual(len(router.tool_definitions()), 32)
+        self.assertEqual(len(router.tool_definitions()), 37)
         self.assertIn("ledger_summary", router.available_tools())
         self.assertNotIn("ledger_attach", router.available_tools())
         self.assertNotIn("renovation_search", router.available_tools())
@@ -136,7 +136,8 @@ class DynamicMcpTests(unittest.TestCase):
 
     def test_current_hub_manifest_and_non_monotonic_revisions_are_accepted(self) -> None:
         current = validate_hub_manifest(business_manifest())
-        self.assertEqual(len(current.definitions), 30)
+        self.assertEqual(len(current.definitions), 31)
+        self.assertIn("renovation_mutate", {definition.name for definition in current.definitions})
 
         endpoint = ManifestEndpoint(signed_manifest(catalog_revision=9))
         router = self.router(endpoint)

@@ -25,7 +25,9 @@ from .hub_manifest import (
 )
 from .store import ControllerStore, StoreError
 from .tool_catalog import (
-    MEMBER_READ_ONLY_TOOL_NAMES,
+    MEMBER_ALLOWED_TOOL_NAMES,
+    MEMO_DEFINITIONS,
+    MEMO_TOOLS,
     OPERATION_DEFINITIONS,
     ToolDefinition,
 )
@@ -36,6 +38,8 @@ ACTION_ID_RE = re.compile(r"^OPS-[0-9]{8}-[A-F0-9]{12}$")
 RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 SHA256_ID_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+MEMO_ID_RE = re.compile(r"^memo-[a-f0-9]{32}$")
+MEMO_DUE_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00$")
 CHART_REF_RE = re.compile(r"^summary-[a-f0-9]{32}\.png$")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -60,6 +64,11 @@ SAFE_UPSTREAM_ERROR_CODES = frozenset(
         "invalid_datetime",
         "invalid_idempotency_key",
         "invalid_input",
+        "invalid_content",
+        "invalid_due_at",
+        "invalid_memo_id",
+        "invalid_patch",
+        "invalid_priority",
         "invalid_tags",
         "media_invalid",
         "media_link_invalid",
@@ -68,6 +77,7 @@ SAFE_UPSTREAM_ERROR_CODES = frozenset(
         "media_not_ready",
         "media_size_invalid",
         "media_type_rejected",
+        "memo_not_found",
         "payment_has_refunds",
         "payment_not_found",
         "project_not_found",
@@ -118,7 +128,12 @@ class ToolRouter:
         gateway_token: str = "",
         operations_base_url: str = "",
         operations_token: str = "",
+        memo_base_url: str = "",
+        memo_http_username: str = "",
+        memo_http_password: str = "",
+        memo_api_token: str = "",
         request_json: Callable[..., dict[str, Any]] | None = None,
+        request_memo_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
         request_artifact: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
         stream_media: Callable[..., dict[str, Any]] | None = None,
@@ -132,7 +147,12 @@ class ToolRouter:
         self.gateway_token = gateway_token
         self.operations_base_url = validate_base_url(operations_base_url)
         self.operations_token = operations_token
+        self.memo_base_url = validate_base_url(memo_base_url)
+        self.memo_http_username = memo_http_username
+        self.memo_http_password = memo_http_password
+        self.memo_api_token = memo_api_token
         self.request_json = request_json or _request_json
+        self.request_memo_json = request_memo_json or _request_memo_json
         self.request_bytes = request_bytes or _request_bytes
         self.request_artifact = request_artifact or _request_hub_chart
         self.stream_media = stream_media or _stream_gateway_to_hub
@@ -211,7 +231,7 @@ class ToolRouter:
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         with self._definition_lock:
             hub_definitions = self._hub_manifest.definitions
-        return hub_definitions + OPERATION_DEFINITIONS
+        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS
 
     def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
         return {definition.name: definition for definition in self.tool_definitions()}
@@ -221,7 +241,7 @@ class ToolRouter:
             for definition in self._hub_manifest.definitions:
                 if definition.name == name:
                     return definition
-        for definition in OPERATION_DEFINITIONS:
+        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS:
             if definition.name == name:
                 return definition
         return None
@@ -231,6 +251,22 @@ class ToolRouter:
 
     def _gateway_configured(self) -> bool:
         return bool(self.gateway_base_url and len(self.gateway_token) >= 32)
+
+    def _memo_configured(self) -> bool:
+        username = self.memo_http_username
+        password = self.memo_http_password
+        return bool(
+            self.memo_base_url
+            and isinstance(username, str)
+            and 1 <= len(username) <= 128
+            and ":" not in username
+            and username == username.strip()
+            and not any(ord(character) < 32 or ord(character) == 127 for character in username)
+            and isinstance(password, str)
+            and 1 <= len(password) <= 4096
+            and not any(ord(character) < 32 or ord(character) == 127 for character in password)
+            and len(self.memo_api_token) >= 32
+        )
 
     def configured_tools(self) -> frozenset[str]:
         tools: set[str] = set()
@@ -246,6 +282,8 @@ class ToolRouter:
             elif definition.service == "ha_operations_broker":
                 if self.operations_base_url and len(self.operations_token) >= 32:
                     tools.add(definition.name)
+            elif definition.service == "family_memo" and self._memo_configured():
+                tools.add(definition.name)
         return frozenset(tools)
 
     def route_ready_tools(self) -> frozenset[str]:
@@ -272,7 +310,7 @@ class ToolRouter:
             except StoreError:
                 return []
         if capability_profile == "member_read_only":
-            configured &= set(MEMBER_READ_ONLY_TOOL_NAMES)
+            configured &= set(MEMBER_ALLOWED_TOOL_NAMES)
         elif capability_profile not in {None, "owner_legacy", "owner"}:
             return []
         if media_archive_authorized is False:
@@ -541,7 +579,7 @@ class ToolRouter:
         with self._context_lock:
             context = None if self._active_context is None else dict(self._active_context)
         profile = None if context is None else context.get("capability_profile")
-        if profile == "member_read_only" and name not in MEMBER_READ_ONLY_TOOL_NAMES:
+        if profile == "member_read_only" and name not in MEMBER_ALLOWED_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
         if name not in self.configured_tools():
             raise ToolProxyError("tool_unconfigured", "工具所属内部服务未配置")
@@ -606,6 +644,8 @@ class ToolRouter:
                 self.ledger_token,
                 {"name": name, "arguments": ledger_arguments, "actor_hash": "sha256:codex-controller"},
             )
+        if definition.service == "family_memo":
+            return self._memo_call(name, arguments)
         if name == "ha_operations_propose_restart":
             self._require_exact_keys(arguments, {"target"})
             target = arguments.get("target")
@@ -656,6 +696,141 @@ class ToolRouter:
             action_id = self._action_id(arguments)
             return self._operations("GET", f"/v1/executions/{quote(action_id, safe='')}", None)
         raise ToolProxyError("unknown_tool", "工具不在允许清单")
+
+    def _memo_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name not in MEMO_TOOLS:
+            raise ToolProxyError("unknown_tool", "家庭备忘录工具不在允许清单")
+        if not self._memo_configured():
+            raise ToolProxyError("memo_unavailable", "家庭备忘录接口未配置")
+        base = f"{self.memo_base_url}/endpoint/api/memos"
+        if name == "memo_create":
+            allowed = {"title", "content", "priority", "category", "due_at"}
+            self._require_allowed_keys(arguments, allowed, {"content"})
+            payload = self._normalize_memo_fields(arguments, allow_id=False, require_change=False)
+            payload.update(
+                {
+                    "source": "wechat",
+                    "source_message_id": self._memo_source_message_id(),
+                }
+            )
+            return self._memo_request("POST", base, payload)
+        if name == "memo_list":
+            allowed = {"status", "category", "date", "overdue", "limit"}
+            self._require_allowed_keys(arguments, allowed, set())
+            query: dict[str, str] = {}
+            status = arguments.get("status")
+            if status is not None:
+                if status not in {"pending", "completed", "cancelled"}:
+                    raise ToolProxyError("invalid_arguments", "备忘录状态无效")
+                query["status"] = status
+            category = arguments.get("category")
+            if category is not None:
+                query["category"] = self._memo_text(category, "category", 1, 100)
+            date = arguments.get("date")
+            if date is not None:
+                if date != "today":
+                    raise ToolProxyError("invalid_arguments", "备忘录日期筛选无效")
+                query["date"] = date
+            overdue = arguments.get("overdue")
+            if overdue is not None:
+                if not isinstance(overdue, bool):
+                    raise ToolProxyError("invalid_arguments", "overdue 必须是布尔值")
+                query["overdue"] = "true" if overdue else "false"
+            limit = arguments.get("limit", 100)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+                raise ToolProxyError("invalid_arguments", "limit 必须在 1 到 100 之间")
+            query["limit"] = str(limit)
+            return self._memo_request("GET", f"{base}?{urlencode(query)}", None)
+        if name == "memo_update":
+            allowed = {"id", "title", "content", "priority", "category", "due_at"}
+            self._require_allowed_keys(arguments, allowed, {"id"})
+            memo_id = self._memo_id(arguments.get("id"))
+            payload = self._normalize_memo_fields(arguments, allow_id=True, require_change=True)
+            return self._memo_request("PATCH", f"{base}/{quote(memo_id, safe='')}", payload)
+        if name in {"memo_complete", "memo_cancel"}:
+            self._require_allowed_keys(arguments, {"id"}, {"id"})
+            memo_id = self._memo_id(arguments.get("id"))
+            action = "complete" if name == "memo_complete" else "cancel"
+            return self._memo_request("POST", f"{base}/{quote(memo_id, safe='')}/{action}", {})
+        raise ToolProxyError("unknown_tool", "家庭备忘录工具不在允许清单")
+
+    def _memo_request(
+        self,
+        method: str,
+        url: str,
+        payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        return self.request_memo_json(
+            method,
+            url,
+            self.memo_http_username,
+            self.memo_http_password,
+            self.memo_api_token,
+            payload,
+        )
+
+    def _memo_source_message_id(self) -> str:
+        with self._context_lock:
+            context = None if self._active_context is None else dict(self._active_context)
+        if context is None or not context.get("message_id"):
+            raise ToolProxyError("tool_context_unavailable", "新增备忘录需要当前微信消息上下文")
+        digest = hashlib.sha256(context["message_id"].encode("utf-8")).hexdigest()
+        return f"wechat:{digest}"
+
+    @staticmethod
+    def _memo_id(value: Any) -> str:
+        if not isinstance(value, str) or not MEMO_ID_RE.fullmatch(value):
+            raise ToolProxyError("invalid_arguments", "备忘录 ID 无效")
+        return value
+
+    @staticmethod
+    def _memo_text(value: Any, field: str, minimum: int, maximum: int) -> str:
+        if not isinstance(value, str):
+            raise ToolProxyError("invalid_arguments", f"{field} 必须是字符串")
+        normalized = value.strip()
+        if not minimum <= len(normalized) <= maximum:
+            raise ToolProxyError("invalid_arguments", f"{field} 长度无效")
+        return normalized
+
+    @classmethod
+    def _normalize_memo_fields(
+        cls,
+        arguments: dict[str, Any],
+        *,
+        allow_id: bool,
+        require_change: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if "title" in arguments:
+            payload["title"] = None if arguments["title"] is None else cls._memo_text(arguments["title"], "title", 1, 200)
+        if "content" in arguments:
+            payload["content"] = cls._memo_text(arguments["content"], "content", 1, 2000)
+        if "priority" in arguments:
+            priority = arguments["priority"]
+            if priority not in {"low", "normal", "high", "urgent"}:
+                raise ToolProxyError("invalid_arguments", "priority 不在允许范围")
+            payload["priority"] = priority
+        if "category" in arguments:
+            payload["category"] = None if arguments["category"] is None else cls._memo_text(arguments["category"], "category", 1, 100)
+        if "due_at" in arguments:
+            due_at = arguments["due_at"]
+            if due_at is not None and (not isinstance(due_at, str) or not MEMO_DUE_AT_RE.fullmatch(due_at)):
+                raise ToolProxyError("invalid_arguments", "due_at 必须使用 Asia/Shanghai ISO 8601 时间")
+            payload["due_at"] = due_at
+        if require_change and not payload:
+            raise ToolProxyError("invalid_arguments", "修改备忘录至少需要一个变更字段")
+        if not allow_id and "id" in arguments:
+            raise ToolProxyError("invalid_arguments", "新增备忘录不接受 id")
+        return payload
+
+    @staticmethod
+    def _require_allowed_keys(
+        arguments: dict[str, Any],
+        allowed: set[str],
+        required: set[str],
+    ) -> None:
+        if not required.issubset(arguments) or any(key not in allowed for key in arguments):
+            raise ToolProxyError("invalid_arguments", "家庭备忘录工具参数字段不匹配")
 
     @staticmethod
     def _require_exact_keys(arguments: dict[str, Any], expected: set[str]) -> None:
@@ -743,6 +918,60 @@ def _request_json(method: str, url: str, token: str, payload: dict[str, Any] | N
         raise ToolProxyError("upstream_invalid_json", "内部服务响应无效") from exc
     if not isinstance(result, dict):
         raise ToolProxyError("upstream_invalid_json", "内部服务响应不是对象")
+    return result
+
+
+def _request_memo_json(
+    method: str,
+    url: str,
+    username: str,
+    password: str,
+    token: str,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    body = None if payload is None else json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    basic = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+    request = Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Authorization": f"Basic {basic}",
+            "X-Family-Memo-Token": token,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            data = response.read(2 * 1024 * 1024 + 1)
+    except HTTPError as exc:
+        try:
+            structured_error = _safe_structured_http_error(exc)
+        finally:
+            exc.close()
+        if structured_error is not None:
+            raise structured_error from exc
+        if exc.code == 401:
+            raise ToolProxyError("memo_not_authorized", "家庭备忘录接口认证失败") from exc
+        if exc.code == 503:
+            raise ToolProxyError("memo_unavailable", "家庭备忘录接口尚未配置") from exc
+        raise ToolProxyError("memo_rejected", f"家庭备忘录接口拒绝请求：HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ToolProxyError("memo_unavailable", "家庭备忘录接口不可用") from exc
+    if len(data) > 2 * 1024 * 1024:
+        raise ToolProxyError("memo_response_too_large", "家庭备忘录响应过大")
+    try:
+        result = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ToolProxyError("memo_invalid_response", "家庭备忘录响应无效") from exc
+    if not isinstance(result, dict):
+        raise ToolProxyError("memo_invalid_response", "家庭备忘录响应不是对象")
     return result
 
 

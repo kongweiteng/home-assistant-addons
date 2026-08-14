@@ -200,7 +200,7 @@ class RunnerCenterUiTests(unittest.TestCase):
 
     def test_controller_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.4.2"
+        expected = "0.4.3"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/__init__.py",
@@ -244,7 +244,7 @@ class RunnerCenterUiTests(unittest.TestCase):
         runners_status, runners = self.request("GET", "/api/runners")
         self.assertEqual(runners_status, 200)
         self.assertEqual(runners["result"]["summary"]["total"], 0)
-        self.assertEqual(document["version"], "0.4.2")
+        self.assertEqual(document["version"], "0.4.3")
 
         disabled_manager = RunnerManagerService(self.runner_store, enabled=False)
         disabled_service = ControllerService(

@@ -58,6 +58,8 @@ class RunnerEnrollmentTests(unittest.TestCase):
                 "arch": "amd64",
                 "capabilities": ["registered_projects", "worktree", "codex_exec_json"],
                 "projects": ["renovation-hub"],
+                "labels": ["always-on", "docker"],
+                "policy_revision": 1,
                 "self_check": {"ok": True, "checks": ["codex", "git", "workspace"]},
             }
         )
@@ -86,6 +88,8 @@ class RunnerEnrollmentTests(unittest.TestCase):
                 "arch": "amd64",
                 "capabilities": ["registered_projects", "worktree"],
                 "projects": ["renovation-hub"],
+                "labels": ["always-on", "docker"],
+                "policy_revision": 1,
                 "self_check": {"ok": True, "checks": ["codex", "git"]},
             }
         )
@@ -110,6 +114,8 @@ class RunnerEnrollmentTests(unittest.TestCase):
                     "arch": "amd64",
                     "capabilities": ["codex_exec_json"],
                     "projects": ["renovation-hub"],
+                    "labels": ["always-on", "docker"],
+                    "policy_revision": 1,
                     "self_check": {"ok": True, "checks": ["codex"]},
                 }
             )
@@ -130,10 +136,37 @@ class RunnerEnrollmentTests(unittest.TestCase):
                     "arch": "amd64",
                     "capabilities": [],
                     "projects": ["renovation-hub"],
+                    "labels": ["always-on", "docker"],
+                    "policy_revision": 1,
                     "self_check": {"ok": True, "checks": []},
                 }
             )
         self.assertEqual(context.exception.code, "enrollment_expired")
+
+    def test_enrollment_rejects_labels_or_policy_outside_registry(self) -> None:
+        created = self.store.create_enrollment(enrollment_payload())
+        base = {
+            "token": created["enrollment"]["token"],
+            "runner_id": created["runner"]["runner_id"],
+            "protocol_version": 2,
+            "agent_version": "0.3.1",
+            "codex_version": "0.146.0",
+            "os": "linux",
+            "arch": "amd64",
+            "capabilities": [],
+            "projects": ["renovation-hub"],
+            "labels": ["always-on", "unregistered"],
+            "policy_revision": 1,
+            "self_check": {"ok": True, "checks": []},
+        }
+        with self.assertRaises(StoreError) as context:
+            self.store.redeem_enrollment(base)
+        self.assertEqual(context.exception.code, "runner_policy_rejected")
+        with self.assertRaises(StoreError) as context:
+            self.store.redeem_enrollment(
+                {**base, "labels": ["always-on"], "policy_revision": 2}
+            )
+        self.assertEqual(context.exception.code, "runner_policy_rejected")
 
     def test_credential_rotation_replay_never_reveals_secret_and_delete_revokes(self) -> None:
         runner_id, original_secret = self.redeem()

@@ -87,6 +87,8 @@ class RunnerSchedulerTests(unittest.TestCase):
                 "arch": "amd64",
                 "capabilities": ["registered_projects", "worktree", "codex_exec_json", "self_check"],
                 "projects": ["renovation-hub"],
+                "labels": ["always-on", "tests"],
+                "policy_revision": 1,
                 "self_check": {"ok": True, "checks": ["codex", "git", "workspace"]},
             }
         )

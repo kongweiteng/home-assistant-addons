@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.0`。
+当前版本：`0.5.1`。
 
 ## 通用微信会话
 
@@ -24,14 +24,15 @@
 
 ## Runner Center v2
 
-`0.5.0` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.1` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
 - 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。服务端先验证 manifest，再创建 enrollment；manifest 不可用、摘要不匹配、版本漂移、平台资产不完整或 URL 解析到非公网地址时 fail closed，不会留下无法安装的 Runner 记录。
-- manifest v2 固定 Runner `0.3.0`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。
+- manifest v2 固定 Runner `0.3.1`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。
 - 创建 API 返回一次性 HTTPS 安装链接、完整的一行终端命令、平台/版本和过期时间，不返回独立 enrollment 字段。页面可复制链接、打开链接或复制命令；Clipboard API 不可用时使用受限回退。15 分钟倒计时归零、撤销或 enrollment 被领取后，页面立即清除内存中的链接和命令。
 - Relay 的 `/install/<ticket>` 先通过独立 bearer 调用 Controller 的 `/internal/v2/runner-relay/install-bootstrap`。该检查只确认 enrollment 仍 pending、未过期、未撤销、未领取且 Runner 可安装，不消费 enrollment；真正的单次领取仍发生在 Runner 首次 WSS enroll。
+- install-bootstrap 同时下发 Registry 当前的 `labels` 与 `policy_revision`。Runner 首次 enroll 必须回报未越过 Registry 的标签和完全一致的策略版本；安装脚本或本地配置擅自扩大标签、使用过期策略时不会领取长期凭据。
 - 返回脚本使用 `Cache-Control: no-store`、`Referrer-Policy: no-referrer` 和 `X-Content-Type-Options: nosniff`，只下载 manifest 固定的 installer/资产并核对文件大小和 SHA-256。自包含 bundle 带固定 Python、Runner 和 Codex，不调用目标机 pip、venv、pyenv 或 Homebrew；目标机仍需 `curl`、`tar`、SHA-256 命令、Git 和已存在的项目工作区。
 - enrollment 状态固定为 `pending`、`claimed`、`expired` 或 `revoked`。pending 可以撤销或重新生成；重新生成会吊销所有未领取旧 token。已领取长期凭据的 Runner 只能使用凭据轮换，不能重新生成 enrollment。相同 request ID 重放只返回脱敏状态，不恢复命令、token 或凭据。
 - 页面可启用、停用、排空停用、紧急停用、轮换凭据和吊销删除。凭据轮换值仍只显示一次；删除只吊销并归档，不删除服务器、Agent、worktree、分支或 Codex Session。
@@ -73,7 +74,7 @@
 | `runner_relay_api_token` | 仅供 Controller -> Relay 发布 request/control 的 bearer，至少 32 字符 |
 | `runner_relay_controller_api_token` | 仅供 Relay -> Controller 调用 enroll/authenticate/heartbeat/status/result 的 bearer，至少 32 字符 |
 | `runner_relay_public_url` | Runner 出站连接的公开 `wss://` URL；禁止凭据、query、fragment、内部域名或非公网解析结果 |
-| `runner_installer_manifest_url` | Runner `0.3.0` 自包含安装制品 manifest v2 的公开 HTTPS URL |
+| `runner_installer_manifest_url` | Runner `0.3.1` 自包含安装制品 manifest v2 的公开 HTTPS URL |
 | `runner_installer_manifest_sha256` | 对 manifest 原始字节固定的 64 位小写 SHA-256；不接受浮动 latest |
 | `runner_relay_timeout_seconds` | Relay 发布和 installer manifest 读取超时，范围 2 到 60 秒 |
 
@@ -170,7 +171,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.0` 回退到 `0.4.2` 前先撤销或等待所有一次性安装链接过期，关闭新增 enrollment 和任务入口，停止 `/install/` 外部流量，并核对没有活动 lease 或 `recovery_required` 任务。`0.4.2` 不理解 manifest v2、自包含 Runner `0.3.0` 或 install-bootstrap；必须同时恢复旧 Controller、Relay `0.1.1` 和 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
+从 `0.5.1` 回退到 `0.4.2` 前先撤销或等待所有一次性安装链接过期，关闭新增 enrollment 和任务入口，停止 `/install/` 外部流量，并核对没有活动 lease 或 `recovery_required` 任务。`0.4.2` 不理解 manifest v2、自包含 Runner `0.3.x` 或 install-bootstrap；必须同时恢复旧 Controller、Relay `0.1.1` 和 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
 
 继续从 `0.4.2` 回退到 `0.3.1` 前，必须等待所有旧式未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档；`0.3.1` 不识别 enrollment 的 `revoked_at`。只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。
 

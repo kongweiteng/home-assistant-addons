@@ -396,7 +396,7 @@ class RunnerStore:
         }
 
     def redeem_enrollment(self, payload: dict[str, Any]) -> dict[str, Any]:
-        required = {"token", "runner_id", "protocol_version", "agent_version", "codex_version", "os", "arch", "capabilities", "projects", "self_check"}
+        required = {"token", "runner_id", "protocol_version", "agent_version", "codex_version", "os", "arch", "capabilities", "projects", "labels", "policy_revision", "self_check"}
         if set(payload) != required:
             raise StoreError("runner_payload_invalid", "Runner enrollment 字段无效")
         token = _bounded_text(payload.get("token"), "token", maximum=256)
@@ -407,6 +407,10 @@ class RunnerStore:
         codex_version = _bounded_text(payload.get("codex_version"), "codex_version", maximum=64)
         capabilities = _capabilities(payload.get("capabilities"))
         projects = _safe_values(payload.get("projects"), "projects", PROJECT_RE)
+        labels = _safe_values(payload.get("labels"), "labels", LABEL_RE)
+        policy_revision = payload.get("policy_revision")
+        if not isinstance(policy_revision, int) or isinstance(policy_revision, bool) or policy_revision < 1:
+            raise StoreError("runner_payload_invalid", "policy_revision 无效")
         self_check = payload.get("self_check")
         if not isinstance(self_check, dict) or set(self_check) - {"ok", "checks", "error_code"}:
             raise StoreError("runner_payload_invalid", "self_check 无效")
@@ -445,6 +449,13 @@ class RunnerStore:
             if not set(projects).issubset(allowed):
                 connection.rollback()
                 raise StoreError("runner_policy_rejected", "Runner 上报项目超出白名单", status=409)
+            registered_labels = set(json.loads(runner["labels_json"]))
+            if not set(labels).issubset(registered_labels):
+                connection.rollback()
+                raise StoreError("runner_policy_rejected", "Runner 上报标签超出策略", status=409)
+            if policy_revision != runner["policy_revision"]:
+                connection.rollback()
+                raise StoreError("runner_policy_rejected", "Runner policy revision 已过期", status=409)
             connection.execute("UPDATE runner_enrollments SET claimed_at=? WHERE enrollment_id=?", (now, enrollment["enrollment_id"]))
             connection.execute(
                 "INSERT INTO runner_credentials(credential_id,runner_id,secret_digest,state,created_at) VALUES(?,?,?,'active',?)",
@@ -498,6 +509,8 @@ class RunnerStore:
             "os": runner["os"],
             "arch": runner["arch"],
             "allowed_projects": json.loads(runner["allowed_projects_json"]),
+            "labels": json.loads(runner["labels_json"]),
+            "policy_revision": int(runner["policy_revision"]),
             "expires_at": enrollment["expires_at"],
             "token": token,
         }

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.1
+
+- install-bootstrap 从 Runner Registry 下发真实 `labels` 与 `policy_revision`，不再让自包含安装器写死 `installed,one-command`。
+- 首次 enrollment 在领取长期凭据前校验上报标签没有越过 Registry、policy revision 与当前策略一致；标签或策略漂移立即 fail closed。
+- 固定 Runner 制品升级为 `0.3.1`，配合本地 SQLite 原子持久化 heartbeat sequence，LaunchAgent/systemd 重启后不再从 `1` 重新上报。
+
 ## 0.5.0
 
 - Runner Center 安装目录升级为 manifest v2 和自包含 Runner `0.3.0`，固定 Python `3.11.13`、Codex `0.146.0`、四平台文件大小与 SHA-256；不再依赖目标机 Python、pip、venv、pyenv 或 Homebrew。

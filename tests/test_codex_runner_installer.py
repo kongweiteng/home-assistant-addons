@@ -20,7 +20,7 @@ def private_resolver(_host: str, port: int, **_kwargs: object) -> list[tuple]:
 def manifest_document() -> dict:
     return {
         "version": 2,
-        "runner_version": "0.3.0",
+        "runner_version": "0.3.1",
         "codex_version": "0.146.0",
         "python_version": "3.11.13",
         "self_contained": True,
@@ -126,7 +126,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
         self.assertIn("sudo sh", linux["command"])
         self.assertNotIn("CODEX_RUNNER_ENROLLMENT_TOKEN", linux["command"])
         self.assertNotIn("--asset-sha256", linux["command"])
-        self.assertEqual(linux["runner_version"], "0.3.0")
+        self.assertEqual(linux["runner_version"], "0.3.1")
         self.assertTrue(linux["self_contained"])
 
         macos = catalog.command(
@@ -146,10 +146,14 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             os_name="macos",
             arch="aarch64",
             projects=["renovation-hub"],
+            labels=["local", "macos"],
+            policy_revision=2,
         )
         self.assertEqual(bootstrap["asset_sha256"], "5" * 64)
         self.assertEqual(bootstrap["asset_size"], 2004)
         self.assertEqual(bootstrap["installer_sha256"], "1" * 64)
+        self.assertEqual(bootstrap["labels"], ["local", "macos"])
+        self.assertEqual(bootstrap["policy_revision"], 2)
 
     def test_manifest_digest_mismatch_and_version_drift_fail_closed(self) -> None:
         body = manifest_bytes()
@@ -159,7 +163,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             {
                 "ready": False,
                 "error_code": "installer_manifest_digest_mismatch",
-                "runner_version": "0.3.0",
+                "runner_version": "0.3.1",
             },
         )
 

@@ -18,12 +18,13 @@ from urllib.request import Request, urlopen
 from .store import StoreError
 
 
-RUNNER_VERSION = "0.3.0"
+RUNNER_VERSION = "0.3.1"
 CODEX_VERSION = "0.146.0"
 PYTHON_VERSION = "3.11.13"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 RUNNER_ID_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 PLATFORM_KEYS = frozenset(
     {"linux-amd64", "linux-aarch64", "macos-amd64", "macos-aarch64"}
 )
@@ -164,7 +165,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.5.0",
+                "User-Agent": "codex-controller/0.5.1",
             },
             method="POST",
         )
@@ -228,7 +229,7 @@ class RunnerInstallerCatalog:
             return self._cached
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.0"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.1"},
             method="GET",
         )
         try:
@@ -317,6 +318,8 @@ class RunnerInstallerCatalog:
         os_name: str,
         arch: str,
         projects: list[str],
+        labels: list[str],
+        policy_revision: int,
     ) -> dict[str, Any]:
         manifest = self.manifest()
         platform_key = f"{os_name}-{arch}"
@@ -326,6 +329,10 @@ class RunnerInstallerCatalog:
             raise StoreError("runner_payload_invalid", "Runner 安装材料无效")
         if not projects or any(not PROJECT_RE.fullmatch(value) for value in projects):
             raise StoreError("runner_payload_invalid", "Runner 项目白名单无效")
+        if len(labels) > 32 or any(not LABEL_RE.fullmatch(value) for value in labels):
+            raise StoreError("runner_payload_invalid", "Runner 标签无效")
+        if not isinstance(policy_revision, int) or isinstance(policy_revision, bool) or policy_revision < 1:
+            raise StoreError("runner_payload_invalid", "Runner policy revision 无效")
         asset = manifest["assets"][platform_key]
         installer = manifest["installer"]
         return {
@@ -335,6 +342,8 @@ class RunnerInstallerCatalog:
             "os": os_name,
             "arch": arch,
             "projects": projects,
+            "labels": labels,
+            "policy_revision": policy_revision,
             "asset_url": asset["url"],
             "asset_sha256": asset["sha256"],
             "asset_size": asset["size"],

@@ -4,4 +4,4 @@
 
 Relay 不拥有 Runner Registry、凭据摘要、任务 lease、Git、Codex、项目策略或生产部署权限。它没有 Ingress、host network、privileged、Docker socket、主机目录挂载或宿主端口默认映射。
 
-`0.2.0` 在既有 WSS 数据面之外增加受限 `/install/<ticket>`。Relay 使用独立内部 bearer 向 Controller 只读核验短期 ticket，返回摘要与大小固定的自包含 Runner `0.3.0` 安装脚本；不保存 ticket、不消费 enrollment、不回显失败 ticket，也不拥有 Runner Registry 或安装制品。
+`0.2.1` 在既有 WSS 数据面和受限 `/install/<ticket>` 基础上，将 Controller 返回的 Registry 标签与 policy revision 原样写入摘要固定的 Runner `0.3.1` 安装命令。Relay 不保存或改写这些策略字段，不消费 enrollment、不回显失败 ticket，也不拥有 Runner Registry 或安装制品。

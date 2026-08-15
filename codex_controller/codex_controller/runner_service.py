@@ -184,6 +184,8 @@ class RunnerManagerService:
             os_name=str(enrollment["os"]),
             arch=str(enrollment["arch"]),
             projects=list(enrollment["allowed_projects"]),
+            labels=list(enrollment["labels"]),
+            policy_revision=int(enrollment["policy_revision"]),
         )
 
     def authenticate_runner(self, payload: dict[str, Any]) -> dict[str, Any]:

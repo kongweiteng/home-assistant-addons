@@ -29,11 +29,11 @@ class Installer:
 
     def status(self) -> dict:
         if self.error is not None:
-            return {"ready": False, "error_code": self.error.code, "runner_version": "0.3.0"}
+            return {"ready": False, "error_code": self.error.code, "runner_version": "0.3.1"}
         return {
             "ready": True,
             "error_code": None,
-            "runner_version": "0.3.0",
+            "runner_version": "0.3.1",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
         }
@@ -60,7 +60,7 @@ class Installer:
         return {
             "link": link,
             "command": f"curl -fsSL {link} -o /tmp/install-runner && sh /tmp/install-runner",
-            "runner_version": "0.3.0",
+            "runner_version": "0.3.1",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "platform": os_name,
@@ -76,6 +76,8 @@ class Installer:
         os_name: str,
         arch: str,
         projects: list[str],
+        labels: list[str],
+        policy_revision: int,
     ) -> dict:
         return {
             "runner_id": runner_id,
@@ -83,7 +85,9 @@ class Installer:
             "os": os_name,
             "arch": arch,
             "projects": projects,
-            "runner_version": "0.3.0",
+            "labels": labels,
+            "policy_revision": policy_revision,
+            "runner_version": "0.3.1",
         }
 
     @staticmethod
@@ -109,12 +113,14 @@ def redeem_payload(runner_id: str, token: str) -> dict:
         "token": token,
         "runner_id": runner_id,
         "protocol_version": 2,
-        "agent_version": "0.3.0",
+        "agent_version": "0.3.1",
         "codex_version": "0.146.0",
         "os": "linux",
         "arch": "amd64",
         "capabilities": ["registered_projects", "worktree", "codex_exec_json"],
         "projects": ["renovation-hub"],
+        "labels": ["always-on", "tests"],
+        "policy_revision": 1,
         "self_check": {"ok": True, "checks": ["codex", "git", "workspace"]},
     }
 
@@ -147,6 +153,8 @@ class RunnerManagerTests(unittest.TestCase):
         bootstrap = self.service.install_bootstrap({"ticket": token})
         self.assertEqual(bootstrap["runner_id"], runner_id)
         self.assertEqual(bootstrap["enrollment_token"], token)
+        self.assertEqual(bootstrap["labels"], ["always-on", "tests"])
+        self.assertEqual(bootstrap["policy_revision"], 1)
 
         replay = self.service.create_enrollment(enrollment_payload("manager-create-0001"))
         self.assertNotIn("installation", replay)

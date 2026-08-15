@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 RUNNER_ID_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
 TICKET_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 EXPECTED_FIELDS = {
     "runner_id",
@@ -19,6 +20,8 @@ EXPECTED_FIELDS = {
     "os",
     "arch",
     "projects",
+    "labels",
+    "policy_revision",
     "asset_url",
     "asset_sha256",
     "asset_size",
@@ -58,6 +61,16 @@ def render_install_script(value: dict[str, Any]) -> str:
         or any(not isinstance(item, str) or not PROJECT_RE.fullmatch(item) for item in projects)
     ):
         raise InstallRenderError("bootstrap projects are invalid")
+    labels = value["labels"]
+    if (
+        not isinstance(labels, list)
+        or len(labels) > 32
+        or any(not isinstance(item, str) or not LABEL_RE.fullmatch(item) for item in labels)
+    ):
+        raise InstallRenderError("bootstrap labels are invalid")
+    policy_revision = value["policy_revision"]
+    if not isinstance(policy_revision, int) or isinstance(policy_revision, bool) or policy_revision < 1:
+        raise InstallRenderError("bootstrap policy revision is invalid")
     relay_url = _url(value["relay_url"], "wss")
     installer_url = _url(value["installer_url"], "https")
     asset_url = _url(value["asset_url"], "https")
@@ -66,7 +79,7 @@ def render_install_script(value: dict[str, Any]) -> str:
     installer_size = _size(value["installer_size"], "installer size")
     asset_size = _size(value["asset_size"], "asset size")
     if (
-        value["runner_version"] != "0.3.0"
+        value["runner_version"] != "0.3.1"
         or value["codex_version"] != "0.146.0"
         or value["python_version"] != "3.11.13"
         or value["self_contained"] is not True
@@ -91,6 +104,10 @@ def render_install_script(value: dict[str, Any]) -> str:
         str(asset_size),
         "--projects",
         ",".join(projects),
+        "--labels",
+        ",".join(labels),
+        "--policy-revision",
+        str(policy_revision),
     ]
     return "\n".join(
         [

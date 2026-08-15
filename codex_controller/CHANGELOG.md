@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.4
+
+- 镜像内置与公开 Runner `0.3.2` Release 完全同字节、同 SHA-256 的 manifest。Controller 启动和页面状态不再依赖 HAOS 运行时访问 GitHub；manifest URL、配置摘要、版本、四平台资产 URL、大小和 SHA-256 仍逐项 fail closed。
+- Relay 返回的短期安装脚本继续在目标机通过 HTTPS 下载 installer 和平台 bundle，并逐文件校验固定大小与 SHA-256；本次只移除 Controller 的启动期外网依赖，不缓存、不代理、不放宽安装资产校验。
+
 ## 0.5.3
 
 - 固定 Runner 制品升级为 `0.3.2`。WSS 客户端改用可恢复超时的原始 socket 缓冲，单次正常 receive timeout 后继续读取同一连接，不再因 `cannot read from timed out object` 反复断线。

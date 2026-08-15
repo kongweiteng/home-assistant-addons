@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.3`。
+当前版本：`0.5.4`。
 
 ## 通用微信会话
 
@@ -24,11 +24,11 @@
 
 ## Runner Center v2
 
-`0.5.3` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.4` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
-- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。服务端先验证 manifest，再创建 enrollment；manifest 不可用、摘要不匹配、版本漂移、平台资产不完整或 URL 解析到非公网地址时 fail closed，不会留下无法安装的 Runner 记录。
+- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller 镜像内置与公开 Runner `0.3.2` Release 完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
 - manifest v2 固定 Runner `0.3.2`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。
 - 创建 API 返回一次性 HTTPS 安装链接、完整的一行终端命令、平台/版本和过期时间，不返回独立 enrollment 字段。页面可复制链接、打开链接或复制命令；Clipboard API 不可用时使用受限回退。15 分钟倒计时归零、撤销或 enrollment 被领取后，页面立即清除内存中的链接和命令。
 - Relay 的 `/install/<ticket>` 先通过独立 bearer 调用 Controller 的 `/internal/v2/runner-relay/install-bootstrap`。该检查只确认 enrollment 仍 pending、未过期、未撤销、未领取且 Runner 可安装，不消费 enrollment；真正的单次领取仍发生在 Runner 首次 WSS enroll。
@@ -76,7 +76,7 @@
 | `runner_relay_public_url` | Runner 出站连接的公开 `wss://` URL；禁止凭据、query、fragment、内部域名或非公网解析结果 |
 | `runner_installer_manifest_url` | Runner `0.3.2` 自包含安装制品 manifest v2 的公开 HTTPS URL |
 | `runner_installer_manifest_sha256` | 对 manifest 原始字节固定的 64 位小写 SHA-256；不接受浮动 latest |
-| `runner_relay_timeout_seconds` | Relay 发布和 installer manifest 读取超时，范围 2 到 60 秒 |
+| `runner_relay_timeout_seconds` | Relay 发布超时；兼容未内置 manifest 的旧目录读取，范围 2 到 60 秒 |
 
 `runner_relay_base_url`、`runner_relay_api_token` 和 `runner_relay_controller_api_token` 必须同时为空或同时配置，且两个 token 不得相同；任一缺失、过短、URL 非精确 Add-on 地址或身份复用都会拒绝启动。两个 token 均不进入页面、状态或日志，也不得复用 Gateway `internal_api_token`。
 
@@ -171,7 +171,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；已安装的 `0.3.2` Runner 可以继续使用同一 v2 协议，但不应再从旧页面生成新安装。继续从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务；additive `relay_connected` 列可以保留，`0.5.1` 会忽略它。若继续回退到 `0.4.2`，还必须撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
+从 `0.5.4` 回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭，但已安装 Runner 和任务协议不受影响。继续从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；已安装的 `0.3.2` Runner 可以继续使用同一 v2 协议，但不应再从旧页面生成新安装。继续从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务；additive `relay_connected` 列可以保留，`0.5.1` 会忽略它。若继续回退到 `0.4.2`，还必须撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
 
 继续从 `0.4.2` 回退到 `0.3.1` 前，必须等待所有旧式未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档；`0.3.1` 不识别 enrollment 的 `revoked_at`。只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。
 

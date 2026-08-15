@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 import socket
 import unittest
 
+import codex_controller
 from codex_controller.runner_relay import RunnerInstallerCatalog
 from codex_controller.store import StoreError
 
@@ -86,6 +88,11 @@ class Opener:
     def __call__(self, request: object, *, timeout: int) -> Response:
         self.calls.append((request.full_url, timeout))
         return Response(self.body, status=self.status)
+
+
+class ForbiddenOpener:
+    def __call__(self, _request: object, *, timeout: int) -> Response:
+        raise AssertionError(f"runtime network access is forbidden (timeout={timeout})")
 
 
 class RunnerInstallerCatalogTests(unittest.TestCase):
@@ -173,6 +180,63 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
         with self.assertRaises(StoreError) as context:
             self.catalog(drifted_body).manifest()
         self.assertEqual(context.exception.code, "installer_manifest_version_mismatch")
+
+    def test_pinned_manifest_body_avoids_runtime_network_dependency(self) -> None:
+        body = manifest_bytes()
+        catalog = RunnerInstallerCatalog(
+            "https://downloads.example.com/codex-runner/manifest.json",
+            hashlib.sha256(body).hexdigest(),
+            "wss://runner.example.com/v1/connect",
+            pinned_manifest_body=body,
+            opener=ForbiddenOpener(),
+            resolver=public_resolver,
+        )
+
+        status = catalog.status()
+
+        self.assertEqual(status["ready"], True)
+        self.assertEqual(status["runner_version"], "0.3.2")
+
+    def test_pinned_manifest_body_digest_mismatch_fails_closed(self) -> None:
+        catalog = RunnerInstallerCatalog(
+            "https://downloads.example.com/codex-runner/manifest.json",
+            "f" * 64,
+            "wss://runner.example.com/v1/connect",
+            pinned_manifest_body=manifest_bytes(),
+            opener=ForbiddenOpener(),
+            resolver=public_resolver,
+        )
+
+        self.assertEqual(
+            catalog.status(),
+            {
+                "ready": False,
+                "error_code": "installer_manifest_digest_mismatch",
+                "runner_version": "0.3.2",
+            },
+        )
+
+    def test_packaged_runner_032_manifest_matches_public_release_digest(self) -> None:
+        body = Path(codex_controller.__file__).with_name("runner_manifest_v032.json").read_bytes()
+        self.assertEqual(
+            hashlib.sha256(body).hexdigest(),
+            "056cf16bec75b4c92389a1ba2939d9aab9b26467b2e07a337c0c9ba0acffb469",
+        )
+        catalog = RunnerInstallerCatalog(
+            "https://github.com/example/project/releases/download/codex-runner-v0.3.2/manifest.json",
+            hashlib.sha256(body).hexdigest(),
+            "wss://runner.example.com/v1/connect",
+            pinned_manifest_body=body,
+            opener=ForbiddenOpener(),
+            resolver=public_resolver,
+        )
+
+        status = catalog.status()
+
+        self.assertEqual(status["ready"], True)
+        self.assertEqual(status["runner_version"], "0.3.2")
+        self.assertEqual(status["codex_version"], "0.146.0")
+        self.assertEqual(status["python_version"], "3.11.13")
 
     def test_manifest_requires_all_four_assets_and_public_https_urls(self) -> None:
         incomplete = manifest_document()

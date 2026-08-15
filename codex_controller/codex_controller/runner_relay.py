@@ -174,7 +174,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.5.3",
+                "User-Agent": "codex-controller/0.5.4",
             },
             method="POST",
         )
@@ -215,7 +215,7 @@ class RelayPublisher:
 
 
 class RunnerInstallerCatalog:
-    """Fetches one digest-pinned manifest and renders a one-time install link."""
+    """Loads one digest-pinned manifest and renders a one-time install link."""
 
     def __init__(
         self,
@@ -225,6 +225,7 @@ class RunnerInstallerCatalog:
         *,
         timeout_seconds: int = 10,
         cache_seconds: int = 300,
+        pinned_manifest_body: bytes | None = None,
         opener: Callable[..., Any] = urlopen,
         resolver: Callable[..., list[tuple]] = socket.getaddrinfo,
     ) -> None:
@@ -239,6 +240,9 @@ class RunnerInstallerCatalog:
             raise ValueError("Runner installer cache 无效")
         self.timeout_seconds = timeout_seconds
         self.cache_seconds = cache_seconds
+        if pinned_manifest_body is not None and not isinstance(pinned_manifest_body, bytes):
+            raise ValueError("Runner installer 内置 manifest 无效")
+        self._pinned_manifest_body = pinned_manifest_body
         self._opener = opener
         self._resolver = resolver
         self._cached: dict[str, Any] | None = None
@@ -262,9 +266,15 @@ class RunnerInstallerCatalog:
         now = time.monotonic()
         if self._cached is not None and now - self._cached_at < self.cache_seconds:
             return self._cached
+        if self._pinned_manifest_body is not None:
+            manifest = self._manifest_from_raw(self._pinned_manifest_body)
+            self._cached = manifest
+            self._cached_at = now
+            self.last_error = None
+            return manifest
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.3"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.4"},
             method="GET",
         )
         try:
@@ -279,6 +289,16 @@ class RunnerInstallerCatalog:
         if status != 200 or len(raw) > 64 * 1024:
             self.last_error = "installer_manifest_invalid"
             raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest 响应无效", status=503)
+        manifest = self._manifest_from_raw(raw)
+        self._cached = manifest
+        self._cached_at = now
+        self.last_error = None
+        return manifest
+
+    def _manifest_from_raw(self, raw: bytes) -> dict[str, Any]:
+        if len(raw) > 64 * 1024:
+            self.last_error = "installer_manifest_invalid"
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest 响应无效", status=503)
         if hashlib.sha256(raw).hexdigest() != self.manifest_sha256:
             self.last_error = "installer_manifest_digest_mismatch"
             raise StoreError(
@@ -290,9 +310,6 @@ class RunnerInstallerCatalog:
             self.last_error = "installer_manifest_invalid"
             raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest JSON 无效", status=503) from exc
         manifest = self._validate_manifest(document)
-        self._cached = manifest
-        self._cached_at = now
-        self.last_error = None
         return manifest
 
     def command(

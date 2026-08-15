@@ -3,6 +3,6 @@
 from .app_server import AppServerClient, AppServerError
 from .store import ControllerStore, StoreError
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 __all__ = ["AppServerClient", "AppServerError", "ControllerStore", "StoreError"]

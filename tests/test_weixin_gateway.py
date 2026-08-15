@@ -47,6 +47,7 @@ from weixin_gateway.store import (
     account_hash,
     conversation_key,
     identity_id,
+    media_archive_instruction,
     routed_message_id,
     user_hash,
     utc_now,
@@ -218,7 +219,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.0"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.3"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -386,6 +387,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("api/owner-transfer", DASHBOARD_JS)
         self.assertIn("X-CSRF-Token", DASHBOARD_JS)
         self.assertIn("脱敏短标识", DASHBOARD_HTML)
+        self.assertIn("function renderIdentities(statusDocument)", DASHBOARD_JS)
+        self.assertNotIn("function renderIdentities(document)", DASHBOARD_JS)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
 
 
@@ -400,6 +403,34 @@ class StoreTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def store_owner_message(
+        self,
+        message_id: str,
+        *,
+        text: str = "",
+        media: list[tuple[dict, bytes]] | None = None,
+        conversation: str | None = None,
+    ) -> dict:
+        owner_identity = identity_id("fixture-account")
+        self.store.migrate_legacy_identity(
+            identity_identifier=owner_identity,
+            account_digest=account_hash("fixture-account"),
+        )
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        return self.store.store_message(
+            message_id=message_id,
+            upstream_message_id=message_id,
+            identity_identifier=owner_identity,
+            principal_id_value=owner["principal_id"],
+            sender_id="fixture-owner",
+            conversation_key=conversation or owner["conversation_key"],
+            text=text,
+            media=media or [],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
 
     def test_user_directory_enforces_documented_thirty_two_user_limit(self) -> None:
         for index in range(31):
@@ -741,6 +772,130 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(StoreError) as context:
             self.store.open_stream_attachment(reference)
         self.assertEqual(context.exception.code, "attachment_consumed")
+
+    def test_image_first_archive_binds_exact_recent_batch_and_retries_only_after_failure(self) -> None:
+        spec = {"media_type": "image", "filename": "site.jpg", "mime_type": "image/jpeg"}
+        self.store_owner_message("archive-boundary", text="开始记录水电施工")
+        source_messages = [
+            self.store_owner_message(
+                f"archive-image-{index}",
+                media=[(spec, f"image-{index}".encode("ascii"))],
+            )
+            for index in range(6)
+        ]
+
+        command = self.store_owner_message("archive-command-1", text="六张图片，全部归档")
+        context = command["media_archive_context"]
+        self.assertTrue(context["authorized"])
+        self.assertEqual(context["source"], "image_first")
+        self.assertEqual(context["intent_message_id"], "archive-command-1")
+        self.assertEqual(context["expected_count"], 6)
+        self.assertEqual(context["selected_count"], 6)
+        self.assertEqual(len(command["attachments"]), 6)
+        self.assertEqual(
+            [item["message_id"] for item in context["source_attachments"]],
+            [message["message_id"] for message in source_messages],
+        )
+        self.assertRegex(context["idempotency_scope"], r"^sha256:[a-f0-9]{64}$")
+
+        self.store.mark_finished(command["message_id"], success=False, error_code="fixture_failure")
+        retry = self.store_owner_message("archive-command-2", text="刚才六张图片全部归档")
+        self.assertTrue(retry["media_archive_context"]["authorized"])
+        self.assertEqual(len(retry["attachments"]), 6)
+
+        self.store.mark_finished(retry["message_id"], success=True)
+        duplicate = self.store_owner_message("archive-command-3", text="刚才六张图片全部归档")
+        self.assertFalse(duplicate["media_archive_context"]["authorized"])
+        self.assertEqual(duplicate["media_archive_context"]["status"], "no_recent_attachments")
+        self.assertEqual(duplicate["attachments"], [])
+
+    def test_cross_message_archive_parser_rejects_generic_album_save(self) -> None:
+        self.assertIsNone(media_archive_instruction("这些图片保存到相册", has_attachments=False))
+        self.assertEqual(
+            media_archive_instruction("这些图片全部归档", has_attachments=False),
+            {"kind": "image_first", "expected_count": None},
+        )
+        self.assertEqual(
+            media_archive_instruction("接下来两张图片加入水电施工档案", has_attachments=False),
+            {"kind": "intent_first", "expected_count": 2},
+        )
+
+    def test_intent_first_archive_survives_restart_and_waits_for_exact_count(self) -> None:
+        spec = {"media_type": "image", "filename": "progress.jpg", "mime_type": "image/jpeg"}
+        intent = self.store_owner_message(
+            "future-archive-intent",
+            text="接下来六张图片全部归档到水电施工档案",
+        )
+        self.assertEqual(intent["media_archive_context"]["status"], "intent_registered")
+        self.assertFalse(intent["media_archive_context"]["authorized"])
+
+        for index in range(5):
+            progress = self.store_owner_message(
+                f"future-archive-image-{index}",
+                media=[(spec, f"future-{index}".encode("ascii"))],
+            )
+            self.assertEqual(progress["media_archive_context"]["status"], "awaiting_more_attachments")
+            self.assertEqual(progress["media_archive_context"]["selected_count"], index + 1)
+            self.assertFalse(progress["media_archive_context"]["authorized"])
+
+        self.store = GatewayStore(
+            self.store.database_path,
+            data_dir=self.root / "data",
+            spool_ttl_seconds=60,
+        )
+        completed = self.store_owner_message(
+            "future-archive-image-5",
+            media=[(spec, b"future-5")],
+        )
+        context = completed["media_archive_context"]
+        self.assertTrue(context["authorized"])
+        self.assertEqual(context["source"], "intent_first")
+        self.assertEqual(context["intent_message_id"], "future-archive-intent")
+        self.assertEqual(context["intent_text"], "接下来六张图片全部归档到水电施工档案")
+        self.assertEqual(context["selected_count"], 6)
+        self.assertEqual(len(completed["attachments"]), 6)
+
+    def test_pending_archive_is_scoped_cancelable_expiring_and_never_guesses_count(self) -> None:
+        spec = {"media_type": "image", "filename": "scope.jpg", "mime_type": "image/jpeg"}
+        other_conversation = "sha256:" + "e" * 64
+
+        self.store_owner_message("scoped-intent", text="接下来图片归档到装修档案")
+        other = self.store_owner_message(
+            "other-conversation-image",
+            media=[(spec, b"other")],
+            conversation=other_conversation,
+        )
+        self.assertEqual(other["media_archive_context"], {})
+        bound = self.store_owner_message("scoped-image", media=[(spec, b"scoped")])
+        self.assertTrue(bound["media_archive_context"]["authorized"])
+        self.assertEqual(bound["media_archive_context"]["selected_count"], 1)
+
+        self.store_owner_message("cancel-intent", text="接下来图片归档到装修档案")
+        cancelled = self.store_owner_message("cancel-command", text="取消归档")
+        self.assertEqual(cancelled["media_archive_context"]["status"], "cancelled")
+        after_cancel = self.store_owner_message("after-cancel-image", media=[(spec, b"cancelled")])
+        self.assertEqual(after_cancel["media_archive_context"], {})
+
+        self.store_owner_message("expiring-intent", text="接下来图片归档到装修档案")
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE media_archive_requests SET expires_at=? WHERE state='pending'",
+                ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),),
+            )
+        expired = self.store_owner_message("expired-image", media=[(spec, b"expired-pending")])
+        self.assertEqual(expired["media_archive_context"], {})
+
+        self.store_owner_message("count-boundary", text="新的图片批次")
+        for index in range(5):
+            self.store_owner_message(
+                f"count-image-{index}",
+                media=[(spec, f"count-{index}".encode("ascii"))],
+            )
+        mismatch = self.store_owner_message("count-command", text="六张图片全部归档")
+        self.assertFalse(mismatch["media_archive_context"]["authorized"])
+        self.assertEqual(mismatch["media_archive_context"]["status"], "attachment_count_mismatch")
+        self.assertEqual(mismatch["media_archive_context"]["selected_count"], 5)
+        self.assertEqual(mismatch["attachments"], [])
 
     def test_media_stream_rejects_symlinked_storage(self) -> None:
         content = b"symlinked-media"
@@ -1246,6 +1401,48 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([call["status"] for call in client.typing_calls], [1, 2])
         self.assertEqual(self.store.get_message("typing-lifecycle-message")["state"], "completed")
         self.assertFalse(service._runtime_for_identity(None).typing_sessions)
+
+    def test_controller_delivery_forwards_cross_message_archive_context(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        spec = {"media_type": "image", "filename": "site.jpg", "mime_type": "image/jpeg"}
+        for index in range(2):
+            self.store.store_message(
+                message_id=f"delivery-archive-image-{index}",
+                sender_id="fixture-owner",
+                conversation_key=owner["conversation_key"],
+                text="",
+                media=[(spec, f"delivery-{index}".encode("ascii"))],
+                user_digest=owner["user_hash"],
+                capability_profile="owner",
+            )
+        self.store.store_message(
+            message_id="delivery-archive-command",
+            sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"],
+            text="刚才两张图片全部归档",
+            media=[],
+            user_digest=owner["user_hash"],
+            capability_profile="owner",
+        )
+        controller = CompatibleSubmittingController()
+        service.controller = controller  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        submitted = next(
+            payload for payload in controller.submissions if payload["message_id"] == "delivery-archive-command"
+        )
+        self.assertEqual(len(submitted["attachments"]), 2)
+        self.assertTrue(submitted["media_archive_context"]["authorized"])
+        self.assertRegex(submitted["media_archive_context"]["idempotency_scope"], r"^sha256:[a-f0-9]{64}$")
 
     def test_typing_session_expired_protocol_error_stops_keepalive_and_marks_runtime(self) -> None:
         service = self.service()
@@ -2031,6 +2228,48 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(state["state"], "sent")
         self.assertEqual(state["fallback_state"], "pending")
 
+    def test_completed_file_artifact_sends_native_wechat_file(self) -> None:
+        content = b"PK\x03\x04fixture-ledger-export"
+
+        class ArtifactController(StubController):
+            configured = True
+
+            async def artifact(self, _job_id: str, _artifact: dict, *, max_bytes: int) -> bytes:
+                return content
+
+        service = self.service(controller_ingress_base_url="https://ha.example/api/hassio_ingress/controller")
+        service.controller = ArtifactController()  # type: ignore[assignment]
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        message = {
+            "controller_job_id": "77777777-7777-7777-7777-777777777777",
+            "sender_id": "fixture-owner",
+            "user_hash": owner["user_hash"],
+            "capability_profile": "owner",
+        }
+        artifact = {
+            "artifact_id": "AR-" + "J" * 26,
+            "type": "file",
+            "filename": "kanhuwan-renovation-ledger.zip",
+            "mime_type": "application/zip",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "width": None,
+            "height": None,
+            "fallback_path": "/downloads/artifacts/" + "j" * 43,
+        }
+        job = {
+            "state": "completed",
+            "result_summary": "已生成装修账本文件：kanhuwan-renovation-ledger.zip。",
+            "artifacts": [artifact],
+        }
+        self.run_async(service._send_completed_job(message, job))
+        client = service.client
+        assert isinstance(client, StubIlinkClient)
+        self.assertEqual(client.events, ["text", "media"])
+        self.assertEqual(client.sent_media[0]["content"], content)
+        self.assertEqual(self.store.prepare_artifact(message["controller_job_id"], artifact)["state"], "sent")
+
     def test_known_and_unknown_media_failures_send_one_fallback_link(self) -> None:
         content = b"\x89PNG\r\n\x1a\nfailed-chart"
 
@@ -2799,6 +3038,76 @@ class ServiceTests(unittest.TestCase):
             await service.stop()
 
         self.run_async(starts_without_hermes_confirmation())
+
+    def test_poller_maintenance_pause_preserves_desired_state_and_resumes(self) -> None:
+        service = self.service(poller_enabled=True)
+        service.poller_state = "polling"
+
+        async def fake_stop_pollers() -> None:
+            service.poller_state = "stopped"
+
+        async def fake_start_pollers() -> None:
+            service.poller_state = "polling"
+
+        service._stop_pollers_unlocked = fake_stop_pollers  # type: ignore[method-assign]
+        service._start_pollers_unlocked = fake_start_pollers  # type: ignore[method-assign]
+
+        async def exercise() -> None:
+            paused = await service.pause_poller_maintenance(
+                {"request_id": "maintenance-pause-0001", "duration_seconds": 30}
+            )
+            self.assertTrue(paused["active"])
+            self.assertTrue(paused["resume_enabled"])
+            self.assertTrue(service.poller_enabled)
+            self.assertEqual(service.poller_state, "stopped")
+            self.assertEqual(self.store.poller_control(), {"override": None, "revision": 0})
+
+            replay = await service.pause_poller_maintenance(
+                {"request_id": "maintenance-pause-0001", "duration_seconds": 30}
+            )
+            self.assertTrue(replay["replayed"])
+            with self.assertRaises(StoreError) as active:
+                await service.pause_poller_maintenance(
+                    {"request_id": "maintenance-pause-0002", "duration_seconds": 30}
+                )
+            self.assertEqual(active.exception.code, "maintenance_pause_active")
+            with self.assertRaises(StoreError) as conflict:
+                await service.resume_poller_maintenance(
+                    {"request_id": "maintenance-pause-wrong"}
+                )
+            self.assertEqual(conflict.exception.code, "maintenance_request_conflict")
+
+            resumed = await service.resume_poller_maintenance(
+                {"request_id": "maintenance-pause-0001"}
+            )
+            self.assertFalse(resumed["active"])
+            self.assertEqual(service.poller_state, "polling")
+            self.assertTrue(service.poller_enabled)
+
+        self.run_async(exercise())
+
+    def test_poller_maintenance_validates_duration_and_manual_control_cancels_it(self) -> None:
+        service = self.service(poller_enabled=False)
+
+        async def exercise() -> None:
+            with self.assertRaises(StoreError) as invalid:
+                await service.pause_poller_maintenance(
+                    {"request_id": "maintenance-invalid-0001", "duration_seconds": 29}
+                )
+            self.assertEqual(invalid.exception.code, "maintenance_duration_invalid")
+
+            paused = await service.pause_poller_maintenance(
+                {"request_id": "maintenance-stop-0001", "duration_seconds": 30}
+            )
+            self.assertTrue(paused["active"])
+            stopped = await service.stop_poller(
+                {"revision": 0, "request_id": "maintenance-manual-stop-0001"}
+            )
+            self.assertEqual(stopped["override"], "disabled")
+            self.assertFalse(service.poller_enabled)
+            self.assertFalse(service._poller_maintenance_document()["active"])
+
+        self.run_async(exercise())
 
     def test_poller_control_is_persistent_revisioned_and_idempotent(self) -> None:
         first = self.store.set_poller_enabled(

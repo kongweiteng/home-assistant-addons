@@ -36,6 +36,73 @@ IDENTITY_STATES = frozenset({"active", "pending_pairing", "paused", "session_exp
 IDENTITY_RUNTIME_STATES = frozenset(
     {"disabled", "stopped", "starting", "pairing", "polling", "session_expired", "token_conflict", "error"}
 )
+MEDIA_ARCHIVE_PENDING_TTL_SECONDS = 15 * 60
+MEDIA_ARCHIVE_MAX_ATTACHMENTS = 16
+MEDIA_ARCHIVE_ARCHIVE_ACTION_RE = re.compile(r"(?:归档|存档|归入|收录)")
+MEDIA_ARCHIVE_TARGETED_ACTION_RE = re.compile(r"(?:保存到|加入|添加到|记录到)")
+MEDIA_ARCHIVE_ACTION_RE = re.compile(r"(?:归档|存档|归入|收录|保存到|加入|添加到|记录到)")
+MEDIA_ARCHIVE_CANCEL_RE = re.compile(r"(?:取消|停止|结束|不要|不用|不再|别).{0,8}(?:归档|存档|归入|收录|保存|加入|添加|记录)")
+MEDIA_ARCHIVE_FUTURE_RE = re.compile(r"(?:接下来|随后|稍后|后面|待会|下一张|下几张|我会发|将要发)")
+MEDIA_ARCHIVE_BACKWARD_RE = re.compile(r"(?:刚才|刚刚|上面|前面|之前|这些|这几|全部|都|一共|共)")
+MEDIA_ARCHIVE_MEDIA_RE = re.compile(r"(?:图片|照片|视频|媒体|文件)")
+MEDIA_ARCHIVE_TARGET_RE = re.compile(r"(?:装修|施工|工地|现场|水电|泥木|瓦工|木工|油漆).{0,16}(?:档案|记录|媒体库|资料库)")
+MEDIA_ARCHIVE_COUNT_RE = re.compile(r"(?:(\d{1,2})|([一二两三四五六七八九十]{1,3}))(?=张|个|幅|段|份)")
+MEDIA_ARCHIVE_CONTEXT_STATUSES = frozenset(
+    {
+        "authorized",
+        "intent_registered",
+        "awaiting_more_attachments",
+        "cancelled",
+        "nothing_to_cancel",
+        "no_recent_attachments",
+        "attachment_count_mismatch",
+        "too_many_attachments",
+    }
+)
+
+
+def _chinese_media_count(value: str) -> int | None:
+    digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    if value == "十":
+        return 10
+    if "十" in value:
+        left, right = value.split("十", 1)
+        tens = digits.get(left, 1) if left else 1
+        ones = digits.get(right, 0) if right else 0
+        result = tens * 10 + ones
+        return result if 1 <= result <= MEDIA_ARCHIVE_MAX_ATTACHMENTS else None
+    return digits.get(value)
+
+
+def media_archive_instruction(text: str, *, has_attachments: bool) -> dict[str, Any] | None:
+    """Recognize only explicit bounded cross-message archive controls."""
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+    normalized = re.sub(r"\s+", "", text)
+    if MEDIA_ARCHIVE_CANCEL_RE.search(normalized):
+        return {"kind": "cancel", "expected_count": None}
+    has_target = MEDIA_ARCHIVE_TARGET_RE.search(normalized) is not None
+    if not MEDIA_ARCHIVE_ARCHIVE_ACTION_RE.search(normalized) and not (
+        MEDIA_ARCHIVE_TARGETED_ACTION_RE.search(normalized) and has_target
+    ):
+        return None
+    count_match = MEDIA_ARCHIVE_COUNT_RE.search(normalized)
+    expected_count: int | None = None
+    if count_match is not None:
+        expected_count = int(count_match.group(1)) if count_match.group(1) else _chinese_media_count(count_match.group(2))
+        if expected_count is None or not 1 <= expected_count <= MEDIA_ARCHIVE_MAX_ATTACHMENTS:
+            return None
+    has_media = MEDIA_ARCHIVE_MEDIA_RE.search(normalized) is not None
+    if not has_attachments and MEDIA_ARCHIVE_FUTURE_RE.search(normalized) and (has_media or has_target):
+        return {"kind": "intent_first", "expected_count": expected_count}
+    if (
+        not has_attachments
+        and (has_media or expected_count is not None)
+        and (expected_count is not None or MEDIA_ARCHIVE_BACKWARD_RE.search(normalized))
+    ):
+        return {"kind": "image_first", "expected_count": expected_count}
+    return None
 
 
 def utc_now() -> str:
@@ -603,6 +670,38 @@ class GatewayStore:
                     consumed_at TEXT,
                     FOREIGN KEY(message_id) REFERENCES inbound_messages(message_id)
                 );
+                CREATE TABLE IF NOT EXISTS media_archive_requests (
+                    request_id TEXT PRIMARY KEY,
+                    identity_scope TEXT NOT NULL,
+                    principal_scope TEXT NOT NULL,
+                    conversation_key TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK(source IN ('image_first','intent_first')),
+                    state TEXT NOT NULL CHECK(state IN ('pending','bound','completed','failed','cancelled','expired')),
+                    intent_message_id TEXT NOT NULL,
+                    intent_text TEXT NOT NULL,
+                    expected_count INTEGER CHECK(expected_count BETWEEN 1 AND 16 OR expected_count IS NULL),
+                    bound_message_id TEXT,
+                    idempotency_scope TEXT,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS media_archive_request_scope_idx
+                    ON media_archive_requests(identity_scope,principal_scope,conversation_key,state,created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS media_archive_request_pending_idx
+                    ON media_archive_requests(identity_scope,principal_scope,conversation_key)
+                    WHERE state='pending';
+                CREATE TABLE IF NOT EXISTS media_archive_request_attachments (
+                    request_id TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    attachment_ref TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    PRIMARY KEY(request_id,position),
+                    FOREIGN KEY(request_id) REFERENCES media_archive_requests(request_id)
+                );
+                CREATE INDEX IF NOT EXISTS media_archive_request_attachment_ref_idx
+                    ON media_archive_request_attachments(attachment_ref);
                 CREATE TABLE IF NOT EXISTS outbound_chunks (
                     job_id TEXT NOT NULL,
                     chunk_index INTEGER NOT NULL,
@@ -805,6 +904,12 @@ class GatewayStore:
             self._ensure_column(connection, "inbound_messages", "identity_id", "TEXT")
             self._ensure_column(connection, "inbound_messages", "principal_id", "TEXT")
             self._ensure_column(connection, "inbound_messages", "upstream_message_id", "TEXT")
+            self._ensure_column(
+                connection,
+                "inbound_messages",
+                "media_archive_context_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
             self._ensure_column(connection, "remote_work_tasks", "identity_id", "TEXT")
             self._ensure_column(connection, "remote_work_tasks", "principal_id", "TEXT")
             self._ensure_column(connection, "onboarding_sessions", "qr_state", "TEXT")
@@ -928,6 +1033,14 @@ class GatewayStore:
             return response
 
     @staticmethod
+    def validate_request_id(request_id: str) -> None:
+        if not isinstance(request_id, str) or not 16 <= len(request_id) <= 128 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            for character in request_id
+        ):
+            raise StoreError("request_id_invalid", "request_id 无效")
+
+    @staticmethod
     def _request_digest(scope: str, payload: dict[str, Any]) -> str:
         return hashlib.sha256(f"{scope}\n{canonical_json(payload)}".encode("utf-8")).hexdigest()
 
@@ -939,10 +1052,7 @@ class GatewayStore:
         scope: str,
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if not isinstance(request_id, str) or not 16 <= len(request_id) <= 128 or any(
-            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for character in request_id
-        ):
-            raise StoreError("request_id_invalid", "request_id 无效")
+        self.validate_request_id(request_id)
         digest = self._request_digest(scope, payload)
         row = connection.execute(
             "SELECT scope,request_digest,response_json FROM admin_mutations WHERE request_id=?",
@@ -2693,6 +2803,471 @@ class GatewayStore:
             "last_result": None if row["last_result_json"] is None else json.loads(row["last_result_json"]),
         }
 
+    @staticmethod
+    def _media_archive_scope(
+        *,
+        sender_id: str,
+        user_digest: str | None,
+        identity_identifier: str | None,
+        principal_id_value: str | None,
+    ) -> tuple[str, str]:
+        identity_scope = identity_identifier or "legacy"
+        principal_scope = principal_id_value or user_digest
+        if not principal_scope:
+            principal_scope = "sha256:" + hashlib.sha256(f"legacy-media:{sender_id}".encode("utf-8")).hexdigest()
+        return identity_scope, principal_scope
+
+    @staticmethod
+    def _media_archive_request_id(
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+        intent_message_id: str,
+    ) -> str:
+        digest = hashlib.sha256(
+            f"{identity_scope}\0{principal_scope}\0{conversation_key_value}\0{intent_message_id}".encode("utf-8")
+        ).hexdigest()
+        return f"MAR-{digest}"
+
+    @staticmethod
+    def _media_archive_idempotency_scope(
+        intent_message_id: str,
+        source_attachments: list[dict[str, str]],
+    ) -> str:
+        canonical = canonical_json(
+            {
+                "intent_message_id": intent_message_id,
+                "source_attachments": source_attachments,
+            }
+        )
+        return "sha256:" + hashlib.sha256(f"weixin-media-archive-v1\n{canonical}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _media_archive_context(
+        *,
+        source: str,
+        status: str,
+        intent_message_id: str,
+        intent_text: str,
+        expected_count: int | None,
+        source_attachments: list[dict[str, str]],
+        idempotency_scope: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in MEDIA_ARCHIVE_CONTEXT_STATUSES:
+            raise RuntimeError("媒体归档上下文状态无效")
+        authorized = status == "authorized"
+        context: dict[str, Any] = {
+            "version": 1,
+            "source": source,
+            "status": status,
+            "authorized": authorized,
+            "intent_message_id": intent_message_id,
+            "intent_text": intent_text,
+            "expected_count": expected_count,
+            "selected_count": len(source_attachments),
+            "source_attachments": source_attachments,
+        }
+        if authorized:
+            if not idempotency_scope:
+                raise RuntimeError("媒体归档授权缺少幂等作用域")
+            context["idempotency_scope"] = idempotency_scope
+        return context
+
+    @staticmethod
+    def _attachment_document_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        mime_type = str(row["mime_type"])
+        if mime_type.startswith("image/"):
+            media_type = "image"
+        elif mime_type.startswith("video/"):
+            media_type = "video"
+        elif mime_type.startswith("audio/"):
+            media_type = "audio"
+        else:
+            media_type = "file"
+        return {
+            "attachment_ref": row["attachment_ref"],
+            "media_type": media_type,
+            "size_bytes": row["size_bytes"],
+            "sha256": f"sha256:{row['sha256']}",
+            "display_name": row["original_filename"],
+        }
+
+    @staticmethod
+    def _source_attachment_from_row(row: sqlite3.Row) -> dict[str, str]:
+        digest = str(row["sha256"])
+        return {
+            "message_id": str(row["message_id"]),
+            "sha256": digest if digest.startswith("sha256:") else f"sha256:{digest}",
+        }
+
+    def _expire_media_archive_requests(self, connection: sqlite3.Connection, now: str) -> None:
+        connection.execute(
+            "UPDATE media_archive_requests SET state='expired',updated_at=? WHERE state='pending' AND expires_at<=?",
+            (now, now),
+        )
+
+    @staticmethod
+    def _pending_media_archive_request(
+        connection: sqlite3.Connection,
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT * FROM media_archive_requests "
+            "WHERE identity_scope=? AND principal_scope=? AND conversation_key=? AND state='pending' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (identity_scope, principal_scope, conversation_key_value),
+        ).fetchone()
+
+    @staticmethod
+    def _media_archive_attachment_rows(
+        connection: sqlite3.Connection,
+        request_id: str,
+    ) -> list[sqlite3.Row]:
+        return connection.execute(
+            "SELECT m.position,m.message_id,m.sha256,a.attachment_ref,a.original_filename,a.mime_type,a.size_bytes "
+            "FROM media_archive_request_attachments m JOIN attachments a ON a.attachment_ref=m.attachment_ref "
+            "WHERE m.request_id=? ORDER BY m.position",
+            (request_id,),
+        ).fetchall()
+
+    @staticmethod
+    def _reserve_media_archive_attachments(
+        connection: sqlite3.Connection,
+        request_id: str,
+        rows: list[sqlite3.Row],
+        *,
+        start_position: int = 0,
+    ) -> None:
+        for offset, row in enumerate(rows):
+            connection.execute(
+                "INSERT INTO media_archive_request_attachments(request_id,position,attachment_ref,message_id,sha256) "
+                "VALUES (?,?,?,?,?)",
+                (
+                    request_id,
+                    start_position + offset,
+                    row["attachment_ref"],
+                    row["message_id"],
+                    f"sha256:{row['sha256']}",
+                ),
+            )
+
+    def _available_message_attachments(
+        self,
+        connection: sqlite3.Connection,
+        message_id: str,
+        now: str,
+    ) -> list[sqlite3.Row]:
+        return connection.execute(
+            "SELECT a.* FROM attachments a "
+            "WHERE a.message_id=? AND a.consumed_at IS NULL AND a.expires_at>? "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM media_archive_request_attachments m "
+            "  JOIN media_archive_requests r ON r.request_id=m.request_id "
+            "  WHERE m.attachment_ref=a.attachment_ref AND r.state IN ('pending','bound','completed')"
+            ") ORDER BY a.rowid",
+            (message_id, now),
+        ).fetchall()
+
+    def _recent_media_archive_batch(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        current_message_id: str,
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+        expected_count: int | None,
+        now: str,
+    ) -> list[sqlite3.Row]:
+        current = connection.execute(
+            "SELECT rowid FROM inbound_messages WHERE message_id=?",
+            (current_message_id,),
+        ).fetchone()
+        if current is None:
+            return []
+        cutoff = (parse_time(now) - timedelta(seconds=MEDIA_ARCHIVE_PENDING_TTL_SECONDS)).isoformat()
+        messages = connection.execute(
+            "SELECT rowid,* FROM inbound_messages WHERE conversation_key=? AND rowid<? AND received_at>=? "
+            "ORDER BY rowid DESC LIMIT 64",
+            (conversation_key_value, current["rowid"], cutoff),
+        ).fetchall()
+        groups: list[list[sqlite3.Row]] = []
+        selected_count = 0
+        for message in messages:
+            row_identity, row_principal = self._media_archive_scope(
+                sender_id=str(message["sender_id"]),
+                user_digest=message["user_hash"],
+                identity_identifier=message["identity_id"],
+                principal_id_value=message["principal_id"],
+            )
+            if row_identity != identity_scope or row_principal != principal_scope:
+                continue
+            available = self._available_message_attachments(connection, str(message["message_id"]), now)
+            if available:
+                groups.append(available)
+                selected_count += len(available)
+                if expected_count is not None and selected_count >= expected_count:
+                    break
+                if expected_count is None and selected_count > MEDIA_ARCHIVE_MAX_ATTACHMENTS:
+                    break
+                continue
+            total_attachments = connection.execute(
+                "SELECT COUNT(*) FROM attachments WHERE message_id=?",
+                (message["message_id"],),
+            ).fetchone()[0]
+            if total_attachments:
+                break
+            if str(message["text"] or "").strip():
+                request = connection.execute(
+                    "SELECT state FROM media_archive_requests WHERE bound_message_id=? ORDER BY created_at DESC LIMIT 1",
+                    (message["message_id"],),
+                ).fetchone()
+                if request is not None and request["state"] == "failed":
+                    continue
+                break
+        return [row for group in reversed(groups) for row in group]
+
+    def _correlate_media_archive(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        message_id: str,
+        sender_id: str,
+        conversation_key_value: str,
+        text: str,
+        attachment_documents: list[dict[str, Any]],
+        user_digest: str | None,
+        identity_identifier: str | None,
+        principal_id_value: str | None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        now = utc_now()
+        self._expire_media_archive_requests(connection, now)
+        identity_scope, principal_scope = self._media_archive_scope(
+            sender_id=sender_id,
+            user_digest=user_digest,
+            identity_identifier=identity_identifier,
+            principal_id_value=principal_id_value,
+        )
+        instruction = media_archive_instruction(text, has_attachments=bool(attachment_documents))
+        pending = self._pending_media_archive_request(
+            connection,
+            identity_scope,
+            principal_scope,
+            conversation_key_value,
+        )
+
+        if instruction is not None and instruction["kind"] == "cancel":
+            if pending is None:
+                return attachment_documents, self._media_archive_context(
+                    source="intent_first",
+                    status="nothing_to_cancel",
+                    intent_message_id=message_id,
+                    intent_text=text,
+                    expected_count=None,
+                    source_attachments=[],
+                )
+            connection.execute(
+                "UPDATE media_archive_requests SET state='cancelled',updated_at=? WHERE request_id=?",
+                (now, pending["request_id"]),
+            )
+            rows = self._media_archive_attachment_rows(connection, str(pending["request_id"]))
+            return attachment_documents, self._media_archive_context(
+                source=str(pending["source"]),
+                status="cancelled",
+                intent_message_id=str(pending["intent_message_id"]),
+                intent_text=str(pending["intent_text"]),
+                expected_count=pending["expected_count"],
+                source_attachments=[self._source_attachment_from_row(row) for row in rows],
+            )
+
+        if attachment_documents and pending is not None:
+            if MEDIA_ARCHIVE_ACTION_RE.search(re.sub(r"\s+", "", text or "")):
+                connection.execute(
+                    "UPDATE media_archive_requests SET state='cancelled',updated_at=? WHERE request_id=?",
+                    (now, pending["request_id"]),
+                )
+                return attachment_documents, {}
+            current_rows = connection.execute(
+                "SELECT * FROM attachments WHERE message_id=? ORDER BY rowid",
+                (message_id,),
+            ).fetchall()
+            existing_rows = self._media_archive_attachment_rows(connection, str(pending["request_id"]))
+            would_count = len(existing_rows) + len(current_rows)
+            expected_count = pending["expected_count"]
+            if would_count > MEDIA_ARCHIVE_MAX_ATTACHMENTS or (
+                expected_count is not None and would_count > expected_count
+            ):
+                connection.execute(
+                    "UPDATE media_archive_requests SET state='failed',updated_at=? WHERE request_id=?",
+                    (now, pending["request_id"]),
+                )
+                combined = [self._source_attachment_from_row(row) for row in existing_rows + current_rows]
+                return attachment_documents, self._media_archive_context(
+                    source="intent_first",
+                    status="too_many_attachments"
+                    if would_count > MEDIA_ARCHIVE_MAX_ATTACHMENTS
+                    else "attachment_count_mismatch",
+                    intent_message_id=str(pending["intent_message_id"]),
+                    intent_text=str(pending["intent_text"]),
+                    expected_count=expected_count,
+                    source_attachments=combined,
+                )
+            self._reserve_media_archive_attachments(
+                connection,
+                str(pending["request_id"]),
+                current_rows,
+                start_position=len(existing_rows),
+            )
+            rows = self._media_archive_attachment_rows(connection, str(pending["request_id"]))
+            source_attachments = [self._source_attachment_from_row(row) for row in rows]
+            if expected_count is not None and len(rows) < expected_count:
+                return attachment_documents, self._media_archive_context(
+                    source="intent_first",
+                    status="awaiting_more_attachments",
+                    intent_message_id=str(pending["intent_message_id"]),
+                    intent_text=str(pending["intent_text"]),
+                    expected_count=expected_count,
+                    source_attachments=source_attachments,
+                )
+            idempotency_scope = self._media_archive_idempotency_scope(
+                str(pending["intent_message_id"]),
+                source_attachments,
+            )
+            connection.execute(
+                "UPDATE media_archive_requests SET state='bound',bound_message_id=?,idempotency_scope=?,updated_at=? "
+                "WHERE request_id=?",
+                (message_id, idempotency_scope, now, pending["request_id"]),
+            )
+            return [self._attachment_document_from_row(row) for row in rows], self._media_archive_context(
+                source="intent_first",
+                status="authorized",
+                intent_message_id=str(pending["intent_message_id"]),
+                intent_text=str(pending["intent_text"]),
+                expected_count=expected_count,
+                source_attachments=source_attachments,
+                idempotency_scope=idempotency_scope,
+            )
+
+        if instruction is not None and instruction["kind"] == "intent_first":
+            if pending is not None:
+                connection.execute(
+                    "UPDATE media_archive_requests SET state='cancelled',updated_at=? WHERE request_id=?",
+                    (now, pending["request_id"]),
+                )
+            request_id = self._media_archive_request_id(
+                identity_scope,
+                principal_scope,
+                conversation_key_value,
+                message_id,
+            )
+            expires_at = (parse_time(now) + timedelta(seconds=MEDIA_ARCHIVE_PENDING_TTL_SECONDS)).isoformat()
+            connection.execute(
+                "INSERT INTO media_archive_requests(request_id,identity_scope,principal_scope,conversation_key,source,state,intent_message_id,intent_text,expected_count,created_at,expires_at,updated_at) "
+                "VALUES (?,?,?,?,?,'pending',?,?,?,?,?,?)",
+                (
+                    request_id,
+                    identity_scope,
+                    principal_scope,
+                    conversation_key_value,
+                    "intent_first",
+                    message_id,
+                    text,
+                    instruction["expected_count"],
+                    now,
+                    expires_at,
+                    now,
+                ),
+            )
+            return attachment_documents, self._media_archive_context(
+                source="intent_first",
+                status="intent_registered",
+                intent_message_id=message_id,
+                intent_text=text,
+                expected_count=instruction["expected_count"],
+                source_attachments=[],
+            )
+
+        if instruction is not None and instruction["kind"] == "image_first":
+            expected_count = instruction["expected_count"]
+            rows = self._recent_media_archive_batch(
+                connection,
+                current_message_id=message_id,
+                identity_scope=identity_scope,
+                principal_scope=principal_scope,
+                conversation_key_value=conversation_key_value,
+                expected_count=expected_count,
+                now=now,
+            )
+            source_attachments = [self._source_attachment_from_row(row) for row in rows]
+            if not rows:
+                return attachment_documents, self._media_archive_context(
+                    source="image_first",
+                    status="no_recent_attachments",
+                    intent_message_id=message_id,
+                    intent_text=text,
+                    expected_count=expected_count,
+                    source_attachments=[],
+                )
+            if expected_count is not None and len(rows) != expected_count:
+                return attachment_documents, self._media_archive_context(
+                    source="image_first",
+                    status="attachment_count_mismatch",
+                    intent_message_id=message_id,
+                    intent_text=text,
+                    expected_count=expected_count,
+                    source_attachments=source_attachments,
+                )
+            if len(rows) > MEDIA_ARCHIVE_MAX_ATTACHMENTS:
+                return attachment_documents, self._media_archive_context(
+                    source="image_first",
+                    status="too_many_attachments",
+                    intent_message_id=message_id,
+                    intent_text=text,
+                    expected_count=expected_count,
+                    source_attachments=source_attachments,
+                )
+            request_id = self._media_archive_request_id(
+                identity_scope,
+                principal_scope,
+                conversation_key_value,
+                message_id,
+            )
+            idempotency_scope = self._media_archive_idempotency_scope(message_id, source_attachments)
+            expires_at = min(str(row["expires_at"]) for row in rows)
+            connection.execute(
+                "INSERT INTO media_archive_requests(request_id,identity_scope,principal_scope,conversation_key,source,state,intent_message_id,intent_text,expected_count,bound_message_id,idempotency_scope,created_at,expires_at,updated_at) "
+                "VALUES (?,?,?,?,?,'bound',?,?,?,?,?,?,?,?)",
+                (
+                    request_id,
+                    identity_scope,
+                    principal_scope,
+                    conversation_key_value,
+                    "image_first",
+                    message_id,
+                    text,
+                    expected_count,
+                    message_id,
+                    idempotency_scope,
+                    now,
+                    expires_at,
+                    now,
+                ),
+            )
+            self._reserve_media_archive_attachments(connection, request_id, rows)
+            return [self._attachment_document_from_row(row) for row in rows], self._media_archive_context(
+                source="image_first",
+                status="authorized",
+                intent_message_id=message_id,
+                intent_text=text,
+                expected_count=expected_count,
+                source_attachments=source_attachments,
+                idempotency_scope=idempotency_scope,
+            )
+
+        return attachment_documents, {}
+
     def store_message(
         self,
         *,
@@ -2795,9 +3370,25 @@ class GatewayStore:
                             (datetime.now(timezone.utc) + timedelta(seconds=self.spool_ttl_seconds)).isoformat(),
                         ),
                     )
+                attachment_documents, media_archive_context = self._correlate_media_archive(
+                    connection,
+                    message_id=message_id,
+                    sender_id=sender_id,
+                    conversation_key_value=conversation_key,
+                    text=text,
+                    attachment_documents=attachment_documents,
+                    user_digest=user_digest,
+                    identity_identifier=identity_identifier,
+                    principal_id_value=principal_id_value,
+                )
                 connection.execute(
-                    "UPDATE inbound_messages SET attachments_json=?,updated_at=? WHERE message_id=?",
-                    (canonical_json(attachment_documents), now, message_id),
+                    "UPDATE inbound_messages SET attachments_json=?,media_archive_context_json=?,updated_at=? WHERE message_id=?",
+                    (
+                        canonical_json(attachment_documents),
+                        canonical_json(media_archive_context),
+                        now,
+                        message_id,
+                    ),
                 )
                 for temporary, target in staged:
                     if target.exists():
@@ -2846,9 +3437,14 @@ class GatewayStore:
 
     def mark_finished(self, message_id: str, *, success: bool, error_code: str | None = None) -> None:
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "UPDATE inbound_messages SET state=?,updated_at=?,error_code=? WHERE message_id=?",
                 ("completed" if success else "failed", utc_now(), error_code, message_id),
+            )
+            connection.execute(
+                "UPDATE media_archive_requests SET state=?,updated_at=? WHERE bound_message_id=? AND state='bound'",
+                ("completed" if success else "failed", utc_now(), message_id),
             )
 
     def prepare_chunk(self, job_id: str, chunk_index: int) -> tuple[str, bool]:
@@ -2879,8 +3475,11 @@ class GatewayStore:
             raise StoreError("artifact_invalid", "artifact_id 无效")
         if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
             raise StoreError("artifact_invalid", "artifact sha256 无效")
-        if mime_type != "image/png":
+        if mime_type not in {"image/png", "application/zip"}:
             raise StoreError("artifact_invalid", "artifact MIME 无效")
+        filename = artifact.get("filename") or ("artifact.png" if mime_type == "image/png" else "artifact.zip")
+        if not isinstance(filename, str) or not filename or len(filename) > 255 or Path(filename).name != filename:
+            raise StoreError("artifact_invalid", "artifact 文件名无效")
         if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 1:
             raise StoreError("artifact_invalid", "artifact 大小无效")
         client_id = "codex-weixin-" + hashlib.sha256(
@@ -2904,7 +3503,13 @@ class GatewayStore:
                 raise StoreError("artifact_state_invalid", "artifact 状态不可用", status=500)
             if row["sha256"] != digest or row["mime_type"] != mime_type or row["size_bytes"] != size_bytes:
                 raise StoreError("artifact_idempotency_conflict", "同一 artifact_id 的元数据发生变化", status=409)
-            return dict(row)
+            state = dict(row)
+            state["delivery_state"] = (
+                "delivery_state_unknown"
+                if state.get("error_code") == "delivery_state_unknown"
+                else state.get("state")
+            )
+            return state
 
     def mark_artifact(self, job_id: str, artifact_id: str, *, success: bool, error_code: str | None = None) -> None:
         with self._connect() as connection:
@@ -2935,14 +3540,23 @@ class GatewayStore:
             )
 
     def stage_outbound_artifact(self, artifact: dict[str, Any], content: bytes) -> Path:
-        if artifact.get("mime_type") != "image/png" or not content.startswith(b"\x89PNG\r\n\x1a\n"):
-            raise StoreError("artifact_content_invalid", "出站 artifact 不是有效 PNG", status=502)
+        mime_type = artifact.get("mime_type")
+        if mime_type not in {"image/png", "application/zip"}:
+            raise StoreError("artifact_content_invalid", "出站 artifact MIME 无效", status=502)
+        if mime_type == "image/png" and not content.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise StoreError("artifact_content_invalid", "出站图片 artifact 不是有效 PNG", status=502)
+        if mime_type == "application/zip" and not content.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")):
+            raise StoreError("artifact_content_invalid", "出站文件 artifact 不是有效 ZIP", status=502)
         if len(content) != artifact.get("size_bytes"):
             raise StoreError("artifact_size_invalid", "出站 artifact 大小不一致", status=502)
         digest = hashlib.sha256(content).hexdigest()
         if artifact.get("sha256") != f"sha256:{digest}":
             raise StoreError("artifact_digest_invalid", "出站 artifact 摘要不一致", status=502)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact.", suffix=".png", dir=self.outbound_dir)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".artifact.",
+            suffix=".png" if mime_type == "image/png" else ".zip",
+            dir=self.outbound_dir,
+        )
         temporary = Path(temporary_name)
         try:
             with os.fdopen(descriptor, "wb") as handle:
@@ -3085,14 +3699,25 @@ class GatewayStore:
     def status(self) -> dict[str, Any]:
         with self._connect() as connection:
             message_counts = {row["state"]: row["count"] for row in connection.execute("SELECT state,COUNT(*) AS count FROM inbound_messages GROUP BY state")}
+            archive_counts = {
+                row["state"]: row["count"]
+                for row in connection.execute(
+                    "SELECT state,COUNT(*) AS count FROM media_archive_requests GROUP BY state"
+                )
+            }
             return {
                 "messages": {state: message_counts.get(state, 0) for state in ("pending_controller", "controller_submitted", "completed", "failed")},
                 "attachments": connection.execute("SELECT COUNT(*) FROM attachments WHERE consumed_at IS NULL").fetchone()[0],
                 "spool_bytes": connection.execute("SELECT COALESCE(SUM(size_bytes),0) FROM attachments WHERE consumed_at IS NULL").fetchone()[0],
+                "media_archive_requests": {
+                    state: archive_counts.get(state, 0)
+                    for state in ("pending", "bound", "completed", "failed", "cancelled", "expired")
+                },
             }
 
     @staticmethod
     def _message_document(row: sqlite3.Row) -> dict[str, Any]:
+        media_archive_context = json.loads(row["media_archive_context_json"] or "{}")
         return {
             "message_id": row["message_id"],
             "sender_id": row["sender_id"],
@@ -3108,4 +3733,5 @@ class GatewayStore:
             "identity_id": row["identity_id"],
             "principal_id": row["principal_id"],
             "upstream_message_id": row["upstream_message_id"],
+            "media_archive_context": media_archive_context if isinstance(media_archive_context, dict) else {},
         }

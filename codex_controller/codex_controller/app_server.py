@@ -31,11 +31,12 @@ class AppServerClient:
 
     BASE_DEVELOPER_INSTRUCTIONS = (
         "你通过微信作为通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
-        "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，才使用已配置的结构化 MCP 工具；"
+        "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，或确实需要家庭备忘录时，才使用已配置的结构化 MCP 工具；"
         "当前运行能力必须以本轮 MCP 工具目录和实际只读调用结果为准，不得沿用历史对话中的旧 Mac 代理、Hermes 或未接入判断。"
         "不得使用 Shell、任意文件路径或自然语言绕过 Controller、Renovation Hub 或 Operations Broker 的服务端门禁。"
         "收到图片、视频或文件时默认只用于本轮识别和回答，不得因为存在附件就自动归档；只有用户明确要求将其归档到装修/施工/工地档案时，才允许调用媒体归档工具。"
-        "不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；持续监控必须交由具有独立生命周期和通知通道的独立自动化服务。"
+        "不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；"
+        "这里仅禁止当前 Codex Turn/Goal 自身在后台等待，不限制调用已经配置、具有独立生命周期和通知通道的独立自动化服务。"
         "不要输出内部推理、Token、路径或工具秘密。"
     )
 
@@ -100,8 +101,8 @@ class AppServerClient:
         instructions = cls.BASE_DEVELOPER_INSTRUCTIONS
         if capability_profile == "member_read_only":
             instructions += (
-                " 当前微信用户是成员，只允许普通对话和本轮目录中的确定性只读装修查询。"
-                "不得尝试账本写入、附件消费或归档、导入、Home Assistant Operations，也不得声称成员拥有管理员权限。"
+                " 当前微信用户是成员，只允许普通对话和本轮目录中的确定性只读装修或家庭备忘录查询。"
+                "不得尝试账本写入或备忘录写入、附件消费或归档、导入、Home Assistant Operations，也不得声称成员拥有管理员权限。"
             )
         else:
             instructions += " 当前微信用户是所有者；写入和 Operations 仍必须遵守现有结构化工具、幂等、Passkey 和服务端门禁。"
@@ -139,6 +140,35 @@ class AppServerClient:
             instructions += " 当前会话未配置 Renovation Hub 工具时，才可以明确说明装修账本工具目录不可用。"
         if hub_write_tools:
             instructions += f" 当前可用的装修写入工具是：{', '.join(hub_write_tools)}；写账、退款、修改、撤销或归档必须调用匹配的结构化工具并遵守服务端门禁。"
+        memo_tools = sorted(
+            name
+            for name in enabled
+            if definitions.get(name) is not None
+            and definitions[name].service == "family_memo"
+        )
+        memo_read_tools = sorted(name for name in memo_tools if definitions[name].read_only)
+        memo_write_tools = sorted(name for name in memo_tools if not definitions[name].read_only)
+        if memo_tools:
+            instructions += f" 当前会话已配置家庭备忘录工具：{', '.join(memo_tools)}。"
+            instructions += (
+                "家庭备忘录使用 Asia/Shanghai；需要到期时间时必须传入带 +08:00 的完整 ISO 8601 时间。"
+                "家庭备忘录是由 Node-RED 独立持久化、调度和通知的自动化服务；memo_create 携带 due_at 创建定时提醒，"
+                "不属于 Codex Goal、当前 Turn 后台等待或 Codex 自身主动推送。"
+                "用户说‘记一下’、‘提醒我’或等价的明确新增表达并给出可确定时间时，必须调用 memo_create；"
+                "不得回复不能创建定时提醒或主动推送，也不得建议改用手机日历替代已经配置的家庭备忘录。"
+                "微信来源和幂等消息标识由 Controller 注入，禁止自行提供。"
+                "完成、取消或修改自然语言只给出标题/内容时，必须先用 memo_list 查询 pending 候选；只有唯一匹配时才能写入，多个候选时必须请用户消歧。"
+            )
+        if memo_read_tools:
+            instructions += (
+                f" 当前可用的家庭备忘录只读工具是：{', '.join(memo_read_tools)}。"
+                "用户询问今天、逾期、待办或某分类事项时应直接查询，不需要 Passkey 或额外确认。"
+            )
+        if memo_write_tools and capability_profile != "member_read_only":
+            instructions += (
+                f" 当前可用的家庭备忘录写入工具是：{', '.join(memo_write_tools)}。"
+                "用户清晰提出新增、修改、完成或取消备忘录时，该请求本身就是对应操作授权；只有缺少必填信息或候选不唯一时才澄清。"
+            )
         if "ledger_generate_chart" in enabled:
             instructions += (
                 " 调用 ledger_generate_chart 成功后，图表由 Controller 私有固化并由 Weixin Gateway 自动投递。"
@@ -177,6 +207,37 @@ class AppServerClient:
     def current_developer_instructions(self) -> str:
         with self._instruction_lock:
             return self.developer_instructions
+
+    def refresh_mcp_catalog(self, expected_tools: list[str]) -> list[str]:
+        result = self.request("mcpServerStatus/list", {"detail": "full"})
+        servers = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(servers, list):
+            raise AppServerError(
+                "mcp_catalog_unavailable",
+                "app-server 未返回 MCP 服务目录",
+                definitive=True,
+            )
+        matches = [
+            server
+            for server in servers
+            if isinstance(server, dict) and server.get("name") == "home_assistant_tools"
+        ]
+        if len(matches) != 1 or not isinstance(matches[0].get("tools"), dict):
+            raise AppServerError(
+                "mcp_catalog_unavailable",
+                "app-server 家庭工具目录不可用",
+                definitive=True,
+            )
+        published = sorted(
+            name for name in matches[0]["tools"] if isinstance(name, str) and name
+        )
+        if not set(expected_tools).issubset(published):
+            raise AppServerError(
+                "mcp_catalog_incomplete",
+                "app-server 家庭工具目录尚未完成初始加载",
+                definitive=True,
+            )
+        return published
 
     def build_child_env(self, source: dict[str, str] | None = None) -> dict[str, str]:
         original = os.environ if source is None else source

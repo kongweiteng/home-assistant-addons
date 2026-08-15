@@ -58,6 +58,8 @@ from .store import (
 
 TYPING_REFRESH_SECONDS = 5.0
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
+POLLER_MAINTENANCE_MIN_SECONDS = 30
+POLLER_MAINTENANCE_MAX_SECONDS = 30 * 60
 
 
 def validate_controller_url(value: str) -> str:
@@ -137,8 +139,15 @@ class ControllerClient:
             raise StoreError("artifact_invalid", "Controller artifact job_id 无效", status=502)
         if not isinstance(artifact_id, str) or not re.fullmatch(r"AR-[A-Z2-7]{26}", artifact_id):
             raise StoreError("artifact_invalid", "Controller artifact_id 无效", status=502)
-        if artifact.get("type") != "image" or artifact.get("mime_type") != "image/png":
+        artifact_type = artifact.get("type")
+        mime_type = artifact.get("mime_type")
+        filename = artifact.get("filename") or ("artifact.png" if mime_type == "image/png" else "artifact.zip")
+        if artifact_type not in {"image", "file"} or mime_type not in {"image/png", "application/zip"}:
             raise StoreError("artifact_invalid", "Controller artifact 类型无效", status=502)
+        if artifact_type == "image" and mime_type != "image/png":
+            raise StoreError("artifact_invalid", "图片 artifact 类型无效", status=502)
+        if not isinstance(filename, str) or not filename or len(filename) > 255 or Path(filename).name != filename:
+            raise StoreError("artifact_invalid", "Controller artifact 文件名无效", status=502)
         if (
             isinstance(expected_size, bool)
             or not isinstance(expected_size, int)
@@ -155,7 +164,7 @@ class ControllerClient:
         try:
             async with self.session.get(
                 f"{self.base_url}/internal/v1/jobs/{job_id}/artifacts/{artifact_id}",
-                headers={"Authorization": f"Bearer {self.token}", "Accept": "image/png"},
+                headers={"Authorization": f"Bearer {self.token}", "Accept": str(mime_type)},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status < 200 or response.status >= 300:
@@ -163,7 +172,7 @@ class ControllerClient:
                     raise StoreError("artifact_unavailable", "Controller artifact 暂不可用", status=response.status)
                 length_header = response.headers.get("Content-Length")
                 digest_header = response.headers.get("X-Content-SHA256")
-                if response.content_type != "image/png" or not length_header:
+                if response.content_type != mime_type or not length_header:
                     raise StoreError("artifact_invalid", "Controller artifact 响应头无效", status=502)
                 try:
                     declared_size = int(length_header)
@@ -394,6 +403,10 @@ class GatewayService:
         self._outbound_lock = asyncio.Lock()
         self._authorization_lock = asyncio.Lock()
         self._poller_control_lock = asyncio.Lock()
+        self._poller_maintenance_task: asyncio.Task[Any] | None = None
+        self._poller_maintenance_request_id: str | None = None
+        self._poller_maintenance_expires_at: str | None = None
+        self._poller_maintenance_resume_enabled = self.poller_enabled
         self._runtimes: dict[str, IdentityRuntime] = {}
         self._refresh_client()
         self._ensure_owner_runtime()
@@ -414,6 +427,7 @@ class GatewayService:
 
     async def start_poller(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._poller_control_lock:
+            self._cancel_poller_maintenance_unlocked()
             response = self.store.set_poller_enabled(
                 True,
                 expected_revision=payload.get("revision"),
@@ -425,6 +439,7 @@ class GatewayService:
 
     async def stop_poller(self, payload: dict[str, Any]) -> dict[str, Any]:
         async with self._poller_control_lock:
+            self._cancel_poller_maintenance_unlocked()
             response = self.store.set_poller_enabled(
                 False,
                 expected_revision=payload.get("revision"),
@@ -433,6 +448,87 @@ class GatewayService:
             self.poller_enabled = False
             await self._stop_pollers_unlocked()
             return {**response, "poller_state": self.poller_state}
+
+    async def pause_poller_maintenance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(payload.get("request_id") or "")
+        self.store.validate_request_id(request_id)
+        duration_seconds = payload.get("duration_seconds")
+        if (
+            isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, int)
+            or not POLLER_MAINTENANCE_MIN_SECONDS <= duration_seconds <= POLLER_MAINTENANCE_MAX_SECONDS
+        ):
+            raise StoreError("maintenance_duration_invalid", "维护暂停时长必须为 30～1800 秒")
+        async with self._poller_control_lock:
+            if self._poller_maintenance_request_id == request_id:
+                return self._poller_maintenance_document(replayed=True)
+            if self._poller_maintenance_task is not None:
+                raise StoreError("maintenance_pause_active", "已有维护暂停正在生效", status=409)
+            self._poller_maintenance_request_id = request_id
+            self._poller_maintenance_resume_enabled = self.poller_enabled
+            expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=duration_seconds)
+            self._poller_maintenance_expires_at = expires.isoformat()
+            if self.poller_enabled:
+                await self._stop_pollers_unlocked()
+            task = asyncio.create_task(
+                self._poller_maintenance_timeout(request_id, duration_seconds),
+                name="weixin-poller-maintenance-timeout",
+            )
+            self._poller_maintenance_task = task
+            self._tasks.append(task)
+            return self._poller_maintenance_document()
+
+    async def resume_poller_maintenance(self, payload: dict[str, Any]) -> dict[str, Any]:
+        request_id = str(payload.get("request_id") or "")
+        self.store.validate_request_id(request_id)
+        async with self._poller_control_lock:
+            active_request_id = self._poller_maintenance_request_id
+            if active_request_id is None:
+                return self._poller_maintenance_document(replayed=True)
+            if request_id != active_request_id:
+                raise StoreError("maintenance_request_conflict", "维护恢复 request_id 与当前租约不一致", status=409)
+            resume_enabled = self._poller_maintenance_resume_enabled
+            self._cancel_poller_maintenance_unlocked()
+            if resume_enabled and self.poller_enabled:
+                await self._start_pollers_unlocked()
+            return self._poller_maintenance_document()
+
+    async def _poller_maintenance_timeout(self, request_id: str, duration_seconds: int) -> None:
+        await asyncio.sleep(duration_seconds)
+        async with self._poller_control_lock:
+            if self._poller_maintenance_request_id != request_id:
+                return
+            resume_enabled = self._poller_maintenance_resume_enabled
+            self._clear_poller_maintenance_unlocked()
+            if resume_enabled and self.poller_enabled:
+                await self._start_pollers_unlocked()
+
+    def _poller_maintenance_document(self, *, replayed: bool = False) -> dict[str, Any]:
+        active = self._poller_maintenance_request_id is not None
+        return {
+            "active": active,
+            "request_id": self._poller_maintenance_request_id,
+            "expires_at": self._poller_maintenance_expires_at,
+            "resume_enabled": self._poller_maintenance_resume_enabled if active else None,
+            "poller_state": self.poller_state,
+            "poller_enabled": self.poller_enabled,
+            "replayed": replayed,
+        }
+
+    def _clear_poller_maintenance_unlocked(self) -> None:
+        task = self._poller_maintenance_task
+        if task is not None:
+            self._tasks = [item for item in self._tasks if item is not task]
+        self._poller_maintenance_task = None
+        self._poller_maintenance_request_id = None
+        self._poller_maintenance_expires_at = None
+        self._poller_maintenance_resume_enabled = self.poller_enabled
+
+    def _cancel_poller_maintenance_unlocked(self) -> None:
+        task = self._poller_maintenance_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        self._clear_poller_maintenance_unlocked()
 
     async def _start_pollers_unlocked(self) -> None:
         if self.identity is None or self.client is None or not self._runtimes:
@@ -488,6 +584,7 @@ class GatewayService:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         async with self._poller_control_lock:
+            self._cancel_poller_maintenance_unlocked()
             await self._stop_pollers_unlocked()
         closed_clients: set[int] = set()
         for runtime in self._runtimes.values():
@@ -1333,6 +1430,8 @@ class GatewayService:
                                 "attachments": message["attachments"],
                                 "reply_capabilities": ["text", "image", "file"],
                             }
+                            if message.get("media_archive_context"):
+                                payload["media_archive_context"] = message["media_archive_context"]
                             stored_profile = str(message.get("capability_profile") or "owner_legacy")
                             try:
                                 incompatible = False
@@ -1640,9 +1739,9 @@ class GatewayService:
             )
             return exc.code
         prefix = (
-            "图片发送状态暂无法确认，可在 24 小时内下载："
+            "文件发送状态暂无法确认，可在 24 小时内下载："
             if state.get("error_code") == "delivery_state_unknown"
-            else "图片发送失败，可在 24 小时内下载："
+            else "文件发送失败，可在 24 小时内下载："
         )
         context = self.identity_store.context(runtime.identity, message["sender_id"])
         response = await runtime.client.send_text(
@@ -2450,12 +2549,13 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.0",
+            "version": "0.4.3",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],
             "poller_revision": poller_control["revision"],
             "poller_state": self.poller_state,
+            "poller_maintenance": self._poller_maintenance_document(),
             "identity": identity,
             "identities": identities,
             "owner_pairing": self.identity_store.owner_pairing_summary(self.identity),

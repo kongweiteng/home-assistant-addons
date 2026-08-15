@@ -34,6 +34,10 @@ options:
   gateway_attachment_token: ""
   operations_base_url: ""
   operations_api_token: ""
+  memo_base_url: ""
+  memo_http_username: ""
+  memo_http_password: ""
+  memo_api_token: ""
   max_request_bytes: 1048576
   max_queue: 200
   max_result_chars: 12000
@@ -63,6 +67,10 @@ schema:
   gateway_attachment_token: password
   operations_base_url: str
   operations_api_token: password
+  memo_base_url: str
+  memo_http_username: str
+  memo_http_password: password
+  memo_api_token: password
   max_request_bytes: "int(4096,52428800)"
   max_queue: "int(1,5000)"
   max_result_chars: "int(1000,32000)"

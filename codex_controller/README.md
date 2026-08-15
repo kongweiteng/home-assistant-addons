@@ -29,15 +29,20 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.2.0` 新增 MCP 工具控制台：页面列出全部 32 个已知工具的中文名称、所属服务、风险类型、配置/策略/实际发布/可调用状态、自然语言意图示例和脱敏最近调用结果。意图示例不是固定关键词。
 - 每个工具都有 SQLite 持久开关。关闭会同时从下一次 MCP `tools/list` 隐藏并在 `tools/call` 服务端立即拒绝，因此旧 Thread 或缓存目录不能绕过；策略损坏时目录和调用全部 fail closed。
 - MCP 进程声明并发送标准 `notifications/tools/list_changed`，Controller 只把真实 `tools/list` 回报记录为“已发布”，不再用主进程本地清单冒充 app-server 实际装载。
-- Gateway 作业可携带 `owner` 或 `member_read_only` 能力画像；成员只允许 8 个确定性安全装修查询。Thread、会话、作业和 Turn 的页面诊断使用私有 HMAC 短标识，`/new` 回复会附带 `TH-*`。
+- Gateway 作业可携带 `owner` 或 `member_read_only` 能力画像；成员只允许 8 个确定性安全装修查询和 `memo_list` 家庭备忘录只读查询。Thread、会话、作业和 Turn 的页面诊断使用私有 HMAC 短标识，`/new` 回复会附带 `TH-*`。
 - 同一 app-server 进程中，Thread 的角色或有效工具上下文变化时会替换 conversation 的 Thread：尚未发生 Turn 的空 Thread 不能被官方 `thread/fork`，因此重新 `thread/start`；已经发生 Turn 并持久化的 Thread 才使用官方 `thread/fork` 保留历史。服务端工具门禁始终独立生效。
 - `0.2.0` 为全部 32 个固定内部 MCP 工具写入单工具 `approval_mode="approve"`，保持 Thread/Turn 的 `approvalPolicy=never`，使 owner 的清晰查询、图表、导出、记账、退款、更正和归档请求不再依赖无法在微信中操作的 Codex 审批弹窗。该配置只移除模型层二次审批，不改变 member allowlist、逐工具策略、Hub writer/幂等或 Operations Broker 门禁。
 - `0.2.1` 从 Renovation Hub 的受认证 business manifest 动态加载完整工具 Schema，并保存 last-good；Hub 暂时不可达或返回非法目录时继续使用已验证目录，首次启动则使用内置兼容 bootstrap。
-- Hub manifest revision/digest 变化会更新 Controller catalog revision、发出 `listChanged` 并让 app-server 在不重启的情况下重新 `tools/list`。未来合法的 `ledger_*` / `renovation_*` 工具自动对 owner/owner_legacy 开放；member 永远只保留服务端固定 8 个只读工具。
+- Hub manifest revision/digest 变化会更新 Controller catalog revision、发出 `listChanged` 并让 app-server 在不重启的情况下重新 `tools/list`。未来合法的 `ledger_*` / `renovation_*` 工具自动对 owner/owner_legacy 开放；member 永远只保留服务端固定 8 个装修只读工具和 `memo_list`。
 - `0.2.2` 在 `ledger_generate_chart` 成功后立即从 Hub 固定下载接口读取 PNG，校验引用、MIME、大小、PNG 签名和 SHA-256，再以 `0700/0600` 权限私有固化到 `/data/job-artifacts`。completed job 只返回确定性中文摘要和安全 artifact DTO，不返回 Hub `download_ref`、bearer、内部 URL 或文件路径。
 - `0.2.3` 使用 `codex app-server --disable goals --listen stdio://` 启动官方进程，禁止普通微信 Turn 派生后台 Goal 与后续消息竞争作业所有权；持续监控必须交给独立自动化服务。
 - `0.2.3` 的 bootstrap 付款目录与 Hub canonical v2 契约一致；Hub 返回白名单内、有界且结构化的校验错误时保留 `invalid_input` / `invalid_tags` 等可纠正语义，非 JSON、超长或未知错误仍统一脱敏。
 - `0.2.4` 将普通附件与装修档案意图分离：图片、视频和文件默认只用于识别，只有明确请求保存到装修/施工/工地档案时才暴露并允许媒体归档工具；媒体从 Gateway 非消费流式读取，Hub 成功后才 ACK 消费。
+- `0.4.2` 保持 Runner Center v2 管理面默认开启，并将 Controller 到 Relay 的内部契约固定为真实 HAOS hostname `http://local-codex-runner-relay:8098`；独立 Relay adapter、Relay enrollment/auth/event 内部接口和摘要固定的 Runner `0.2.0` 安装制品目录保持不变。Runner 调度仍是确定性控制面，不经过 Codex app-server。
+- `0.4.3` 新增 5 个家庭备忘录 MCP 工具。Controller 只调用现有 HAOS Node-RED 的认证 API，不访问 SQLite；新增事项的微信来源和幂等 ID 由当前 Gateway 消息 ID 确定性派生。成员仅可查询，owner 的修改、完成和取消在候选不唯一时必须先消歧。
+- Controller 在开放 intake 前预热并校验 app-server 的真实 MCP 目录；目录尚未包含全部当前可用工具时保持不可接单，确保重启后的第一条微信不会先误报能力未接入。
+- `memo_create` 携带 `due_at` 时调用的是 Node-RED 独立持久化、调度和通知服务，不属于 Codex Goal 或当前 Turn 后台等待。owner 明确说“记一下”或“提醒我”并给出可确定时间时必须调用该工具，不得误报不能主动提醒或改荐手机日历。
+- 为避免持久会话历史继续覆盖工具提示，Controller 会对明确的“记一下/提醒我 + 可确定时间”、未完成/今天/逾期查询，以及 owner 的明确完成命令执行确定性路由：使用 `received_at` 按 `Asia/Shanghai` 解析相对日期与中文时间，直接调用受认证的 `memo_create`、`memo_list` 和唯一匹配后的 `memo_complete`，不启动模型 Turn；多个完成候选仍要求消歧，Node-RED 幂等、审计和提醒状态机保持不变。
 - `0.5.0` 将 Runner Center 安装链升级到自包含 Runner `0.3.0`：四个平台制品固定 Python `3.11.13`、Runner 与 Codex `0.146.0`，目标机不再依赖预装 Python、pip、venv、pyenv 或 Homebrew。Runner 调度仍是确定性控制面，不经过 Codex app-server。
 - 页面只在 HTTPS manifest、固定 SHA-256/文件大小和公开 WSS URL 全部校验成功后允许创建 Runner；创建结果同时提供短期一次性 HTTPS 安装链接和可复制终端命令，不再返回分散的 `runner_id + enrollment token`。链接 15 分钟后自动失效，支持复制、打开、撤销和重新生成；过期、领取或撤销后，页面立即清除内存中的链接与命令。
 - Relay 通过受限 `/install/<ticket>` 返回 `no-store/no-referrer/nosniff` 的摘要固定 shell，并使用受认证的 Controller 非消费式 bootstrap 检查；真正 enrollment 仍只在 Runner 首次 WSS 注册时单次消费。Relay 不保存 ticket，不把错误 ticket 回显到响应。
@@ -53,6 +58,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - app-server 子进程只获得独立 `CODEX_HOME`、受限工作区和不含秘密的 Unix Socket 地址。
 - 自定义 API URL 经结构、模式、DNS 和公网地址校验后，只写入权限为 `0600` 的私有 `CODEX_HOME/config.toml`；API Key 继续通过匿名文件描述符和 app-server 账户 RPC 注入，不写入该配置文件。
 - Ledger 与 Operations Broker bearer 只保留在 Controller 主进程，不进入 app-server 环境、模型提示或日志。
+- Node-RED 家庭备忘录 Basic Auth 与模块 Token 只保留在 Controller 主进程，不进入 app-server 环境、模型提示、URL、SQLite 或日志；模型不能设置 `source_message_id`。
 - Gateway 附件 bearer 也只保留在 Controller 主进程；模型仅能提交短期 `attachment_ref`。图片预览文件固定写入私有 `/data/turn-media`，权限为 `0600`，不使用微信文件名构造路径。
 - Hub 图表 bearer 和原始 `download_ref` 只存在于 Controller 主进程；持久 job DTO 只暴露随机 artifact ID、类型、大小、摘要、尺寸和不含内部路径的短期 fallback path。下载 token 由私有 HMAC 密钥确定性派生，SQLite 只保存其 SHA-256。
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
@@ -63,7 +69,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 ## 本地验证
 
 ```bash
-PYTHONPATH=codex_controller:renovation_hub PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_codex_controller tests.test_codex_dynamic_mcp
+PYTHONPATH=codex_controller:renovation_hub PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_codex_controller tests.test_codex_dynamic_mcp tests.test_codex_family_memo
 PYTHONPATH=codex_controller PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_codex_runner_*.py'
 ```
 

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.6
+
+- 固定 Runner 制品升级为 `0.3.4`。Runner 在启动 Codex 前核对已登记仓库与任务 linked worktree 的绝对 Git common dir 一致，并只把该目录作为 `workspace-write` 的附加可写目录，使 `git add`、本地 commit、refs 和 reflog 可以在隔离任务中完成。
+- 保持 `approval=never`、`workspace-write`、固定项目白名单和远端不可覆盖路径/沙箱/Git ref；不使用 `danger-full-access`。Git common dir 不一致或不可解析时以 `git_metadata_invalid` 失败关闭。
+- 镜像内置与公开 Runner `0.3.4` Release 同字节的 manifest；旧 Runner、既有 Registry/lease/任务历史、普通微信、MCP、Renovation Hub 和 Operations 权限边界不变。
+
 ## 0.5.5
 
 - 固定 Runner 制品升级为 `0.3.3`。结构化结果 Schema 现在把 `error_code` 作为必填可空字段，满足 Codex Responses API 对所有 `properties` 必须同时列入 `required` 的约束；成功结果使用 `null`，失败结果继续使用稳定错误码。

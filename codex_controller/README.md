@@ -49,6 +49,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.5.3` 固定 Runner `0.3.2`。新 Runner 不再使用超时后不可继续读取的 Python socket file；正常 heartbeat 等待超时后仍保持同一 WSS 会话并继续接收 ACK、ping 和任务帧，避免在线状态短暂刷新但 Relay 实际连接数持续为零。
 - `0.5.4` 在 Controller 镜像内置与公开 Runner `0.3.2` Release 同字节、同 SHA-256 的 manifest，HAOS 即使暂时无法访问 GitHub，页面仍可用本地固定目录生成一次性安装链接。目标机下载 installer 和 bundle 时继续校验 HTTPS、文件大小和 SHA-256，不通过 Controller 代理资产。
 - `0.5.5` 固定 Runner `0.3.3`，修复 Codex Responses API 对结构化输出 Schema 的严格校验：`error_code` 现在必填且允许为 `null`，成功任务不再在执行前因无效 `codex_output_schema` 进入 `recovery_required`。
+- `0.5.6` 固定 Runner `0.3.4`，允许 Codex 在保持 `workspace-write` 的同时写入已登记仓库与任务 linked worktree 共同的 Git metadata，从而完成本地 commit。Runner 会先核对两处绝对 Git common dir 完全一致；不一致时 fail closed，远端请求仍不能选择路径、沙箱或 Git ref。
 - 页面只在 HTTPS manifest、固定 SHA-256/文件大小和公开 WSS URL 全部校验成功后允许创建 Runner；创建结果同时提供短期一次性 HTTPS 安装链接和可复制终端命令，不再返回分散的 `runner_id + enrollment token`。链接 15 分钟后自动失效，支持复制、打开、撤销和重新生成；过期、领取或撤销后，页面立即清除内存中的链接与命令。
 - Relay 通过受限 `/install/<ticket>` 返回 `no-store/no-referrer/nosniff` 的摘要固定 shell，并使用受认证的 Controller 非消费式 bootstrap 检查；真正 enrollment 仍只在 Runner 首次 WSS 注册时单次消费。Relay 不保存 ticket，不把错误 ticket 回显到响应。
 - Relay 内部 URL 和两个最小权限 token 未配置时继续显示 `relay_configured=false`，等待任务不会被伪发布；`runner_relay_api_token` 只用于 Controller -> Relay 发布，`runner_relay_controller_api_token` 只用于 Relay -> Controller 回调，三项必须同时配置且 token 不得相同，否则拒绝启动。installer 未配置或摘要不匹配时仅关闭“生成安装命令”，既有 Runner Registry、列表和管理操作仍可使用。需要整体降级时可显式设置 `runner_center_v2_enabled=false`，普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。

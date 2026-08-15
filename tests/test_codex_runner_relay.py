@@ -28,8 +28,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.3")
-        self.assertIn('version: "0.2.3"', config)
+        self.assertEqual(__version__, "0.2.4")
+        self.assertIn('version: "0.2.4"', config)
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
         self.assertIn("local-codex-controller", run_script)
         self.assertNotIn("http://codex-controller:8102", config + run_script)
@@ -125,13 +125,13 @@ class FakeController:
             "projects": ["renovation-hub"],
             "labels": ["local", "macos"],
             "policy_revision": 2,
-            "asset_url": "https://downloads.example.com/codex-runner-0.3.3-macos-aarch64.tar.gz",
+            "asset_url": "https://downloads.example.com/codex-runner-0.3.4-macos-aarch64.tar.gz",
             "asset_sha256": "a" * 64,
             "asset_size": 123456,
             "installer_url": "https://downloads.example.com/codex-runner-installer-2.sh",
             "installer_sha256": "b" * 64,
             "installer_size": 4567,
-            "runner_version": "0.3.3",
+            "runner_version": "0.3.4",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "self_contained": True,
@@ -178,7 +178,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {
                     "runner_id": RUNNER_ID,
                     "protocol_version": 2,
-                    "agent_version": "0.3.3",
+                    "agent_version": "0.3.4",
                     "labels": ["local", "macos"],
                     "policy_revision": 2,
                 },
@@ -248,7 +248,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {
                     "runner_id": RUNNER_ID,
                     "protocol_version": 2,
-                    "agent_version": "0.3.3",
+                    "agent_version": "0.3.4",
                     "labels": ["local", "macos"],
                     "policy_revision": 2,
                 },
@@ -288,7 +288,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CODEX_RUNNER_ENROLLMENT_TOKEN", body)
         self.assertIn(TOKEN, body)
         self.assertIn("codex-runner-installer-2.sh", body)
-        self.assertIn("codex-runner-0.3.3-macos-aarch64.tar.gz", body)
+        self.assertIn("codex-runner-0.3.4-macos-aarch64.tar.gz", body)
         self.assertIn("--asset-size 123456", body)
         self.assertIn("--projects renovation-hub", body)
         self.assertIn("--labels local,macos", body)

@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.3
+
+- `/install/<ticket>` 固定升级到 Runner `0.3.3`，允许新的必填可空 `error_code` 结构化结果 Schema；旧 `0.3.2` 资产不再通过 install-bootstrap 版本校验。
+- WSS、限流、ticket/enrollment 不落盘、Controller 回调和最小权限数据面不变。
+
 ## 0.2.2
 
 - `/install/<ticket>` 固定升级到 Runner `0.3.2`，兼容接收超时后继续读取 ACK、ping 与任务帧的 WSS 修复。

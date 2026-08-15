@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.5
+
+- 固定 Runner 制品升级为 `0.3.3`。结构化结果 Schema 现在把 `error_code` 作为必填可空字段，满足 Codex Responses API 对所有 `properties` 必须同时列入 `required` 的约束；成功结果使用 `null`，失败结果继续使用稳定错误码。
+- 镜像内置新的固定 manifest，页面直接安装不会再生成能够连接但在首次 Codex 任务中因 `codex_output_schema` 无效而进入 `recovery_required` 的 Runner；Registry、lease、审批、项目白名单和生产权限边界不变。
+
 ## 0.5.4
 
 - 镜像内置与公开 Runner `0.3.2` Release 完全同字节、同 SHA-256 的 manifest。Controller 启动和页面状态不再依赖 HAOS 运行时访问 GitHub；manifest URL、配置摘要、版本、四平台资产 URL、大小和 SHA-256 仍逐项 fail closed。

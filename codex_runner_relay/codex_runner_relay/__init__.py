@@ -1,3 +1,3 @@
 """Minimal transport-only relay for Runner Center v2."""
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"

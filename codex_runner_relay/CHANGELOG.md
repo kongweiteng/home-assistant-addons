@@ -1,8 +1,13 @@
 # 更新记录
 
+## 0.2.2
+
+- `/install/<ticket>` 固定升级到 Runner `0.3.2`，兼容接收超时后继续读取 ACK、ping 与任务帧的 WSS 修复。
+- 安装脚本继续固定字段、版本、大小和 SHA-256；Relay 不保存 ticket、标签、策略或 enrollment，也不改变 Registry/lease 所有权。
+
 ## 0.2.1
 
-- `/install/<ticket>` 将 Controller bootstrap 中的真实 Runner 标签和 policy revision 传给 Runner `0.3.2` 安装器，移除固定标签造成的首次心跳策略拒绝，并兼容接收超时后继续读取 ACK、ping 与任务帧的 WSS 修复。
+- `/install/<ticket>` 将 Controller bootstrap 中的真实 Runner 标签和 policy revision 传给 Runner `0.3.1` 安装器，移除固定标签造成的首次心跳策略拒绝。
 - 安装脚本继续固定字段、版本、大小和 SHA-256；Relay 不保存 ticket、标签、策略或 enrollment，也不改变 Registry/lease 所有权。
 
 ## 0.2.0

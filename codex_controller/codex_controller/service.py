@@ -5,12 +5,15 @@ from __future__ import annotations
 import re
 import threading
 import time
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
 from .runner_service import RunnerManagerService
 from .store import ControllerStore, StoreError
+from .tool_proxy import ToolProxyError
 
 
 NEW_THREAD_COMMANDS = frozenset({"打开新会话", "/new"})
@@ -22,6 +25,49 @@ MEDIA_ARCHIVE_MEDIA_ACTION_RE = re.compile(
     r"|(?:归档|存档|归入|收录|记录).{0,8}(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体)"
 )
 MEDIA_ARCHIVE_NEGATION_RE = re.compile(r"(?:不要|别|无需|不用|不需要).{0,12}(?:归档|存档|保存|添加|加入|关联|记录)")
+MEMO_CREATE_PREFIX_RE = re.compile(
+    r"^\s*(?:请)?(?:帮我)?(?:记一下|记下|记录一下|添加(?:一个)?备忘录|新增(?:一个)?备忘录|提醒我)[，,：:\s]*"
+)
+MEMO_DUE_RE = re.compile(
+    r"^(?:(?P<relative>今天|明天|后天)|(?P<month>\d{1,2})月(?P<day>\d{1,2})日)?\s*"
+    r"(?P<period>凌晨|早上|上午|中午|下午|晚上)?\s*"
+    r"(?P<hour>\d{1,2}|[零〇一二两三四五六七八九十]{1,3})"
+    r"(?:(?:点|时)(?:(?P<half>半)|(?P<minute>[零〇一二两三四五六七八九十\d]{1,3})分?)?"
+    r"|[:：](?P<colon_minute>\d{1,2}))"
+)
+MEMO_LIST_PENDING_RE = re.compile(
+    r"^(?:请)?(?:显示|查看|列出|看看|告诉我|有哪些|有什么)(?:一下)?(?:所有)?"
+    r"(?:未完成|待完成|待办|待处理)(?:的)?(?:备忘录|事项|事情)[？?。.]?$"
+)
+MEMO_LIST_TODAY_RE = re.compile(
+    r"^(?:请)?(?:显示|查看|列出|看看|告诉我)(?:一下)?今天(?:的)?(?:备忘录|事项|事情)[？?。.]?$"
+)
+MEMO_LIST_OVERDUE_RE = re.compile(
+    r"^(?:请)?(?:显示|查看|列出|看看|告诉我|有哪些|有什么)(?:一下)?(?:所有)?"
+    r"(?:逾期|过期)(?:的)?(?:备忘录|事项|事情)[？?。.]?$"
+)
+MEMO_COMPLETE_PREFIX_RE = re.compile(
+    r"^(?:请)?(?:帮我)?(?:完成|办完|标记完成|设为完成)[：:\s]*(?P<query>.+?)[。.]?$"
+)
+MEMO_COMPLETE_SUFFIX_RE = re.compile(
+    r"^(?:请)?(?:把|将)\s*(?P<query>.+?)\s*(?:标记为|设为)?(?:已)?完成[。.]?$"
+)
+RENOVATION_MEMO_RE = re.compile(r"(?:装修|施工|工地|铝瓦|地暖|门窗|瓷砖|木工|油漆|水电)")
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
 
 
 def has_explicit_media_archive_intent(text: str, attachments: list[dict[str, Any]] | None = None) -> bool:
@@ -43,6 +89,219 @@ def is_new_thread_command(payload: dict[str, Any]) -> bool:
     text = payload.get("text")
     attachments = payload.get("attachments")
     return isinstance(text, str) and text.strip() in NEW_THREAD_COMMANDS and attachments == []
+
+
+def _chinese_number(value: str) -> int | None:
+    if value.isdigit():
+        return int(value)
+    normalized = value.replace("两", "二").replace("〇", "零")
+    if "十" in normalized:
+        left, right = normalized.split("十", 1)
+        tens = 1 if not left else CHINESE_DIGITS.get(left)
+        ones = 0 if not right else CHINESE_DIGITS.get(right)
+        if tens is None or ones is None:
+            return None
+        return tens * 10 + ones
+    if len(normalized) == 1:
+        return CHINESE_DIGITS.get(normalized)
+    digits = [CHINESE_DIGITS.get(character) for character in normalized]
+    if any(digit is None for digit in digits):
+        return None
+    return int("".join(str(digit) for digit in digits))
+
+
+def direct_memo_create_arguments(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse an explicit timed memo command without leaving tool choice to the model."""
+
+    text = payload.get("text")
+    if not isinstance(text, str) or payload.get("attachments") != []:
+        return None
+    prefix = MEMO_CREATE_PREFIX_RE.match(text)
+    if prefix is None:
+        return None
+    remainder = text[prefix.end() :].strip()
+    due = MEMO_DUE_RE.match(remainder)
+    if due is None:
+        return None
+    hour = _chinese_number(due.group("hour"))
+    minute_text = due.group("minute") or due.group("colon_minute")
+    minute = 30 if due.group("half") else 0 if minute_text is None else _chinese_number(minute_text)
+    if hour is None or minute is None or not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    period = due.group("period")
+    if period in {"下午", "晚上"} and hour < 12:
+        hour += 12
+    elif period == "中午" and hour < 11:
+        hour += 12
+    elif period in {"凌晨", "早上", "上午"} and hour == 12:
+        hour = 0
+    try:
+        received = datetime.fromisoformat(str(payload.get("received_at") or ""))
+    except ValueError:
+        return None
+    if received.tzinfo is None:
+        return None
+    local_received = received.astimezone(SHANGHAI)
+    relative = due.group("relative")
+    if relative:
+        day_offset = {"今天": 0, "明天": 1, "后天": 2}[relative]
+        target_date = (local_received + timedelta(days=day_offset)).date()
+    elif due.group("month") and due.group("day"):
+        month = int(due.group("month"))
+        day = int(due.group("day"))
+        try:
+            target_date = local_received.date().replace(month=month, day=day)
+        except ValueError:
+            return None
+        if target_date < local_received.date():
+            try:
+                target_date = target_date.replace(year=target_date.year + 1)
+            except ValueError:
+                return None
+    else:
+        target_date = local_received.date()
+    due_at = datetime(
+        target_date.year,
+        target_date.month,
+        target_date.day,
+        hour,
+        minute,
+        tzinfo=SHANGHAI,
+    )
+    if relative is None and due.group("month") is None and due_at <= local_received:
+        due_at += timedelta(days=1)
+    content = remainder[due.end() :].lstrip("，,。；;：: \t")
+    content = re.sub(r"^(?:提醒我|记得)\s*", "", content).strip()
+    if not content:
+        return None
+    arguments: dict[str, Any] = {
+        "content": content,
+        "due_at": due_at.isoformat(timespec="seconds"),
+        "priority": "normal",
+    }
+    if RENOVATION_MEMO_RE.search(content):
+        arguments["category"] = "装修"
+    return arguments
+
+
+def memo_create_result_text(result: dict[str, Any], arguments: dict[str, Any]) -> str:
+    document = result.get("result") if isinstance(result.get("result"), dict) else {}
+    memo = document.get("memo") if isinstance(document.get("memo"), dict) else {}
+    content = str(memo.get("content") or arguments["content"])
+    due_at = str(memo.get("due_at") or arguments["due_at"])
+    due = datetime.fromisoformat(due_at).astimezone(SHANGHAI)
+    lines = [f"已记下：{content}", f"提醒时间：{due.year}年{due.month}月{due.day}日 {due:%H:%M}"]
+    if document.get("idempotent_replay") is True:
+        lines.append("这条微信已处理过，没有重复创建。")
+    return "\n".join(lines)
+
+
+def direct_memo_list_arguments(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Parse explicit bounded memo-list commands without consulting Thread history."""
+
+    text = payload.get("text")
+    if not isinstance(text, str) or payload.get("attachments") != []:
+        return None
+    normalized = re.sub(r"\s+", "", text.strip())
+    if MEMO_LIST_PENDING_RE.fullmatch(normalized):
+        return {"status": "pending", "limit": 20}
+    if MEMO_LIST_TODAY_RE.fullmatch(normalized):
+        return {"status": "pending", "date": "today", "limit": 20}
+    if MEMO_LIST_OVERDUE_RE.fullmatch(normalized):
+        return {"status": "pending", "overdue": True, "limit": 20}
+    return None
+
+
+def direct_memo_complete_query(payload: dict[str, Any]) -> str | None:
+    """Extract an explicit completion target while rejecting questions and attachments."""
+
+    text = payload.get("text")
+    if not isinstance(text, str) or payload.get("attachments") != []:
+        return None
+    normalized = text.strip()
+    if not normalized or normalized.endswith(("?", "？")):
+        return None
+    match = MEMO_COMPLETE_PREFIX_RE.fullmatch(normalized) or MEMO_COMPLETE_SUFFIX_RE.fullmatch(normalized)
+    if match is None:
+        return None
+    query = match.group("query").strip(" ，,。.;；:：\t")
+    return query or None
+
+
+def _memo_records(result: dict[str, Any]) -> list[dict[str, Any]]:
+    document = result.get("result")
+    records = document.get("items") if isinstance(document, dict) else document
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise ToolProxyError("memo_response_invalid", "家庭备忘录查询响应无效")
+    if isinstance(document, dict) and document.get("count") not in {None, len(records)}:
+        raise ToolProxyError("memo_response_invalid", "家庭备忘录查询数量无效")
+    return records
+
+
+def _memo_display_content(record: dict[str, Any]) -> str:
+    return str(record.get("content") or record.get("title") or "未命名事项")
+
+
+def _memo_due_label(record: dict[str, Any]) -> str | None:
+    due_at = record.get("due_at")
+    if not isinstance(due_at, str) or not due_at:
+        return None
+    try:
+        due = datetime.fromisoformat(due_at).astimezone(SHANGHAI)
+    except ValueError:
+        return None
+    return f"{due.month}月{due.day}日 {due:%H:%M}"
+
+
+def memo_list_result_text(result: dict[str, Any]) -> str:
+    records = _memo_records(result)
+    if not records:
+        return "没有找到符合条件的备忘录。"
+    lines = [f"找到 {len(records)} 条备忘录："]
+    for index, record in enumerate(records, start=1):
+        content = _memo_display_content(record)
+        due = _memo_due_label(record)
+        lines.append(f"{index}. {content}" + (f"（{due}）" if due else ""))
+    return "\n".join(lines)
+
+
+def _memo_match_key(value: Any) -> str:
+    return re.sub(r"[\s，,。.;；:：]", "", str(value or "")).casefold()
+
+
+def matching_pending_memos(records: list[dict[str, Any]], query: str) -> list[dict[str, Any]]:
+    query_key = _memo_match_key(query)
+    exact = [
+        record
+        for record in records
+        if query_key
+        and query_key
+        in {
+            _memo_match_key(record.get("content")),
+            _memo_match_key(record.get("title")),
+        }
+    ]
+    if exact:
+        return exact
+    return [
+        record
+        for record in records
+        if query_key
+        and any(
+            query_key in candidate or candidate in query_key
+            for candidate in (
+                _memo_match_key(record.get("content")),
+                _memo_match_key(record.get("title")),
+            )
+            if candidate
+        )
+    ]
+
+
+def memo_complete_result_text(result: dict[str, Any], fallback: dict[str, Any]) -> str:
+    document = result.get("result") if isinstance(result.get("result"), dict) else {}
+    memo = document.get("memo") if isinstance(document.get("memo"), dict) else {}
+    return f"已完成：{_memo_display_content(memo or fallback)}"
 
 
 class ControllerService:
@@ -91,6 +350,14 @@ class ControllerService:
         self.store.recover_running()
         try:
             self.app_server.start()
+            if hasattr(self.app_server, "refresh_mcp_catalog"):
+                expected_tools = (
+                    self.tool_context.available_tools("owner_legacy")
+                    if self.tool_context is not None
+                    and hasattr(self.tool_context, "available_tools")
+                    else []
+                )
+                self.app_server.refresh_mcp_catalog(expected_tools)
         except AppServerError as exc:
             self.start_error = exc.code
         else:
@@ -368,6 +635,55 @@ class ControllerService:
                     capability_profile,
                     media_archive_authorized=media_archive_authorized,
                 )
+            direct_memo = direct_memo_create_arguments(payload)
+            if (
+                direct_memo is not None
+                and self.tool_context is not None
+                and "memo_create" in effective_tools
+                and capability_profile in {"owner", "owner_legacy"}
+            ):
+                result = self.tool_context.call("memo_create", direct_memo)
+                self.store.complete_direct_result(
+                    job["job_id"],
+                    memo_create_result_text(result, direct_memo),
+                    item_type="memoCreate",
+                )
+                return
+            direct_memo_list = direct_memo_list_arguments(payload)
+            if (
+                direct_memo_list is not None
+                and self.tool_context is not None
+                and "memo_list" in effective_tools
+            ):
+                result = self.tool_context.call("memo_list", direct_memo_list)
+                self.store.complete_direct_result(
+                    job["job_id"],
+                    memo_list_result_text(result),
+                    item_type="memoList",
+                )
+                return
+            direct_complete = direct_memo_complete_query(payload)
+            if (
+                direct_complete is not None
+                and self.tool_context is not None
+                and {"memo_list", "memo_complete"}.issubset(effective_tools)
+                and capability_profile in {"owner", "owner_legacy"}
+            ):
+                listed = self.tool_context.call("memo_list", {"status": "pending", "limit": 100})
+                matches = matching_pending_memos(_memo_records(listed), direct_complete)
+                if not matches:
+                    text = f"没有找到未完成的备忘录：{direct_complete}。"
+                    item_type = "memoCompleteLookup"
+                elif len(matches) > 1:
+                    text = f"找到多条未完成备忘录与“{direct_complete}”匹配，请说得更具体。"
+                    item_type = "memoCompleteDisambiguation"
+                else:
+                    memo = matches[0]
+                    completed = self.tool_context.call("memo_complete", {"id": memo.get("id")})
+                    text = memo_complete_result_text(completed, memo)
+                    item_type = "memoComplete"
+                self.store.complete_direct_result(job["job_id"], text, item_type=item_type)
+                return
             thread_id = self.store.conversation_thread(job["conversation_key"])
             if thread_id is None:
                 thread_id = self.app_server.start_thread()
@@ -401,6 +717,8 @@ class ControllerService:
         except StoreError as exc:
             self.store.fail_claimed(job["job_id"], exc.code, uncertain=True)
         except MediaInputError as exc:
+            self.store.fail_claimed(job["job_id"], exc.code, uncertain=False)
+        except ToolProxyError as exc:
             self.store.fail_claimed(job["job_id"], exc.code, uncertain=False)
         except Exception:
             self.store.fail_claimed(job["job_id"], "controller_internal_error", uncertain=True)

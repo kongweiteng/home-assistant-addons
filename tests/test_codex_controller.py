@@ -36,7 +36,7 @@ from codex_controller.service import (
     is_new_thread_command,
 )
 from codex_controller.store import ControllerStore, StoreError
-from codex_controller.tool_catalog import ALL_TOOL_NAMES, MEMBER_READ_ONLY_TOOL_NAMES, TOOL_BY_NAME
+from codex_controller.tool_catalog import ALL_TOOL_NAMES, MEMBER_READ_ONLY_TOOL_NAMES, MEMO_TOOLS, TOOL_BY_NAME
 from codex_controller.tool_proxy import (
     ToolProxyError,
     ToolProxyServer,
@@ -1147,6 +1147,37 @@ class ControllerAuthenticationTests(unittest.TestCase):
             service.stop()
             temporary.cleanup()
 
+    def test_start_prewarms_current_mcp_catalog_before_enabling_intake(self) -> None:
+        class WarmApp(self.StubApp):
+            def __init__(self) -> None:
+                super().__init__(auth_mode="apiKey")
+                self.prewarmed: list[str] | None = None
+
+            def refresh_mcp_catalog(self, expected_tools: list[str]) -> list[str]:
+                self.prewarmed = list(expected_tools)
+                return list(expected_tools)
+
+        app = WarmApp()
+        router = ToolRouter(
+            memo_base_url="http://homeassistant.local:1880",
+            memo_http_username="family-memo",
+            memo_http_password="fixture-password-value",
+            memo_api_token="m" * 32,
+        )
+        temporary, service = self.make_service(
+            app,
+            auth_mode="api_key",
+            api_key="fixture-api-key-value",
+            tool_context=router,
+        )
+        try:
+            service.start()
+            self.assertEqual(set(app.prewarmed or []), set(MEMO_TOOLS))
+            self.assertTrue(service.intake_enabled)
+        finally:
+            service.stop()
+            temporary.cleanup()
+
     def test_runtime_failure_disables_intake_and_returns_watchdog_failure(self) -> None:
         app = self.StubApp(auth_mode="apiKey")
         temporary, service = self.make_service(app, auth_mode="api_key", api_key="fixture-api-key-value")
@@ -1302,6 +1333,10 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn("CONTROLLER_OPENAI_BASE_URL", run_script)
         self.assertIn("CONTROLLER_CODEX_MODEL", run_script)
         self.assertNotIn("export CONTROLLER_OPENAI_API_KEY=", run_script)
+        self.assertIn("memo_http_password: password", config)
+        self.assertIn("memo_api_token: password", config)
+        self.assertIn("CONTROLLER_MEMO_HTTP_PASSWORD", run_script)
+        self.assertIn("CONTROLLER_MEMO_API_TOKEN", run_script)
         self.assertIn("runner_center_v2_enabled: true", config)
         self.assertIn(".runner_center_v2_enabled // true", run_script)
         self.assertIn(
@@ -1567,7 +1602,7 @@ class ControllerToolApiTests(unittest.TestCase):
                 self.assertEqual(tools["result"]["revision"], 2)
                 by_name = {item["name"]: item for item in tools["result"]["tools"]}
                 self.assertFalse(by_name["ledger_summary"]["enabled"])
-                self.assertEqual(len(by_name), 32)
+                self.assertEqual(len(by_name), 37)
 
                 unauthorized, _ = request("GET", "/internal/v1/capabilities")
                 self.assertEqual(unauthorized, 401)
@@ -1818,7 +1853,7 @@ class ToolRouterTests(unittest.TestCase):
             )
 
     def test_tool_metadata_is_complete_unique_and_member_allowlist_is_exact(self) -> None:
-        self.assertEqual(len(ALL_TOOL_NAMES), 32)
+        self.assertEqual(len(ALL_TOOL_NAMES), 37)
         self.assertEqual(set(TOOL_BY_NAME), set(ALL_TOOL_NAMES))
         self.assertEqual(
             MEMBER_READ_ONLY_TOOL_NAMES,

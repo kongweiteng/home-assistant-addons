@@ -7,6 +7,15 @@
 - 新增受独立 Relay bearer 保护的 `/internal/v2/runner-relay/install-bootstrap`。它只读检查 enrollment 状态并返回摘要固定 bootstrap，不消费 enrollment；真正领取仍只发生在首次 WSS enroll。
 - 保持 Runner 创建后 `pending`，必须由管理员在页面人工启用才可调度；普通 Codex job/Thread/MCP、装修账本、Operations 和 Remote Work v1 边界不变。
 
+## 0.4.3
+
+- 新增固定 `memo_create`、`memo_list`、`memo_update`、`memo_complete`、`memo_cancel` MCP 工具，Controller 通过 Node-RED 的 Basic Auth 与独立模块 Token 调用家庭备忘录 API，不直接访问 SQLite。
+- `memo_create` 的 `source=wechat` 和 `source_message_id` 由当前 Gateway 消息 ID 确定性派生，模型不能覆盖；同一微信消息重投由 Node-RED 唯一约束幂等返回原事项。
+- 家庭备忘录 URL 固定为内部 HTTP 主机名，用户名、密码和 Token 只保留在 Controller 主进程。成员只新增 `memo_list` 只读能力；修改、完成和取消必须先唯一确认候选，不能猜测。
+- app-server 启动后、任务 intake 开放前主动读取并校验 `mcpServerStatus/list`；家庭工具目录缺失或不完整时 fail closed，避免重启后的首条微信先推理、随后才懒加载 MCP 工具。
+- 澄清 Codex Goal 与独立自动化服务的能力边界：`memo_create + due_at` 由 Node-RED 持久化、调度和通知，不是当前 Turn 的后台等待；明确时间的“记一下/提醒我”必须调用家庭备忘录，不得误报不能提醒或改荐手机日历。
+- 修复旧持久 Thread 仍忽略家庭备忘录工具的现场问题：明确的“记一下/提醒我 + 可确定时间”、未完成/今天/逾期查询和 owner 完成命令改由 Controller 确定性调用 `memo_create`、`memo_list` 与唯一匹配后的 `memo_complete`，不再依赖模型自由选择；成员写权限、消息幂等、消歧、Node-RED 审计和提醒恢复语义不变。
+
 ## 0.4.2
 
 - 将 Controller 到 Relay 的内部 URL 契约固定为真实 HAOS Add-on hostname `http://local-codex-runner-relay:8098`，旧短主机名、其他端口、HTTPS 和附加路径全部 fail closed。

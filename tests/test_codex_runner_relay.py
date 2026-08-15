@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
 import unittest
 
 import aiohttp
@@ -27,8 +28,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.1.1")
-        self.assertIn('version: "0.1.1"', config)
+        self.assertEqual(__version__, "0.2.0")
+        self.assertIn('version: "0.2.0"', config)
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
         self.assertIn("local-codex-controller", run_script)
         self.assertNotIn("http://codex-controller:8102", config + run_script)
@@ -98,6 +99,7 @@ class FakeController:
         self.enrollments: list[dict] = []
         self.authentications: list[tuple[str, str]] = []
         self.events: list[tuple[str, dict, str]] = []
+        self.install_tickets: list[str] = []
 
     async def start(self) -> None:
         self.started = True
@@ -110,6 +112,27 @@ class FakeController:
         return {
             "runner": {"runner_id": payload["runner_id"], "admin_state": "pending"},
             "credential": {"credential_id": "CR-" + "C" * 24, "secret": CREDENTIAL},
+        }
+
+    async def install_bootstrap(self, ticket: str) -> dict:
+        self.install_tickets.append(ticket)
+        return {
+            "runner_id": RUNNER_ID,
+            "enrollment_token": ticket,
+            "relay_url": "wss://runner.example.com/v1/runner",
+            "os": "macos",
+            "arch": "aarch64",
+            "projects": ["renovation-hub"],
+            "asset_url": "https://downloads.example.com/codex-runner-0.3.0-macos-aarch64.tar.gz",
+            "asset_sha256": "a" * 64,
+            "asset_size": 123456,
+            "installer_url": "https://downloads.example.com/codex-runner-installer-2.sh",
+            "installer_sha256": "b" * 64,
+            "installer_size": 4567,
+            "runner_version": "0.3.0",
+            "codex_version": "0.146.0",
+            "python_version": "3.11.13",
+            "self_contained": True,
         }
 
     async def authenticate(self, runner_id: str, credential: str) -> dict:
@@ -153,7 +176,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {
                     "runner_id": RUNNER_ID,
                     "protocol_version": 2,
-                    "agent_version": "0.2.0",
+                    "agent_version": "0.3.0",
                 },
             }
         )
@@ -221,7 +244,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {
                     "runner_id": RUNNER_ID,
                     "protocol_version": 2,
-                    "agent_version": "0.2.0",
+                    "agent_version": "0.3.0",
                 },
             }
         )
@@ -247,6 +270,30 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(RUNNER_ID, body)
             self.assertNotIn(CREDENTIAL, body)
         await ws.close()
+
+    async def test_install_link_renders_no_store_digest_pinned_shell_without_logging_ticket(self) -> None:
+        async with self.session.get(self.server.make_url(f"/install/{TOKEN}")) as response:
+            body = await response.text()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.headers["Referrer-Policy"], "no-referrer")
+            self.assertTrue(response.headers["Content-Type"].startswith("text/x-shellscript"))
+        self.assertEqual(self.controller.install_tickets, [TOKEN])
+        self.assertIn("CODEX_RUNNER_ENROLLMENT_TOKEN", body)
+        self.assertIn(TOKEN, body)
+        self.assertIn("codex-runner-installer-2.sh", body)
+        self.assertIn("--asset-size 123456", body)
+        self.assertIn("--projects renovation-hub", body)
+        self.assertNotIn("runner_id=", body)
+        syntax = subprocess.run(
+            ["sh", "-n"], input=body, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+        async with self.session.get(self.server.make_url("/install/not-a-ticket")) as response:
+            invalid = await response.text()
+            self.assertEqual(response.status, 404)
+            self.assertNotIn("not-a-ticket", invalid)
 
 
 if __name__ == "__main__":

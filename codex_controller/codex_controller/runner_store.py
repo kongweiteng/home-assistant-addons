@@ -468,6 +468,40 @@ class RunnerStore:
             "credential": {"credential_id": credential_id, "secret": credential, "secret_available": True},
         }
 
+    def inspect_enrollment(self, token: str) -> dict[str, Any]:
+        """Resolve one pending enrollment for Relay bootstrap without consuming it."""
+
+        if not isinstance(token, str) or not 32 <= len(token) <= 512 or any(character.isspace() for character in token):
+            raise StoreError("enrollment_invalid", "Runner enrollment 无效", status=404)
+        now = self.clock()
+        with self._connect() as connection:
+            enrollment = connection.execute(
+                "SELECT * FROM runner_enrollments WHERE token_digest=? ORDER BY created_at DESC LIMIT 1",
+                (_secret_digest(token),),
+            ).fetchone()
+            if enrollment is None:
+                raise StoreError("enrollment_invalid", "Runner enrollment 无效", status=404)
+            runner = connection.execute(
+                "SELECT * FROM runner_registry WHERE runner_id=?", (enrollment["runner_id"],)
+            ).fetchone()
+        assert runner is not None
+        if enrollment["claimed_at"] is not None:
+            raise StoreError("enrollment_replayed", "Runner enrollment 已领取", status=409)
+        if enrollment["revoked_at"] is not None:
+            raise StoreError("enrollment_revoked", "Runner enrollment 已撤销", status=409)
+        if _parse_time(enrollment["expires_at"]) <= _parse_time(now):
+            raise StoreError("enrollment_expired", "Runner enrollment 已过期", status=409)
+        if runner["admin_state"] not in {"pending", "disabled"} or runner["archived_at"] is not None:
+            raise StoreError("enrollment_state_conflict", "Runner 当前不可安装", status=409)
+        return {
+            "runner_id": runner["runner_id"],
+            "os": runner["os"],
+            "arch": runner["arch"],
+            "allowed_projects": json.loads(runner["allowed_projects_json"]),
+            "expires_at": enrollment["expires_at"],
+            "token": token,
+        }
+
     def list_runners(self, *, include_archived: bool = False) -> dict[str, Any]:
         now = self.clock()
         where = "" if include_archived else "WHERE archived_at IS NULL"

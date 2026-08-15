@@ -16,9 +16,10 @@ CONTROLLER_PORT = 8102
 
 
 class ControllerRelayError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, *, status: int = 500) -> None:
         super().__init__(message)
         self.code = code
+        self.status = status
 
 
 def validate_controller_base_url(value: str) -> str:
@@ -69,6 +70,12 @@ class ControllerClient:
     async def enroll(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._post("/internal/v2/runner-relay/enroll", payload)
 
+    async def install_bootstrap(self, ticket: str) -> dict[str, Any]:
+        return await self._post(
+            "/internal/v2/runner-relay/install-bootstrap",
+            {"ticket": ticket},
+        )
+
     async def authenticate(self, runner_id: str, credential: str) -> dict[str, Any]:
         return await self._post(
             "/internal/v2/runner-relay/authenticate",
@@ -117,9 +124,12 @@ class ControllerClient:
                     raise ControllerRelayError(
                         code if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", code) else "controller_rejected",
                         "Controller 拒绝 Runner Relay 请求",
+                        status=response.status,
                     )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            raise ControllerRelayError("controller_unavailable", "Controller 当前不可用") from exc
+            raise ControllerRelayError(
+                "controller_unavailable", "Controller 当前不可用", status=503
+            ) from exc
         if not isinstance(document, dict):
             raise ControllerRelayError("controller_invalid_response", "Controller 响应结构无效")
         result = document.get("result") if document.get("version") == 1 else document

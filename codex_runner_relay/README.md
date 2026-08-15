@@ -4,4 +4,4 @@
 
 Relay 不拥有 Runner Registry、凭据摘要、任务 lease、Git、Codex、项目策略或生产部署权限。它没有 Ingress、host network、privileged、Docker socket、主机目录挂载或宿主端口默认映射。
 
-`0.1.1` 将 Relay 到 Controller 的内部地址固定为真实 HAOS hostname `http://local-codex-controller:8102`。公网 hostname、TLS、NPM、DNS、HAOS 安装和 Runner 连接仍必须按受控发布流程分别验证。
+`0.2.0` 在既有 WSS 数据面之外增加受限 `/install/<ticket>`。Relay 使用独立内部 bearer 向 Controller 只读核验短期 ticket，返回摘要与大小固定的自包含 Runner `0.3.0` 安装脚本；不保存 ticket、不消费 enrollment、不回显失败 ticket，也不拥有 Runner Registry 或安装制品。

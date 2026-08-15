@@ -303,6 +303,7 @@ async function revokeEnrollment(runner) {
       installationState.revision = result.runner.revision;
       installationState.state = 'revoked';
       installationState.command = '';
+      installationState.link = '';
       renderInstallationState();
       setFeedback(q('runnerInstallFeedback'), '注册已撤销，旧命令不可再使用。', 'success');
     }
@@ -461,6 +462,8 @@ function renderInstallationState() {
     : 0;
   if (installationState.state === 'pending' && remaining === 0) {
     installationState.state = 'expired';
+    installationState.command = '';
+    installationState.link = '';
   }
   const runner = currentRunner(installationState.runnerId);
   const unavailable = installationState.state !== 'pending';
@@ -476,7 +479,16 @@ function renderInstallationState() {
         ? 'Runner 已领取长期凭据，一次性安装命令已从页面内存清除。'
         : '该安装命令已过期，请重新生成。'
   );
+  q('runnerInstallLink').textContent = installationState.link || (
+    installationState.state === 'revoked'
+      ? '该安装链接已撤销。'
+      : installationState.state === 'claimed'
+        ? 'Runner 已完成 enrollment，一次性链接已从页面内存清除。'
+        : '该安装链接已过期，请重新生成。'
+  );
   q('copyRunnerCommand').disabled = unavailable || !installationState.command;
+  q('copyRunnerLink').disabled = unavailable || !installationState.link;
+  q('openRunnerLink').disabled = unavailable || !installationState.link;
   q('revokeRunnerEnrollment').disabled = unavailable;
   q('regenerateRunnerEnrollment').disabled = installationState.state === 'claimed'
     || Boolean(runner && !['pending', 'disabled'].includes(runner.admin_state));
@@ -485,11 +497,12 @@ function renderInstallationState() {
 function showInstallation(result) {
   const installation = result?.installation;
   const runner = result?.runner;
-  if (!installation?.command || !runner?.runner_id || !installation.expires_at) return false;
+  if (!installation?.link || !installation?.command || !runner?.runner_id || !installation.expires_at) return false;
   if (installationTimer !== null) window.clearInterval(installationTimer);
   installationState = {
     runnerId: runner.runner_id,
     revision: runner.revision,
+    link: installation.link,
     command: installation.command,
     expiresAt: installation.expires_at,
     runnerVersion: installation.runner_version,
@@ -500,7 +513,7 @@ function showInstallation(result) {
   q('runnerSecret').classList.remove('hidden');
   q('runnerInstallPlatform').textContent = `${runnerPlatformText(installation.platform)} / ${installation.arch}`;
   q('runnerInstallVersion').textContent = installation.runner_version;
-  setFeedback(q('runnerInstallFeedback'), '安装命令只保留在当前页面内存中。');
+  setFeedback(q('runnerInstallFeedback'), '安装链接和终端命令只保留在当前页面内存中。');
   renderInstallationState();
   installationTimer = window.setInterval(renderInstallationState, 1000);
   q('runnerSecret').scrollIntoView({behavior: 'smooth', block: 'nearest'});
@@ -511,6 +524,7 @@ function closeInstallation() {
   if (installationTimer !== null) window.clearInterval(installationTimer);
   installationTimer = null;
   installationState = null;
+  q('runnerInstallLink').textContent = '';
   q('runnerSecretValue').textContent = '';
   q('runnerSecret').classList.add('hidden');
   q('runnerSecret').classList.remove('expired');
@@ -523,6 +537,7 @@ function syncInstallationFromRunnerDoc() {
   if (!runner) {
     installationState.state = 'revoked';
     installationState.command = '';
+    installationState.link = '';
     renderInstallationState();
     return;
   }
@@ -530,7 +545,10 @@ function syncInstallationFromRunnerDoc() {
   const state = runner.enrollment?.state;
   if (state && state !== installationState.state) {
     installationState.state = state;
-    if (['claimed', 'revoked'].includes(state)) installationState.command = '';
+    if (['claimed', 'revoked'].includes(state)) {
+      installationState.command = '';
+      installationState.link = '';
+    }
   }
   renderInstallationState();
 }
@@ -683,6 +701,25 @@ q('copyRunnerCommand').onclick = async () => {
   } catch (error) {
     setFeedback(q('runnerInstallFeedback'), error.message, 'error');
   }
+};
+q('copyRunnerLink').onclick = async () => {
+  if (!installationState || installationState.state !== 'pending') return;
+  try {
+    await copyText(installationState.link);
+    setFeedback(q('runnerInstallFeedback'), '一次性安装链接已复制。', 'success');
+  } catch (error) {
+    setFeedback(q('runnerInstallFeedback'), error.message, 'error');
+  }
+};
+q('openRunnerLink').onclick = () => {
+  if (!installationState || installationState.state !== 'pending') return;
+  const opened = window.open(installationState.link, '_blank', 'noopener,noreferrer');
+  if (opened) opened.opener = null;
+  setFeedback(
+    q('runnerInstallFeedback'),
+    opened ? '已在新标签页打开安装脚本。' : '浏览器阻止了新窗口，请复制链接后打开。',
+    opened ? 'success' : 'error',
+  );
 };
 q('revokeRunnerEnrollment').onclick = () => {
   const runner = installationState ? currentRunner(installationState.runnerId) : null;

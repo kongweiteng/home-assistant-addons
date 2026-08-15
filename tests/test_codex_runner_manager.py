@@ -29,11 +29,11 @@ class Installer:
 
     def status(self) -> dict:
         if self.error is not None:
-            return {"ready": False, "error_code": self.error.code, "runner_version": "0.2.0"}
+            return {"ready": False, "error_code": self.error.code, "runner_version": "0.3.0"}
         return {
             "ready": True,
             "error_code": None,
-            "runner_version": "0.2.0",
+            "runner_version": "0.3.0",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
         }
@@ -56,17 +56,34 @@ class Installer:
     ) -> dict:
         self.assert_manifest(manifest)
         self.tokens[runner_id] = enrollment_token
+        link = f"https://runner.example.com/install/{enrollment_token}"
         return {
-            "command": (
-                f"CODEX_RUNNER_ENROLLMENT_TOKEN={enrollment_token} install-runner "
-                f"--runner-id {runner_id} --relay-url wss://runner.example.com/connect "
-                f"--platform {os_name} --arch {arch} --projects {','.join(projects)}"
-            ),
-            "runner_version": "0.2.0",
+            "link": link,
+            "command": f"curl -fsSL {link} -o /tmp/install-runner && sh /tmp/install-runner",
+            "runner_version": "0.3.0",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "platform": os_name,
             "arch": arch,
+            "self_contained": True,
+        }
+
+    def bootstrap(
+        self,
+        *,
+        runner_id: str,
+        enrollment_token: str,
+        os_name: str,
+        arch: str,
+        projects: list[str],
+    ) -> dict:
+        return {
+            "runner_id": runner_id,
+            "enrollment_token": enrollment_token,
+            "os": os_name,
+            "arch": arch,
+            "projects": projects,
+            "runner_version": "0.3.0",
         }
 
     @staticmethod
@@ -92,7 +109,7 @@ def redeem_payload(runner_id: str, token: str) -> dict:
         "token": token,
         "runner_id": runner_id,
         "protocol_version": 2,
-        "agent_version": "0.2.0",
+        "agent_version": "0.3.0",
         "codex_version": "0.146.0",
         "os": "linux",
         "arch": "amd64",
@@ -122,10 +139,14 @@ class RunnerManagerTests(unittest.TestCase):
         self.assertFalse(result["enrollment"]["secret_available"])
         self.assertNotIn("token", result["enrollment"])
         self.assertTrue(result["installation"]["command_available"])
-        self.assertIn(token, result["installation"]["command"])
+        self.assertIn(token, result["installation"]["link"])
+        self.assertIn(result["installation"]["link"], result["installation"]["command"])
         self.assertEqual(result["installation"]["expires_at"], result["enrollment"]["expires_at"])
         self.assertNotIn(token.encode(), self.path.read_bytes())
         self.assertEqual(self.service.status()["installer"]["ready"], True)
+        bootstrap = self.service.install_bootstrap({"ticket": token})
+        self.assertEqual(bootstrap["runner_id"], runner_id)
+        self.assertEqual(bootstrap["enrollment_token"], token)
 
         replay = self.service.create_enrollment(enrollment_payload("manager-create-0001"))
         self.assertNotIn("installation", replay)
@@ -168,7 +189,7 @@ class RunnerManagerTests(unittest.TestCase):
         regenerated = self.service.regenerate_enrollment(runner_id, request)
         new_token = self.installer.tokens[runner_id]
         self.assertNotEqual(old_token, new_token)
-        self.assertIn(new_token, regenerated["installation"]["command"])
+        self.assertIn(new_token, regenerated["installation"]["link"])
         self.assertEqual(regenerated["runner"]["enrollment"]["state"], "pending")
 
         replay = self.service.regenerate_enrollment(runner_id, request)

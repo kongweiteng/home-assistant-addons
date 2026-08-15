@@ -19,30 +19,36 @@ def private_resolver(_host: str, port: int, **_kwargs: object) -> list[tuple]:
 
 def manifest_document() -> dict:
     return {
-        "version": 1,
-        "runner_version": "0.2.0",
+        "version": 2,
+        "runner_version": "0.3.0",
         "codex_version": "0.146.0",
         "python_version": "3.11.13",
+        "self_contained": True,
         "installer": {
             "url": "https://downloads.example.com/codex-runner/install.sh",
             "sha256": "1" * 64,
+            "size": 1234,
         },
         "assets": {
             "linux-amd64": {
                 "url": "https://downloads.example.com/codex-runner/linux-amd64.tar.gz",
                 "sha256": "2" * 64,
+                "size": 2001,
             },
             "linux-aarch64": {
                 "url": "https://downloads.example.com/codex-runner/linux-aarch64.tar.gz",
                 "sha256": "3" * 64,
+                "size": 2002,
             },
             "macos-amd64": {
                 "url": "https://downloads.example.com/codex-runner/macos-amd64.tar.gz",
                 "sha256": "4" * 64,
+                "size": 2003,
             },
             "macos-aarch64": {
                 "url": "https://downloads.example.com/codex-runner/macos-aarch64.tar.gz",
                 "sha256": "5" * 64,
+                "size": 2004,
             },
         },
     }
@@ -115,12 +121,13 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             manifest=manifest,
         )
         self.assertNotIn("\n", linux["command"])
-        self.assertIn("CODEX_RUNNER_ENROLLMENT_TOKEN", linux["command"])
-        self.assertIn("sha256sum -c -", linux["command"])
-        self.assertIn("sudo --preserve-env=CODEX_RUNNER_ENROLLMENT_TOKEN", linux["command"])
-        self.assertIn("--relay-url wss://runner.example.com/v1/connect", linux["command"])
-        self.assertIn("--asset-sha256 " + "2" * 64, linux["command"])
-        self.assertEqual(linux["runner_version"], "0.2.0")
+        self.assertEqual(linux["link"], "https://runner.example.com/install/" + "ENROLL-" + "B" * 32)
+        self.assertIn(linux["link"], linux["command"])
+        self.assertIn("sudo sh", linux["command"])
+        self.assertNotIn("CODEX_RUNNER_ENROLLMENT_TOKEN", linux["command"])
+        self.assertNotIn("--asset-sha256", linux["command"])
+        self.assertEqual(linux["runner_version"], "0.3.0")
+        self.assertTrue(linux["self_contained"])
 
         macos = catalog.command(
             runner_id="RN-" + "C" * 20,
@@ -130,9 +137,19 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             projects=["renovation-hub"],
             manifest=manifest,
         )
-        self.assertIn("shasum -a 256 -c -", macos["command"])
-        self.assertNotIn("sudo --preserve-env", macos["command"])
-        self.assertIn("--asset-sha256 " + "5" * 64, macos["command"])
+        self.assertEqual(macos["link"], "https://runner.example.com/install/" + "ENROLL-" + "D" * 32)
+        self.assertNotIn("sudo sh", macos["command"])
+
+        bootstrap = catalog.bootstrap(
+            runner_id="RN-" + "C" * 20,
+            enrollment_token="ENROLL-" + "D" * 32,
+            os_name="macos",
+            arch="aarch64",
+            projects=["renovation-hub"],
+        )
+        self.assertEqual(bootstrap["asset_sha256"], "5" * 64)
+        self.assertEqual(bootstrap["asset_size"], 2004)
+        self.assertEqual(bootstrap["installer_sha256"], "1" * 64)
 
     def test_manifest_digest_mismatch_and_version_drift_fail_closed(self) -> None:
         body = manifest_bytes()
@@ -142,7 +159,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             {
                 "ready": False,
                 "error_code": "installer_manifest_digest_mismatch",
-                "runner_version": "0.2.0",
+                "runner_version": "0.3.0",
             },
         )
 

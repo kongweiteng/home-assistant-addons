@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Protocol
 
-from .runner_relay import RunnerInstallerCatalog
+from .runner_relay import RUNNER_VERSION, RunnerInstallerCatalog
 from .runner_store import RunnerStore
 from .store import StoreError
 
@@ -57,14 +57,14 @@ class RunnerManagerService:
                 "installer": {
                     "ready": False,
                     "error_code": "runner_manager_disabled",
-                    "runner_version": "0.2.0",
+                    "runner_version": RUNNER_VERSION,
                 },
                 "last_error": None,
                 "summary": {"total": 0, "enabled": 0, "online": 0, "busy": 0, "recovery_required": 0},
             }
         document = self.store.list_runners()
         installer_status = (
-            {"ready": False, "error_code": "installer_not_configured", "runner_version": "0.2.0"}
+            {"ready": False, "error_code": "installer_not_configured", "runner_version": RUNNER_VERSION}
             if self.installer is None
             else self.installer.status()
         )
@@ -170,6 +170,21 @@ class RunnerManagerService:
     def redeem_enrollment(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
         return self.store.redeem_enrollment(payload)
+
+    def install_bootstrap(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Resolve one short-lived install ticket without consuming enrollment."""
+
+        self._require_enabled()
+        if set(payload) != {"ticket"}:
+            raise StoreError("runner_payload_invalid", "Runner 安装票据字段无效", status=404)
+        enrollment = self.store.inspect_enrollment(payload.get("ticket"))
+        return self._require_installer().bootstrap(
+            runner_id=str(enrollment["runner_id"]),
+            enrollment_token=str(enrollment["token"]),
+            os_name=str(enrollment["os"]),
+            arch=str(enrollment["arch"]),
+            projects=list(enrollment["allowed_projects"]),
+        )
 
     def authenticate_runner(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()

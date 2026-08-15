@@ -210,7 +210,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.4.2",
+            "version": "0.5.0",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -253,7 +253,7 @@ class ControllerService:
                     "installer": {
                         "ready": False,
                         "error_code": "runner_manager_unavailable",
-                        "runner_version": "0.2.0",
+                        "runner_version": "0.3.0",
                     },
                     "last_error": None,
                     "summary": {

@@ -12,13 +12,13 @@ import socket
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from .store import StoreError
 
 
-RUNNER_VERSION = "0.2.0"
+RUNNER_VERSION = "0.3.0"
 CODEX_VERSION = "0.146.0"
 PYTHON_VERSION = "3.11.13"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -164,7 +164,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.4.2",
+                "User-Agent": "codex-controller/0.5.0",
             },
             method="POST",
         )
@@ -179,7 +179,7 @@ class RelayPublisher:
 
 
 class RunnerInstallerCatalog:
-    """Fetches one digest-pinned manifest and renders a one-time install command."""
+    """Fetches one digest-pinned manifest and renders a one-time install link."""
 
     def __init__(
         self,
@@ -228,7 +228,7 @@ class RunnerInstallerCatalog:
             return self._cached
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.4.2"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.0"},
             method="GET",
         )
         try:
@@ -281,60 +281,70 @@ class RunnerInstallerCatalog:
             raise StoreError("runner_payload_invalid", "Runner enrollment 无效")
         if not projects or any(not PROJECT_RE.fullmatch(value) for value in projects):
             raise StoreError("runner_payload_invalid", "Runner 项目白名单无效")
+        parsed_relay = urlsplit(self.relay_url)
+        link = urlunsplit(("https", parsed_relay.netloc, f"/install/{enrollment_token}", "", ""))
         quoted = shlex.quote
-        checksum = (
-            "printf '%s  %s\\n' "
-            + quoted(installer["sha256"])
-            + ' "$installer_tmp" | sha256sum -c -'
-            if os_name == "linux"
-            else "printf '%s  %s\\n' "
-            + quoted(installer["sha256"])
-            + ' "$installer_tmp" | shasum -a 256 -c -'
-        )
-        execute = "sh \"$installer_tmp\""
+        execute = 'sh "$installer_tmp"'
         if os_name == "linux":
             execute = (
                 "if [ \"$(id -u)\" -eq 0 ]; then sh \"$installer_tmp\"; "
-                "else sudo --preserve-env=CODEX_RUNNER_ENROLLMENT_TOKEN sh \"$installer_tmp\"; fi"
+                "else sudo sh \"$installer_tmp\"; fi"
             )
-        arguments = [
-            "--relay-url",
-            self.relay_url,
-            "--runner-id",
-            runner_id,
-            "--platform",
-            os_name,
-            "--arch",
-            arch,
-            "--asset-url",
-            asset["url"],
-            "--asset-sha256",
-            asset["sha256"],
-            "--projects",
-            ",".join(projects),
-        ]
         command = (
-            "export CODEX_RUNNER_ENROLLMENT_TOKEN="
-            + quoted(enrollment_token)
-            + "; installer_tmp=$(mktemp \"${TMPDIR:-/tmp}/codex-runner-install.XXXXXX\"); "
-            + "trap 'rm -f \"$installer_tmp\"; unset CODEX_RUNNER_ENROLLMENT_TOKEN' EXIT; "
+            "installer_tmp=$(mktemp \"${TMPDIR:-/tmp}/codex-runner-install.XXXXXX\"); "
+            + "trap 'rm -f \"$installer_tmp\"' EXIT; "
             + "curl -fsSL --proto '=https' --tlsv1.2 "
-            + quoted(installer["url"])
-            + ' -o "$installer_tmp"; '
-            + checksum
-            + "; "
-            + execute.replace(
-                'sh "$installer_tmp"',
-                'sh "$installer_tmp" ' + " ".join(quoted(value) for value in arguments),
-            )
+            + quoted(link)
+            + ' -o "$installer_tmp"; chmod 700 "$installer_tmp"; '
+            + execute
         )
         return {
+            "link": link,
             "command": command,
             "runner_version": manifest["runner_version"],
             "codex_version": manifest["codex_version"],
             "python_version": manifest["python_version"],
             "platform": os_name,
             "arch": arch,
+            "self_contained": manifest["self_contained"],
+        }
+
+    def bootstrap(
+        self,
+        *,
+        runner_id: str,
+        enrollment_token: str,
+        os_name: str,
+        arch: str,
+        projects: list[str],
+    ) -> dict[str, Any]:
+        manifest = self.manifest()
+        platform_key = f"{os_name}-{arch}"
+        if platform_key not in PLATFORM_KEYS or platform_key not in manifest["assets"]:
+            raise StoreError("runner_platform_unsupported", "Runner 安装平台不受支持", status=409)
+        if not RUNNER_ID_RE.fullmatch(runner_id) or not isinstance(enrollment_token, str):
+            raise StoreError("runner_payload_invalid", "Runner 安装材料无效")
+        if not projects or any(not PROJECT_RE.fullmatch(value) for value in projects):
+            raise StoreError("runner_payload_invalid", "Runner 项目白名单无效")
+        asset = manifest["assets"][platform_key]
+        installer = manifest["installer"]
+        return {
+            "runner_id": runner_id,
+            "enrollment_token": enrollment_token,
+            "relay_url": self.relay_url,
+            "os": os_name,
+            "arch": arch,
+            "projects": projects,
+            "asset_url": asset["url"],
+            "asset_sha256": asset["sha256"],
+            "asset_size": asset["size"],
+            "installer_url": installer["url"],
+            "installer_sha256": installer["sha256"],
+            "installer_size": installer["size"],
+            "runner_version": manifest["runner_version"],
+            "codex_version": manifest["codex_version"],
+            "python_version": manifest["python_version"],
+            "self_contained": manifest["self_contained"],
         }
 
     def _validate_manifest(self, value: Any) -> dict[str, Any]:
@@ -343,15 +353,17 @@ class RunnerInstallerCatalog:
             "runner_version",
             "codex_version",
             "python_version",
+            "self_contained",
             "installer",
             "assets",
         }:
             raise StoreError("installer_manifest_invalid", "Runner 安装制品 manifest 字段无效", status=503)
         if (
-            value.get("version") != 1
+            value.get("version") != 2
             or value.get("runner_version") != RUNNER_VERSION
             or value.get("codex_version") != CODEX_VERSION
             or value.get("python_version") != PYTHON_VERSION
+            or value.get("self_contained") is not True
         ):
             raise StoreError("installer_manifest_version_mismatch", "Runner 安装制品版本不匹配", status=503)
         installer = self._validate_asset(value.get("installer"))
@@ -361,17 +373,20 @@ class RunnerInstallerCatalog:
         normalized_assets = {key: self._validate_asset(assets[key]) for key in sorted(assets)}
         return {**value, "installer": installer, "assets": normalized_assets}
 
-    def _validate_asset(self, value: Any) -> dict[str, str]:
-        if not isinstance(value, dict) or set(value) != {"url", "sha256"}:
+    def _validate_asset(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != {"url", "sha256", "size"}:
             raise StoreError("installer_manifest_invalid", "Runner 安装制品条目无效", status=503)
         digest = value.get("sha256")
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise StoreError("installer_manifest_invalid", "Runner 安装制品摘要无效", status=503)
+        size = value.get("size")
+        if type(size) is not int or not 1 <= size <= 1024 * 1024 * 1024:
+            raise StoreError("installer_manifest_invalid", "Runner 安装制品大小无效", status=503)
         try:
             url = validate_public_url(str(value.get("url")), scheme="https", resolver=self._resolver)
         except ValueError as exc:
             raise StoreError("installer_manifest_invalid", "Runner 安装制品 URL 无效", status=503) from exc
-        return {"url": url, "sha256": digest}
+        return {"url": url, "sha256": digest, "size": size}
 
 
 __all__ = [

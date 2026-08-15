@@ -13,6 +13,7 @@ from aiohttp import WSMsgType, web
 
 from . import __version__
 from .controller import ControllerClient, ControllerRelayError
+from .install import InstallRenderError, TICKET_RE, render_install_script
 from .protocol import (
     RelayProtocolError,
     json_size,
@@ -186,6 +187,31 @@ class RelayHub:
             }
         )
 
+    async def install(self, request: web.Request) -> web.Response:
+        ticket = request.match_info.get("ticket", "")
+        if not TICKET_RE.fullmatch(ticket):
+            raise web.HTTPNotFound(text="install_link_unavailable")
+        try:
+            bootstrap = await self.controller.install_bootstrap(ticket)
+            body = render_install_script(bootstrap)
+        except ControllerRelayError as exc:
+            if exc.code == "controller_unavailable" or exc.status >= 500:
+                raise web.HTTPServiceUnavailable(text="install_service_unavailable") from exc
+            raise web.HTTPNotFound(text="install_link_unavailable") from exc
+        except InstallRenderError as exc:
+            raise web.HTTPServiceUnavailable(text="install_service_unavailable") from exc
+        return web.Response(
+            text=body,
+            content_type="text/x-shellscript",
+            charset="utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     async def _reserve_connection(self) -> None:
         async with self._lock:
             if len(self.connections) + self._pending_connections >= self.max_connections:
@@ -253,6 +279,7 @@ def create_app(hub: RelayHub) -> web.Application:
     app = web.Application(client_max_size=hub.max_message_bytes)
     app.router.add_get("/healthz", hub.health)
     app.router.add_get("/v1/runner", hub.websocket)
+    app.router.add_get("/install/{ticket}", hub.install)
     app.router.add_post("/internal/v1/runners/{runner_id}/{kind}", hub.publish)
 
     async def controller_context(_app: web.Application):

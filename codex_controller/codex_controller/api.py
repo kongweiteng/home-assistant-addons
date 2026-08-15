@@ -61,7 +61,7 @@ def create_server(
             }
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.4.2"
+        server_version = "CodexController/0.5.0"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -182,6 +182,7 @@ def create_server(
             if path in {
                 "/internal/v2/runner-relay/enroll",
                 "/internal/v2/runner-relay/authenticate",
+                "/internal/v2/runner-relay/install-bootstrap",
             } or RUNNER_RELAY_EVENT_RE.fullmatch(path):
                 if not self._runner_relay_authorized():
                     return
@@ -196,6 +197,9 @@ def create_server(
                     return
                 if path == "/internal/v2/runner-relay/authenticate":
                     self._call(lambda: service.runner_manager.authenticate_runner(payload))
+                    return
+                if path == "/internal/v2/runner-relay/install-bootstrap":
+                    self._call(lambda: service.runner_manager.install_bootstrap(payload))
                     return
                 event_match = RUNNER_RELAY_EVENT_RE.fullmatch(path)
                 assert event_match is not None
@@ -431,7 +435,7 @@ DASHBOARD_HTML = """<!doctype html>
 <div id="runnerInstallerMissing" class="card notice"><strong>安装制品尚未就绪</strong><p id="runnerInstallerHelp" class="muted">必须先配置完整、摘要匹配的公开 installer manifest 和 WSS Relay URL；否则不会创建无法使用的一次性 enrollment。</p></div>
 <div class="grid"><div class="card">Runner<span class="metric" id="runnerTotal">0</span></div><div class="card">已启用<span class="metric" id="runnerEnabled">0</span></div><div class="card">在线<span class="metric" id="runnerOnline">0</span></div><div class="card">忙碌<span class="metric" id="runnerBusy">0</span></div><div class="card">需恢复<span class="metric" id="runnerRecovery">0</span></div></div>
 <h3>新增 Runner</h3><form id="runnerForm" class="card form-grid"><label>名称<input id="runnerName" maxlength="80" required placeholder="常驻 Linux Runner"></label><label>平台<select id="runnerOs"><option value="linux">Linux</option><option value="macos">macOS</option></select></label><label>架构<select id="runnerArch"><option value="amd64">amd64</option><option value="aarch64">aarch64</option></select></label><label>项目白名单<input id="runnerProjects" required value="renovation-hub"></label><label>标签<input id="runnerLabels" value="always-on,tests"></label><button id="createRunner" type="submit" disabled>生成安装命令</button></form>
-<div id="runnerSecret" class="card secret-box hidden"><strong>Runner 一键安装命令</strong><p class="muted">命令包含 15 分钟有效的一次性 enrollment，只显示在当前页面内存中。请在目标主机的安全终端执行；页面刷新后无法恢复。</p><div class="installation-meta"><span>平台 <strong id="runnerInstallPlatform">-</strong></span><span>Agent <strong id="runnerInstallVersion">-</strong></span><span>注册 <strong id="runnerInstallStatus">待领取</strong></span><span>剩余 <strong id="runnerInstallCountdown">--:--</strong></span></div><pre id="runnerSecretValue" class="install-command"></pre><div class="installation-actions"><button id="copyRunnerCommand" type="button">复制命令</button><button id="revokeRunnerEnrollment" type="button" class="danger">撤销注册</button><button id="regenerateRunnerEnrollment" type="button" class="secondary">重新生成</button><button id="closeRunnerSecret" type="button" class="secondary">关闭</button><span id="runnerInstallFeedback" class="muted"></span></div></div>
+<div id="runnerSecret" class="card secret-box hidden"><strong>Runner 一次性直接安装</strong><p class="muted">安装链接 15 分钟有效，只保留在当前页面内存。安装包已内置固定 Python、Runner 与 Codex；目标机仍需已有 Git 工作区，macOS 首次运行可能显示系统信任提示。</p><div class="installation-meta"><span>平台 <strong id="runnerInstallPlatform">-</strong></span><span>Agent <strong id="runnerInstallVersion">-</strong></span><span>注册 <strong id="runnerInstallStatus">待领取</strong></span><span>剩余 <strong id="runnerInstallCountdown">--:--</strong></span></div><p class="muted">一次性 HTTPS 安装链接</p><pre id="runnerInstallLink" class="install-command"></pre><p class="muted">终端安装命令</p><pre id="runnerSecretValue" class="install-command"></pre><div class="installation-actions"><button id="copyRunnerLink" type="button">复制安装链接</button><button id="openRunnerLink" type="button" class="secondary">打开安装链接</button><button id="copyRunnerCommand" type="button">复制终端命令</button><button id="revokeRunnerEnrollment" type="button" class="danger">撤销注册</button><button id="regenerateRunnerEnrollment" type="button" class="secondary">重新生成</button><button id="closeRunnerSecret" type="button" class="secondary">关闭</button><span id="runnerInstallFeedback" class="muted"></span></div></div>
 <div id="runnerCredentialSecret" class="card secret-box hidden"><strong>Runner 新凭据</strong><p class="muted">凭据只显示一次，用于既有 Runner 的受控凭据轮换；关闭或刷新页面后无法恢复。</p><pre id="runnerCredentialValue" class="install-command"></pre><div class="installation-actions"><button id="copyRunnerCredential" type="button">复制凭据</button><button id="closeRunnerCredential" type="button" class="secondary">关闭</button><span id="runnerCredentialFeedback" class="muted"></span></div></div>
 <div class="toolbar"><label>管理状态 <select id="runnerStateFilter"><option value="all">全部</option><option value="pending">待启用</option><option value="enabled">已启用</option><option value="draining">排空中</option><option value="disabled">已停用</option></select></label><label>平台 <select id="runnerPlatformFilter"><option value="all">全部</option><option value="linux">Linux</option><option value="macos">macOS</option></select></label><button id="reloadRunners">刷新 Runner</button><span id="runnerFeedback" class="muted"></span></div>
 <div class="table-wrap"><table><thead><tr><th>Runner</th><th>平台</th><th>状态</th><th>项目 / 标签</th><th>当前任务 / 心跳</th><th>操作</th></tr></thead><tbody id="runnerRows"></tbody></table></div>

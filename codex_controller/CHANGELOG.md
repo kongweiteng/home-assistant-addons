@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.5.0
+
+- Runner Center 安装目录升级为 manifest v2 和自包含 Runner `0.3.0`，固定 Python `3.11.13`、Codex `0.146.0`、四平台文件大小与 SHA-256；不再依赖目标机 Python、pip、venv、pyenv 或 Homebrew。
+- 页面同时提供短期一次性 HTTPS 安装链接、打开链接和终端命令；过期、领取或撤销后立即从页面内存清除，刷新或幂等重放不恢复秘密。
+- 新增受独立 Relay bearer 保护的 `/internal/v2/runner-relay/install-bootstrap`。它只读检查 enrollment 状态并返回摘要固定 bootstrap，不消费 enrollment；真正领取仍只发生在首次 WSS enroll。
+- 保持 Runner 创建后 `pending`，必须由管理员在页面人工启用才可调度；普通 Codex job/Thread/MCP、装修账本、Operations 和 Remote Work v1 边界不变。
+
 ## 0.4.2
 
 - 将 Controller 到 Relay 的内部 URL 契约固定为真实 HAOS Add-on hostname `http://local-codex-runner-relay:8098`，旧短主机名、其他端口、HTTPS 和附加路径全部 fail closed。

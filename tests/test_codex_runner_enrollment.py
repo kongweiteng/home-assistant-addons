@@ -149,7 +149,7 @@ class RunnerEnrollmentTests(unittest.TestCase):
             "token": created["enrollment"]["token"],
             "runner_id": created["runner"]["runner_id"],
             "protocol_version": 2,
-            "agent_version": "0.3.1",
+            "agent_version": "0.3.2",
             "codex_version": "0.146.0",
             "os": "linux",
             "arch": "amd64",

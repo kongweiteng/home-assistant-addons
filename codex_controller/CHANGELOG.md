@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.3
+
+- 固定 Runner 制品升级为 `0.3.2`。WSS 客户端改用可恢复超时的原始 socket 缓冲，单次正常 receive timeout 后继续读取同一连接，不再因 `cannot read from timed out object` 反复断线。
+- 页面、installer manifest 校验和状态摘要同步固定新 Runner 版本；Registry、lease、审批和服务端权限边界不变。
+
 ## 0.5.2
 
 - Controller 识别 Relay 明确返回的 `runner_offline` 为“确定性未送达”，原子释放尚未运行的 lease、恢复 `waiting_runner`，并在下一次真实 heartbeat 后以新 assignment epoch 重新调度。

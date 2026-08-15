@@ -20,7 +20,7 @@ def private_resolver(_host: str, port: int, **_kwargs: object) -> list[tuple]:
 def manifest_document() -> dict:
     return {
         "version": 2,
-        "runner_version": "0.3.1",
+        "runner_version": "0.3.2",
         "codex_version": "0.146.0",
         "python_version": "3.11.13",
         "self_contained": True,
@@ -126,7 +126,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
         self.assertIn("sudo sh", linux["command"])
         self.assertNotIn("CODEX_RUNNER_ENROLLMENT_TOKEN", linux["command"])
         self.assertNotIn("--asset-sha256", linux["command"])
-        self.assertEqual(linux["runner_version"], "0.3.1")
+        self.assertEqual(linux["runner_version"], "0.3.2")
         self.assertTrue(linux["self_contained"])
 
         macos = catalog.command(
@@ -163,7 +163,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             {
                 "ready": False,
                 "error_code": "installer_manifest_digest_mismatch",
-                "runner_version": "0.3.1",
+                "runner_version": "0.3.2",
             },
         )
 

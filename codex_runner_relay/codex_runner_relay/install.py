@@ -79,7 +79,7 @@ def render_install_script(value: dict[str, Any]) -> str:
     installer_size = _size(value["installer_size"], "installer size")
     asset_size = _size(value["asset_size"], "asset size")
     if (
-        value["runner_version"] != "0.3.1"
+        value["runner_version"] != "0.3.2"
         or value["codex_version"] != "0.146.0"
         or value["python_version"] != "3.11.13"
         or value["self_contained"] is not True

@@ -46,6 +46,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.5.0` 将 Runner Center 安装链升级到自包含 Runner `0.3.0`：四个平台制品固定 Python `3.11.13`、Runner 与 Codex `0.146.0`，目标机不再依赖预装 Python、pip、venv、pyenv 或 Homebrew。Runner 调度仍是确定性控制面，不经过 Codex app-server。
 - `0.5.1` 将 Registry 的真实标签和 policy revision 绑定到 install-bootstrap 与首次 enrollment；安装器不再写入固定标签。Runner 上报未登记标签或过期策略会在领取长期凭据前 fail closed，并配套 Runner `0.3.1` 的跨重启持久心跳序号。
 - `0.5.2` 区分 Relay 明确的 `runner_offline` 与未知发布结果。明确未送达时只释放尚未运行的 lease，并等待真实 heartbeat 后使用新 epoch 重排；未知结果继续保留原 lease，禁止双执行。Relay 离线事实会立即覆盖旧心跳宽限窗口，成功发布清除旧错误。
+- `0.5.3` 固定 Runner `0.3.2`。新 Runner 不再使用超时后不可继续读取的 Python socket file；正常 heartbeat 等待超时后仍保持同一 WSS 会话并继续接收 ACK、ping 和任务帧，避免在线状态短暂刷新但 Relay 实际连接数持续为零。
 - 页面只在 HTTPS manifest、固定 SHA-256/文件大小和公开 WSS URL 全部校验成功后允许创建 Runner；创建结果同时提供短期一次性 HTTPS 安装链接和可复制终端命令，不再返回分散的 `runner_id + enrollment token`。链接 15 分钟后自动失效，支持复制、打开、撤销和重新生成；过期、领取或撤销后，页面立即清除内存中的链接与命令。
 - Relay 通过受限 `/install/<ticket>` 返回 `no-store/no-referrer/nosniff` 的摘要固定 shell，并使用受认证的 Controller 非消费式 bootstrap 检查；真正 enrollment 仍只在 Runner 首次 WSS 注册时单次消费。Relay 不保存 ticket，不把错误 ticket 回显到响应。
 - Relay 内部 URL 和两个最小权限 token 未配置时继续显示 `relay_configured=false`，等待任务不会被伪发布；`runner_relay_api_token` 只用于 Controller -> Relay 发布，`runner_relay_controller_api_token` 只用于 Relay -> Controller 回调，三项必须同时配置且 token 不得相同，否则拒绝启动。installer 未配置或摘要不匹配时仅关闭“生成安装命令”，既有 Runner Registry、列表和管理操作仍可使用。需要整体降级时可显式设置 `runner_center_v2_enabled=false`，普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。

@@ -95,7 +95,7 @@ def main() -> None:
                     result = {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {"listChanged": True}},
-                        "serverInfo": {"name": "ha-controller-tools", "version": "0.5.2"},
+                        "serverInfo": {"name": "ha-controller-tools", "version": "0.5.3"},
                     }
                 elif method == "tools/list":
                     catalog_response = socket_call(socket_path, "__catalog__", {})

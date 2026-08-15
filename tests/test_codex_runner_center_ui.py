@@ -42,7 +42,7 @@ class Installer:
         return {
             "ready": True,
             "error_code": None,
-            "runner_version": "0.3.1",
+            "runner_version": "0.3.2",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
         }
@@ -68,7 +68,7 @@ class Installer:
         return {
             "link": link,
             "command": f"curl -fsSL {link} -o /tmp/install-runner && sh /tmp/install-runner",
-            "runner_version": "0.3.1",
+            "runner_version": "0.3.2",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "platform": os_name,
@@ -96,13 +96,13 @@ class Installer:
             "projects": projects,
             "labels": labels,
             "policy_revision": policy_revision,
-            "asset_url": f"https://downloads.example.com/codex-runner-0.3.1-{os_name}-{arch}.tar.gz",
+            "asset_url": f"https://downloads.example.com/codex-runner-0.3.2-{os_name}-{arch}.tar.gz",
             "asset_sha256": "a" * 64,
             "asset_size": 123456,
             "installer_url": "https://downloads.example.com/codex-runner-installer-2.sh",
             "installer_sha256": "b" * 64,
             "installer_size": 4567,
-            "runner_version": "0.3.1",
+            "runner_version": "0.3.2",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "self_contained": True,
@@ -238,7 +238,7 @@ class RunnerCenterUiTests(unittest.TestCase):
 
     def test_controller_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.2"
+        expected = "0.5.3"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/__init__.py",
@@ -265,7 +265,7 @@ class RunnerCenterUiTests(unittest.TestCase):
                 "installer": {
                     "ready": True,
                     "error_code": None,
-                    "runner_version": "0.3.1",
+                    "runner_version": "0.3.2",
                     "codex_version": "0.146.0",
                     "python_version": "3.11.13",
                 },
@@ -282,7 +282,7 @@ class RunnerCenterUiTests(unittest.TestCase):
         runners_status, runners = self.request("GET", "/api/runners")
         self.assertEqual(runners_status, 200)
         self.assertEqual(runners["result"]["summary"]["total"], 0)
-        self.assertEqual(document["version"], "0.5.2")
+        self.assertEqual(document["version"], "0.5.3")
 
         disabled_manager = RunnerManagerService(self.runner_store, enabled=False)
         disabled_service = ControllerService(
@@ -430,7 +430,7 @@ class RunnerCenterUiTests(unittest.TestCase):
         self.assertEqual(bootstrap_status, 200)
         self.assertEqual(bootstrap["result"]["runner_id"], runner["runner_id"])
         self.assertEqual(bootstrap["result"]["enrollment_token"], new_token)
-        self.assertEqual(bootstrap["result"]["runner_version"], "0.3.1")
+        self.assertEqual(bootstrap["result"]["runner_version"], "0.3.2")
         self.assertEqual(bootstrap["result"]["labels"], ["always-on"])
         self.assertEqual(bootstrap["result"]["policy_revision"], 1)
 
@@ -460,7 +460,7 @@ class RunnerCenterUiTests(unittest.TestCase):
                 "token": new_token,
                 "runner_id": runner["runner_id"],
                 "protocol_version": 2,
-                "agent_version": "0.3.1",
+                "agent_version": "0.3.2",
                 "codex_version": "0.146.0",
                 "os": "linux",
                 "arch": "amd64",
@@ -480,7 +480,7 @@ class RunnerCenterUiTests(unittest.TestCase):
                 "token": new_token,
                 "runner_id": runner["runner_id"],
                 "protocol_version": 2,
-                "agent_version": "0.3.1",
+                "agent_version": "0.3.2",
                 "codex_version": "0.146.0",
                 "os": "linux",
                 "arch": "amd64",
@@ -504,7 +504,7 @@ class RunnerCenterUiTests(unittest.TestCase):
                 "token": new_token,
                 "runner_id": runner["runner_id"],
                 "protocol_version": 2,
-                "agent_version": "0.3.1",
+                "agent_version": "0.3.2",
                 "codex_version": "0.146.0",
                 "os": "linux",
                 "arch": "amd64",

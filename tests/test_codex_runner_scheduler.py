@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 
+from codex_controller.runner_relay import RelayPublishError
 from codex_controller.runner_store import RunnerStore
 from codex_controller.runner_service import RunnerManagerService
 from codex_controller.store import StoreError
@@ -46,6 +47,23 @@ class Publisher:
 
     def publish_control(self, _runner_id: str, document: dict) -> None:
         self.controls.append(document)
+
+
+class OfflineThenSuccessPublisher(Publisher):
+    def __init__(self, *, always_indeterminate: bool = False) -> None:
+        super().__init__()
+        self.attempts = 0
+        self.always_indeterminate = always_indeterminate
+
+    def publish_request(self, runner_id: str, document: dict) -> None:
+        self.attempts += 1
+        if self.always_indeterminate:
+            raise RelayPublishError(
+                "relay_publish_indeterminate", definitely_undelivered=False
+            )
+        if self.attempts == 1:
+            raise RelayPublishError("runner_offline", definitely_undelivered=True)
+        super().publish_request(runner_id, document)
 
 
 class RunnerSchedulerTests(unittest.TestCase):
@@ -130,6 +148,37 @@ class RunnerSchedulerTests(unittest.TestCase):
             {"admin_state": "enabled", "revision": runner["revision"], "request_id": f"enable-{name.lower().replace(' ', '-')}-0001"},
         )
         return runner_id, credential
+
+    def heartbeat_idle(self, runner_id: str, credential: str, *, sequence: int) -> dict:
+        runner = self.store.runner(runner_id)
+        heartbeat = with_digest(
+            {
+                "version": 2,
+                "message_type": "heartbeat",
+                "runner_id": runner_id,
+                "task_id": None,
+                "assignment_epoch": 0,
+                "sequence": sequence,
+                "created_at": self.clock(),
+                "expires_at": (self.clock.value + dt.timedelta(seconds=90)).isoformat(),
+                "online": True,
+                "protocol_version": 2,
+                "agent_version": str(runner["agent_version"]),
+                "codex_version": str(runner["codex_version"]),
+                "os": str(runner["os"]),
+                "arch": str(runner["arch"]),
+                "labels": list(runner["labels"]),
+                "allowed_projects": list(runner["allowed_projects"]),
+                "capabilities": list(runner["capabilities"]),
+                "queue_depth": 0,
+                "work_state": "idle",
+                "active_lease_id": None,
+                "self_check": "ok",
+                "policy_revision": int(runner["policy_revision"]),
+                "updated_at": self.clock(),
+            }
+        )
+        return self.store.heartbeat(heartbeat, credential=credential)
 
     def add_task(self, index: int = 1) -> dict:
         task, _ = self.store.create_work_task(
@@ -328,6 +377,74 @@ class RunnerSchedulerTests(unittest.TestCase):
         body = dict(control)
         body.pop("body_digest")
         self.assertEqual(control["body_digest"], digest(body))
+
+    def test_confirmed_runner_offline_releases_lease_and_reconnect_dispatches_once(self) -> None:
+        runner_id, credential = self.add_runner("Runner Offline")
+        publisher = OfflineThenSuccessPublisher()
+        service = RunnerManagerService(self.store, enabled=True, publisher=publisher)
+        started = service.work_command(
+            {
+                "version": 2,
+                "request_id": "WRV2-OFFLINE-START-00000000001",
+                "operation": "start",
+                "source": {
+                    "channel": "weixin",
+                    "principal_hash": "sha256:" + "a" * 64,
+                    "role": "owner",
+                },
+                "project_alias": "renovation-hub",
+                "instruction": "验证 Relay 断连窗口安全重排",
+            }
+        )
+        self.assertEqual(started["state"], "waiting_runner")
+        self.assertEqual(started["error_code"], "runner_offline")
+        self.assertEqual(service.last_error, "runner_offline")
+        waiting = self.store.work_task(started["task_id"])
+        self.assertIsNone(waiting["assigned_runner_id"])
+        self.assertIsNone(waiting["lease_id"])
+        self.assertEqual(waiting["assignment_epoch"], 1)
+        runner = self.store.runner(runner_id)
+        self.assertEqual(runner["connectivity_state"], "offline")
+        self.assertEqual(runner["work_state"], "idle")
+        self.assertEqual(service.dispatch_waiting(), 0)
+        self.assertEqual(publisher.attempts, 1)
+
+        self.heartbeat_idle(runner_id, credential, sequence=2)
+        self.assertEqual(service.dispatch_waiting(), 1)
+        delivered = self.store.work_task(started["task_id"])
+        self.assertEqual(delivered["state"], "dispatched")
+        self.assertEqual(delivered["assignment_epoch"], 2)
+        self.assertIsNone(delivered["error_code"])
+        self.assertEqual(len(publisher.requests), 1)
+        self.assertEqual(publisher.attempts, 2)
+        self.assertIsNone(service.last_error)
+
+    def test_indeterminate_publish_keeps_authoritative_lease_and_never_reassigns(self) -> None:
+        runner_id, _credential = self.add_runner("Runner Indeterminate")
+        publisher = OfflineThenSuccessPublisher(always_indeterminate=True)
+        service = RunnerManagerService(self.store, enabled=True, publisher=publisher)
+        started = service.work_command(
+            {
+                "version": 2,
+                "request_id": "WRV2-INDETERMINATE-0000000001",
+                "operation": "start",
+                "source": {
+                    "channel": "weixin",
+                    "principal_hash": "sha256:" + "b" * 64,
+                    "role": "owner",
+                },
+                "project_alias": "renovation-hub",
+                "instruction": "验证未知发布结果不重放",
+            }
+        )
+        self.assertEqual(started["state"], "dispatched")
+        assigned = self.store.work_task(started["task_id"])
+        self.assertEqual(assigned["assigned_runner_id"], runner_id)
+        self.assertIsNotNone(assigned["lease_id"])
+        self.assertEqual(self.store.runner(runner_id)["work_state"], "busy")
+        self.assertEqual(service.last_error, "relay_publish_indeterminate")
+        self.assertEqual(service.dispatch_waiting(), 0)
+        self.assertEqual(publisher.attempts, 1)
 
     def test_active_cancel_without_relay_fails_without_mutating_assignment(self) -> None:
         self.add_runner("Runner A")

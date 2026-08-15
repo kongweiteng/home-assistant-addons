@@ -32,6 +32,15 @@ INTERNAL_RELAY_HOST = "local-codex-runner-relay"
 INTERNAL_RELAY_PORT = 8098
 
 
+class RelayPublishError(RuntimeError):
+    """Classify a Relay publish failure without guessing whether delivery occurred."""
+
+    def __init__(self, code: str, *, definitely_undelivered: bool) -> None:
+        super().__init__(code)
+        self.code = code
+        self.definitely_undelivered = definitely_undelivered
+
+
 def validate_internal_relay_url(value: str) -> str:
     if not isinstance(value, str) or value.strip() != value:
         raise ValueError("Runner Relay 内部 URL 无效")
@@ -165,7 +174,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.5.1",
+                "User-Agent": "codex-controller/0.5.2",
             },
             method="POST",
         )
@@ -173,10 +182,36 @@ class RelayPublisher:
             with self._opener(request, timeout=self._timeout_seconds) as response:
                 raw = response.read(64 * 1024 + 1)
                 status = int(getattr(response, "status", 0))
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            raise RuntimeError("Runner Relay 发布状态未知") from exc
+        except HTTPError as exc:
+            try:
+                error_body = exc.read(1025)
+            except OSError:
+                error_body = b""
+            if (
+                exc.code == 503
+                and len(error_body) <= 1024
+                and error_body.decode("utf-8", errors="replace").strip() == "runner_offline"
+            ):
+                raise RelayPublishError(
+                    "runner_offline", definitely_undelivered=True
+                ) from exc
+            raise RelayPublishError(
+                "relay_publish_indeterminate", definitely_undelivered=False
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RelayPublishError(
+                "relay_publish_indeterminate", definitely_undelivered=False
+            ) from exc
+        if (
+            status == 503
+            and len(raw) <= 1024
+            and raw.decode("utf-8", errors="replace").strip() == "runner_offline"
+        ):
+            raise RelayPublishError("runner_offline", definitely_undelivered=True)
         if status != 202 or len(raw) > 64 * 1024:
-            raise RuntimeError("Runner Relay 未确认发布")
+            raise RelayPublishError(
+                "relay_publish_indeterminate", definitely_undelivered=False
+            )
 
 
 class RunnerInstallerCatalog:
@@ -229,7 +264,7 @@ class RunnerInstallerCatalog:
             return self._cached
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.1"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.2"},
             method="GET",
         )
         try:
@@ -402,6 +437,7 @@ __all__ = [
     "CODEX_VERSION",
     "PYTHON_VERSION",
     "RUNNER_VERSION",
+    "RelayPublishError",
     "RelayPublisher",
     "RunnerInstallerCatalog",
     "validate_relay_auth_config",

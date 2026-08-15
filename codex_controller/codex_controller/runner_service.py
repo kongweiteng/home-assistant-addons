@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Protocol
 
-from .runner_relay import RUNNER_VERSION, RunnerInstallerCatalog
+from .runner_relay import RelayPublishError, RUNNER_VERSION, RunnerInstallerCatalog
 from .runner_store import RunnerStore
 from .store import StoreError
 
@@ -259,12 +259,25 @@ class RunnerManagerService:
             self.store.mark_dispatched(str(task["task_id"]))
             try:
                 self.publisher.publish_request(str(request["runner_id"]), request)
+            except RelayPublishError as exc:
+                if exc.definitely_undelivered and exc.code == "runner_offline":
+                    self.store.reschedule_undelivered(
+                        str(task["task_id"]),
+                        runner_id=str(request["runner_id"]),
+                        assignment_epoch=int(request["assignment_epoch"]),
+                        lease_id=str(request["lease_id"]),
+                    )
+                    self.last_error = exc.code
+                    break
+                self.last_error = "relay_publish_indeterminate"
+                break
             except Exception:
                 # The lease remains authoritative. A transport exception is an
                 # indeterminate publish, so it must be reconciled rather than
                 # immediately reassigned or duplicated.
                 self.last_error = "relay_publish_indeterminate"
                 break
+            self.last_error = None
             dispatched += 1
         return dispatched
 

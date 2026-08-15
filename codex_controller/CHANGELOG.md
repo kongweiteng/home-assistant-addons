@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.2
+
+- Controller 识别 Relay 明确返回的 `runner_offline` 为“确定性未送达”，原子释放尚未运行的 lease、恢复 `waiting_runner`，并在下一次真实 heartbeat 后以新 assignment epoch 重新调度。
+- 超时、连接中断、未知 HTTP 错误等仍保持 `relay_publish_indeterminate` 和原 lease，不会盲目重放可能已经送达的任务。
+- Registry 新增 additive Relay 连接事实；确定性离线会立即覆盖心跳宽限窗口，成功发布会清除旧 `last_error`，并增加断连、重连、唯一投递和不得双执行回归。
+
 ## 0.5.1
 
 - install-bootstrap 从 Runner Registry 下发真实 `labels` 与 `policy_revision`，不再让自包含安装器写死 `installed,one-command`。

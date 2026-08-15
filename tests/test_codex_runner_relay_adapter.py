@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 import unittest
+from urllib.error import HTTPError
 
 from codex_controller.runner_relay import (
+    RelayPublishError,
     RelayPublisher,
     validate_internal_relay_url,
     validate_relay_auth_config,
@@ -35,6 +38,18 @@ class Opener:
     def __call__(self, request: object, *, timeout: int) -> Response:
         self.requests.append((request, timeout))
         return Response(status=self.status, body=self.body)
+
+
+class HttpErrorOpener:
+    def __call__(self, request: object, *, timeout: int) -> Response:
+        del timeout
+        raise HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b"runner_offline"),
+        )
 
 
 class RelayPublisherTests(unittest.TestCase):
@@ -122,11 +137,32 @@ class RelayPublisherTests(unittest.TestCase):
             "t" * 32,
             opener=Opener(status=409),
         )
-        with self.assertRaisesRegex(RuntimeError, "未确认发布"):
+        with self.assertRaises(RelayPublishError) as context:
             publisher.publish_control("RN-" + "B" * 20, {"action": "cancel"})
+        self.assertEqual(context.exception.code, "relay_publish_indeterminate")
+        self.assertFalse(context.exception.definitely_undelivered)
 
         with self.assertRaisesRegex(RuntimeError, "过大"):
             publisher.publish_request("RN-" + "C" * 20, {"value": "x" * (64 * 1024)})
+
+    def test_runner_offline_is_the_only_confirmed_undelivered_response(self) -> None:
+        runner_id = "RN-" + "D" * 20
+        document = {"message_type": "request", "runner_id": runner_id}
+        for opener in (
+            Opener(status=503, body=b"runner_offline"),
+            HttpErrorOpener(),
+        ):
+            publisher = RelayPublisher(
+                "http://local-codex-runner-relay:8098",
+                "t" * 32,
+                opener=opener,
+            )
+            with self.subTest(opener=type(opener).__name__), self.assertRaises(
+                RelayPublishError
+            ) as context:
+                publisher.publish_request(runner_id, document)
+            self.assertEqual(context.exception.code, "runner_offline")
+            self.assertTrue(context.exception.definitely_undelivered)
 
 
 if __name__ == "__main__":

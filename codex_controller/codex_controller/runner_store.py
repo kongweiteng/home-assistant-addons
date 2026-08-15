@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable
 from .store import StoreError
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 ADMIN_STATES = frozenset({"pending", "enabled", "draining", "disabled", "revoked"})
 WORK_STATES = frozenset({"idle", "busy", "recovery_required", "error"})
 RUNNER_CAPABILITIES = frozenset(
@@ -184,6 +184,7 @@ class RunnerStore:
                     last_heartbeat_at TEXT,
                     heartbeat_sequence INTEGER NOT NULL DEFAULT 0,
                     heartbeat_digest TEXT,
+                    relay_connected INTEGER NOT NULL DEFAULT 0,
                     current_task_id TEXT,
                     archived_at TEXT,
                     created_at TEXT NOT NULL,
@@ -312,6 +313,17 @@ class RunnerStore:
             }
             if "revoked_at" not in enrollment_columns:
                 connection.execute("ALTER TABLE runner_enrollments ADD COLUMN revoked_at TEXT")
+            runner_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(runner_registry)").fetchall()
+            }
+            if "relay_connected" not in runner_columns:
+                connection.execute(
+                    "ALTER TABLE runner_registry ADD COLUMN relay_connected INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    "UPDATE runner_registry SET relay_connected=CASE WHEN last_heartbeat_at IS NULL THEN 0 ELSE 1 END"
+                )
             connection.execute(
                 "INSERT INTO runner_meta(key,value) VALUES('schema_version',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -1017,11 +1029,12 @@ class RunnerStore:
             if row["current_task_id"] and requested_work_state == "idle":
                 requested_work_state = row["work_state"]
             connection.execute(
-                "UPDATE runner_registry SET heartbeat_sequence=?,heartbeat_digest=?,last_heartbeat_at=?,protocol_version=2,agent_version=?,codex_version=?,capabilities_json=?,self_check_json=?,work_state=?,updated_at=? WHERE runner_id=?",
+                "UPDATE runner_registry SET heartbeat_sequence=?,heartbeat_digest=?,last_heartbeat_at=?,relay_connected=?,protocol_version=2,agent_version=?,codex_version=?,capabilities_json=?,self_check_json=?,work_state=?,updated_at=? WHERE runner_id=?",
                 (
                     sequence,
                     body_digest,
                     now if payload["online"] else None,
+                    1 if payload["online"] else 0,
                     _bounded_text(payload["agent_version"], "agent_version", maximum=64),
                     _bounded_text(payload["codex_version"], "codex_version", maximum=64, required=False),
                     _canonical(capabilities),
@@ -1326,7 +1339,92 @@ class RunnerStore:
         return {"task": self._public_task(task), "request": request}
 
     def mark_dispatched(self, task_id: str) -> dict[str, Any]:
-        return self._set_task_stage(task_id, from_states={"leased", "dispatched"}, state="dispatched", stage="relay")
+        return self._set_task_stage(
+            task_id,
+            from_states={"leased", "dispatched"},
+            state="dispatched",
+            stage="relay",
+            clear_error=True,
+        )
+
+    def reschedule_undelivered(
+        self,
+        task_id: str,
+        *,
+        runner_id: str,
+        assignment_epoch: int,
+        lease_id: str,
+    ) -> dict[str, Any]:
+        """Release a lease only when Relay proved the request was not delivered."""
+
+        task_id = self._task_id(task_id)
+        runner_id = self._runner_id(runner_id)
+        if (
+            not isinstance(assignment_epoch, int)
+            or isinstance(assignment_epoch, bool)
+            or assignment_epoch < 1
+            or not isinstance(lease_id, str)
+            or not SAFE_ID_RE.fullmatch(lease_id)
+        ):
+            raise StoreError("runner_payload_invalid", "Runner assignment 无效")
+        now = self.clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT * FROM runner_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            lease = connection.execute(
+                "SELECT * FROM runner_leases WHERE lease_id=?", (lease_id,)
+            ).fetchone()
+            runner = connection.execute(
+                "SELECT * FROM runner_registry WHERE runner_id=?", (runner_id,)
+            ).fetchone()
+            if (
+                task is None
+                or task["state"] not in {"leased", "dispatched"}
+                or task["ever_running"]
+                or task["assigned_runner_id"] != runner_id
+                or task["assignment_epoch"] != assignment_epoch
+                or task["lease_id"] != lease_id
+                or lease is None
+                or lease["task_id"] != task_id
+                or lease["runner_id"] != runner_id
+                or lease["assignment_epoch"] != assignment_epoch
+                or lease["state"] != "active"
+                or runner is None
+                or runner["current_task_id"] != task_id
+                or runner["work_state"] != "busy"
+            ):
+                connection.rollback()
+                raise StoreError(
+                    "runner_task_state_conflict",
+                    "Runner task 已不再满足确定性未送达重排条件",
+                    status=409,
+                )
+            connection.execute(
+                "UPDATE runner_leases SET state='released',released_at=? WHERE lease_id=? AND state='active'",
+                (now, lease_id),
+            )
+            connection.execute(
+                "UPDATE runner_tasks SET state='waiting_runner',stage='reschedule',assigned_runner_id=NULL,lease_id=NULL,lease_expires_at=NULL,error_code='runner_offline',action_required=NULL,updated_at=? WHERE task_id=?",
+                (now, task_id),
+            )
+            connection.execute(
+                "UPDATE runner_registry SET relay_connected=0,work_state='idle',current_task_id=NULL,updated_at=? WHERE runner_id=?",
+                (now, runner_id),
+            )
+            self._event(
+                connection,
+                "runner_task_rescheduled_undelivered",
+                runner_id=runner_id,
+                task_id=task_id,
+                metadata={"assignment_epoch": assignment_epoch, "reason": "runner_offline"},
+            )
+            updated = connection.execute(
+                "SELECT * FROM runner_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            connection.commit()
+        return self._public_task(updated)
 
     def record_status(self, payload: dict[str, Any], *, credential: str) -> dict[str, Any]:
         required = {
@@ -1634,7 +1732,15 @@ class RunnerStore:
             raise StoreError("runner_assignment_stale", "Runner assignment epoch 已过期", status=409)
         return task
 
-    def _set_task_stage(self, task_id: str, *, from_states: set[str], state: str, stage: str) -> dict[str, Any]:
+    def _set_task_stage(
+        self,
+        task_id: str,
+        *,
+        from_states: set[str],
+        state: str,
+        stage: str,
+        clear_error: bool = False,
+    ) -> dict[str, Any]:
         task_id = self._task_id(task_id)
         now = self.clock()
         with self._connect() as connection:
@@ -1646,7 +1752,16 @@ class RunnerStore:
             if row["state"] not in from_states:
                 connection.rollback()
                 raise StoreError("runner_task_state_conflict", "Runner task 状态冲突", status=409)
-            connection.execute("UPDATE runner_tasks SET state=?,stage=?,updated_at=? WHERE task_id=?", (state, stage, now, task_id))
+            if clear_error:
+                connection.execute(
+                    "UPDATE runner_tasks SET state=?,stage=?,error_code=NULL,action_required=NULL,updated_at=? WHERE task_id=?",
+                    (state, stage, now, task_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE runner_tasks SET state=?,stage=?,updated_at=? WHERE task_id=?",
+                    (state, stage, now, task_id),
+                )
             updated = connection.execute("SELECT * FROM runner_tasks WHERE task_id=?", (task_id,)).fetchone()
             connection.commit()
         return self._public_task(updated)
@@ -1770,6 +1885,8 @@ class RunnerStore:
             raise StoreError("runner_payload_invalid", "Runner message 过大")
 
     def _connectivity(self, row: sqlite3.Row, now: dt.datetime) -> str:
+        if not row["relay_connected"]:
+            return "offline"
         value = row["last_heartbeat_at"]
         if not value:
             return "offline"

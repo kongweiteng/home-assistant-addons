@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.4.4
+
+- Runner Manager v2 在 start、continue、cancel 成功后持久登记 task 与原微信身份路由；Gateway 重启后会继续通过 Controller 状态接口跟踪，不再只发送首次 `dispatched` 回复。
+- 自动回传状态、阶段、摘要、测试和后续动作；相同结果使用确定性指纹与微信 client ID 最多发送一次，`completed`、`failed`、`cancelled`、`expired` 送达后关闭跟踪。
+- `awaiting_confirmation` 与 `recovery_required` 会提示但继续跟踪；Controller 暂时不可用、微信会话过期或发送失败会保留待重试，不回退 Remote Work v1。
+- 每次发送前继续复核 owner、用户与 ClawBot 身份路由；权限或身份变化会抑制并关闭旧路由。状态 API 新增 Runner v2 的 tracked、active、errors 摘要。
+
 ## 0.4.3
 
 - 修复 Ingress 多身份列表把状态文档命名为 `document`、覆盖浏览器全局对象后触发 `document.createElement is not a function` 的页面错误。

@@ -41,6 +41,7 @@ from .remote_work_v2 import (
     RunnerManagerRequest,
     RunnerManagerResponseError,
     RunnerManagerResult,
+    WorkCommand as RunnerManagerWorkCommand,
     build_runner_manager_request,
     parse_runner_manager_response,
     select_work_route,
@@ -60,6 +61,7 @@ TYPING_REFRESH_SECONDS = 5.0
 TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
 POLLER_MAINTENANCE_MIN_SECONDS = 30
 POLLER_MAINTENANCE_MAX_SECONDS = 30 * 60
+RUNNER_MANAGER_V2_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "expired"})
 
 
 def validate_controller_url(value: str) -> str:
@@ -1197,7 +1199,7 @@ class GatewayService:
         self,
         message: dict[str, Any],
         user: dict[str, Any],
-        command: Any,
+        command: RunnerManagerWorkCommand,
     ) -> None:
         request = build_runner_manager_request(
             command,
@@ -1215,6 +1217,65 @@ class GatewayService:
                 error_code=f"runner_manager_{exc.code}",
             )
             return
+        if command.task_id is not None and result.task_id != command.task_id:
+            await self._send_remote_work_text(
+                message,
+                user,
+                "Runner Manager 返回的 task 与请求不一致，本条结果已拒绝。",
+                error_code="runner_manager_task_mismatch",
+            )
+            return
+        watch_replayed = False
+        if command.operation != "status":
+            try:
+                watch = self.store.track_runner_manager_v2(
+                    task_id=result.task_id,
+                    source_message_id=str(message["message_id"]),
+                    sender_id=str(message["sender_id"]),
+                    user_digest=str(user["user_hash"]),
+                    identity_identifier=str(message["identity_id"]),
+                    principal_id_value=str(user["principal_id"]),
+                    principal_hash=str(user["user_hash"]),
+                    state=result.state,
+                    stage=result.stage,
+                    updated_at=result.updated_at,
+                    rearm=command.operation in {"continue", "cancel"},
+                )
+            except StoreError as exc:
+                await self._send_remote_work_text(
+                    message,
+                    user,
+                    str(exc),
+                    error_code=f"runner_manager_{exc.code}",
+                )
+                return
+            watch_replayed = bool(watch.get("replayed"))
+        text = self._runner_manager_v2_result_text(result)
+        notification_key = self._runner_manager_v2_notification_key(text)
+        outbound = {
+            "message_id": message["message_id"],
+            "sender_id": message["sender_id"],
+            "user_hash": user["user_hash"],
+            "identity_id": message.get("identity_id"),
+            "principal_id": user.get("principal_id"),
+            "capability_profile": "owner",
+            "required_role": "owner",
+            "controller_job_id": self._runner_manager_v2_controller_job_id(
+                result.task_id,
+                notification_key,
+                seed=f"{result.operation}:{message['message_id']}",
+            ),
+        }
+        suppression = await self._send_result(outbound, text)
+        if command.operation == "status" or not watch_replayed:
+            self._mark_runner_manager_v2_delivery(
+                result,
+                notification_key=notification_key,
+                suppression=suppression,
+            )
+
+    @staticmethod
+    def _runner_manager_v2_result_text(result: RunnerManagerResult) -> str:
         parts = [f"Runner task {result.task_id}：{result.state}"]
         if result.stage:
             parts.append(f"阶段：{result.stage}")
@@ -1224,16 +1285,54 @@ class GatewayService:
             parts.append(f"测试：{result.test_summary}")
         if result.candidate_id:
             parts.append(f"候选：{result.candidate_id}")
+        if result.changed_path_count is not None:
+            parts.append(f"变更路径：{result.changed_path_count}")
+        if result.queue_position is not None:
+            parts.append(f"队列位置：{result.queue_position}")
+        if result.error_code:
+            parts.append(f"错误码：{result.error_code}")
         if result.action_required:
             parts.append(f"需要处理：{result.action_required}")
         if result.next_actions:
             parts.append("下一步：" + "；".join(result.next_actions))
-        await self._send_remote_work_text(
-            message,
-            user,
-            "\n".join(parts),
-            error_code=f"runner_manager_{result.operation}",
-        )
+        return "\n".join(parts)
+
+    @staticmethod
+    def _runner_manager_v2_notification_key(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _runner_manager_v2_controller_job_id(
+        task_id: str,
+        notification_key: str,
+        *,
+        seed: str,
+    ) -> str:
+        digest = hashlib.sha256(
+            f"runner-manager-v2\x00{task_id}\x00{notification_key}\x00{seed}".encode("utf-8")
+        ).hexdigest()
+        return f"runner-v2-{digest}"
+
+    def _mark_runner_manager_v2_delivery(
+        self,
+        result: RunnerManagerResult,
+        *,
+        notification_key: str,
+        suppression: str | None,
+    ) -> None:
+        try:
+            self.store.mark_runner_manager_v2_notified(
+                result.task_id,
+                notification_key=notification_key,
+                state=result.state,
+                stage=result.stage,
+                updated_at=result.updated_at,
+                closed=suppression is not None or result.state in RUNNER_MANAGER_V2_TERMINAL_STATES,
+                error_code=suppression,
+            )
+        except StoreError as exc:
+            if exc.code != "runner_manager_watch_missing":
+                raise
 
     async def _handle_remote_work_command(
         self,
@@ -1419,6 +1518,7 @@ class GatewayService:
             while not self._stop.is_set():
                 try:
                     await self._deliver_remote_work_replies()
+                    await self._deliver_runner_manager_v2_updates()
                     if self.controller.configured:
                         for message in self.store.pending_controller():
                             payload = {
@@ -1537,6 +1637,66 @@ class GatewayService:
         finally:
             for runtime in self._runtimes.values():
                 await self._stop_all_typing(runtime)
+
+    async def _deliver_runner_manager_v2_updates(self) -> None:
+        if not self.runner_manager_v2_enabled or not self.controller.configured:
+            return
+        for watch in self.store.pending_runner_manager_v2_watches():
+            task_id = str(watch["task_id"])
+            command = RunnerManagerWorkCommand(operation="status", task_id=task_id)
+            try:
+                request = build_runner_manager_request(
+                    command,
+                    identity_id=str(watch["identity_id"]),
+                    message_id=f"runner-status-{task_id}",
+                    principal_hash=str(watch["principal_hash"]),
+                )
+                result = await self.controller.runner_manager(request)
+            except StoreError as exc:
+                self.store.mark_runner_manager_v2_error(task_id, f"runner_manager_{exc.code}")
+                self.last_error = exc.code
+                continue
+            if result.task_id != task_id:
+                self.store.mark_runner_manager_v2_error(task_id, "runner_manager_task_mismatch")
+                self.last_error = "runner_manager_task_mismatch"
+                continue
+            text = self._runner_manager_v2_result_text(result)
+            notification_key = self._runner_manager_v2_notification_key(text)
+            if hmac.compare_digest(
+                str(watch.get("last_notification_key") or ""),
+                notification_key,
+            ):
+                self._mark_runner_manager_v2_delivery(
+                    result,
+                    notification_key=notification_key,
+                    suppression=None,
+                )
+                continue
+            outbound = {
+                "message_id": f"runner-v2-status-{task_id}",
+                "sender_id": watch["sender_id"],
+                "user_hash": watch["user_hash"],
+                "identity_id": watch["identity_id"],
+                "principal_id": watch["principal_id"],
+                "capability_profile": "owner",
+                "required_role": "owner",
+                "controller_job_id": self._runner_manager_v2_controller_job_id(
+                    task_id,
+                    notification_key,
+                    seed="automatic-status",
+                ),
+            }
+            try:
+                suppression = await self._send_result(outbound, text)
+            except (StoreError, ProtocolError) as exc:
+                self.store.mark_runner_manager_v2_error(task_id, exc.code)
+                self.last_error = exc.code
+                continue
+            self._mark_runner_manager_v2_delivery(
+                result,
+                notification_key=notification_key,
+                suppression=suppression,
+            )
 
     async def _deliver_remote_work_replies(self) -> None:
         for event in self.store.remote_work_pending_replies():
@@ -2549,7 +2709,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.3",
+            "version": "0.4.4",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],
@@ -2580,6 +2740,7 @@ class GatewayService:
             "remote_work": {
                 "enabled": self.remote_work_enabled,
                 "runner_manager_v2_enabled": self.runner_manager_v2_enabled,
+                "runner_manager_v2": self.store.runner_manager_v2_status(),
                 **self.store.remote_work_status(),
             },
         }

@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.3`。
+当前版本：`0.4.4`。
 
 ## 配置
 
@@ -179,6 +179,9 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 当 `runner_manager_v2_enabled=true` 时，Gateway 仍只接受上述四种精确 owner 命令，但请求改为通过既有 Controller 内部 bearer 调用 Runner Manager v2。Gateway 不选择 Runner、不保存 Runner 凭据，也不接触 Relay。
 
 - v2 start/status/continue/cancel 使用有界 JSON、稳定 request ID、owner principal hash 和严格响应契约。
+- start、continue、cancel 成功后会在 SQLite 中持久保存 task 与原始微信身份路由；Gateway 重启后继续调用 status，并在状态、阶段或安全结果摘要变化时自动回复。
+- 自动回复使用 task 与结果指纹派生的确定性出站 ID。相同结果最多发送一次；`completed`、`failed`、`cancelled`、`expired` 送达后关闭跟踪，`awaiting_confirmation`、`recovery_required` 提示后继续跟踪。
+- Controller 暂时不可用、微信会话过期或发送失败时保留活动跟踪并重试；owner、用户或身份路由变化时发送前门禁会抑制并关闭旧路由。`/work status` 只执行一次查询，不会单独创建新跟踪。
 - v2 命令不会同时进入 v1 MQTT；Controller 失败、超时、返回非法 DTO 或没有匹配 Runner 时，Gateway 只回复一次脱敏错误，不回退 v1 或普通聊天。
 - `runner_manager_v2_enabled=false` 时维持原 v1/普通聊天分流；`remote_work_enabled=false` 与 v2 开关相互独立，但正式迁移时必须保证同一精确命令只有一个执行路径。
 - 当前版本只提供本地候选和确定性路由；真实 Relay、Runner、HAOS options 和微信验收属于后续受控发布。
@@ -199,6 +202,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 从 `0.4.2` 回退到 `0.4.1` 前，先停止全部 Poller、关闭 Controller intake，并核对没有待发送或状态未知的 `file` artifact。旧 Gateway 会忽略文件制品的 additive 状态，但不会继续发送 ZIP；保留 outbound artifact 状态、临时 spool 和 Controller/Hub 导出记录，恢复 `0.4.2` 后再按原 artifact ID、SHA-256 和发送状态核对。Gateway 与 Controller 应成对回退，避免旧 Controller 产生的 PNG-only 预期误处理 ZIP 制品。
 
 从 `0.4.3` 回退到 `0.4.2` 前先确认没有活动维护暂停。`0.4.2` 不识别维护租约 API，但长期 Poller desired state、身份、消息、归档请求和 artifact 状态均兼容；回退后发布脚本必须避免调用持久 `/api/poller/stop` 作为临时维护动作。
+
+从 `0.4.4` 回退到 `0.4.3` 前先确认 Runner Manager v2 的 active 跟踪为 0，或明确接受旧版本暂时不再自动查询这些 task。`0.4.3` 会忽略 additive `runner_manager_v2_watches` 表，不会删除记录；恢复 `0.4.4` 后可继续跟踪。回退不会影响 Poller、多身份、普通聊天、通知、附件、Remote Work v1、Controller、Relay 或 Runner。
 
 从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
 

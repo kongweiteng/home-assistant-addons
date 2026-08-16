@@ -59,8 +59,21 @@ MEDIA_ARCHIVE_CONTEXT_STATUSES = frozenset(
         "too_many_attachments",
     }
 )
-
-
+RUNNER_MANAGER_V2_TASK_STATES = frozenset(
+    {
+        "waiting_runner",
+        "leased",
+        "dispatched",
+        "queued",
+        "running",
+        "awaiting_confirmation",
+        "completed",
+        "failed",
+        "cancelled",
+        "expired",
+        "recovery_required",
+    }
+)
 def _chinese_media_count(value: str) -> int | None:
     digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
     if value == "十":
@@ -885,6 +898,27 @@ class GatewayStore:
                     payload_digest TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS runner_manager_v2_watches (
+                    task_id TEXT PRIMARY KEY,
+                    source_message_id TEXT NOT NULL,
+                    sender_id TEXT NOT NULL,
+                    user_hash TEXT NOT NULL,
+                    identity_id TEXT NOT NULL,
+                    principal_id TEXT NOT NULL,
+                    principal_hash TEXT NOT NULL,
+                    last_state TEXT NOT NULL,
+                    last_stage TEXT,
+                    last_updated_at TEXT NOT NULL,
+                    last_notification_key TEXT,
+                    closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(user_hash) REFERENCES weixin_users(user_hash)
+                );
+                CREATE INDEX IF NOT EXISTS runner_manager_v2_watches_pending_idx
+                    ON runner_manager_v2_watches(closed, updated_at);
                 """
             )
             connection.execute(
@@ -2769,6 +2803,188 @@ class GatewayStore:
                 ),
                 "agent": None if agent is None else json.loads(agent["payload_json"]),
             }
+
+    def track_runner_manager_v2(
+        self,
+        *,
+        task_id: str,
+        source_message_id: str,
+        sender_id: str,
+        user_digest: str,
+        identity_identifier: str,
+        principal_id_value: str,
+        principal_hash: str,
+        state: str,
+        stage: str | None,
+        updated_at: str,
+        rearm: bool,
+    ) -> dict[str, Any]:
+        if not isinstance(task_id, str) or not re.fullmatch(r"RW-[A-Za-z0-9][A-Za-z0-9._:-]{0,124}", task_id):
+            raise StoreError("runner_manager_task_invalid", "Runner Manager task ID 无效")
+        if state not in RUNNER_MANAGER_V2_TASK_STATES:
+            raise StoreError("runner_manager_state_invalid", "Runner Manager task 状态无效")
+        if stage is not None and (not isinstance(stage, str) or not 1 <= len(stage) <= 64):
+            raise StoreError("runner_manager_stage_invalid", "Runner Manager task 阶段无效")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                source_message_id,
+                sender_id,
+                user_digest,
+                identity_identifier,
+                principal_id_value,
+                principal_hash,
+                updated_at,
+            )
+        ):
+            raise StoreError("runner_manager_watch_invalid", "Runner Manager 跟踪字段无效")
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM runner_manager_v2_watches WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["user_hash"] != user_digest
+                    or existing["principal_id"] != principal_id_value
+                    or existing["principal_hash"] != principal_hash
+                ):
+                    connection.rollback()
+                    raise StoreError(
+                        "runner_manager_watch_conflict",
+                        "Runner Manager task 跟踪主体不一致",
+                        status=409,
+                    )
+                same_source = hmac.compare_digest(str(existing["source_message_id"]), source_message_id)
+                if rearm and not same_source:
+                    connection.execute(
+                        """
+                        UPDATE runner_manager_v2_watches
+                        SET source_message_id=?,sender_id=?,identity_id=?,last_state=?,last_stage=?,
+                            last_updated_at=?,last_notification_key=NULL,closed=0,attempts=0,
+                            last_error=NULL,updated_at=?
+                        WHERE task_id=?
+                        """,
+                        (
+                            source_message_id,
+                            sender_id,
+                            identity_identifier,
+                            state,
+                            stage,
+                            updated_at,
+                            now,
+                            task_id,
+                        ),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM runner_manager_v2_watches WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                connection.commit()
+                result = dict(row)
+                result["replayed"] = same_source or not rearm
+                return result
+            connection.execute(
+                """
+                INSERT INTO runner_manager_v2_watches(
+                    task_id,source_message_id,sender_id,user_hash,identity_id,principal_id,
+                    principal_hash,last_state,last_stage,last_updated_at,created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    task_id,
+                    source_message_id,
+                    sender_id,
+                    user_digest,
+                    identity_identifier,
+                    principal_id_value,
+                    principal_hash,
+                    state,
+                    stage,
+                    updated_at,
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM runner_manager_v2_watches WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            connection.commit()
+        result = dict(row)
+        result["replayed"] = False
+        return result
+
+    def pending_runner_manager_v2_watches(self, limit: int = 20) -> list[dict[str, Any]]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("Runner Manager watch limit 无效")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM runner_manager_v2_watches WHERE closed=0 ORDER BY updated_at,created_at,task_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_runner_manager_v2_notified(
+        self,
+        task_id: str,
+        *,
+        notification_key: str,
+        state: str,
+        stage: str | None,
+        updated_at: str,
+        closed: bool,
+        error_code: str | None = None,
+    ) -> None:
+        if not isinstance(notification_key, str) or not re.fullmatch(r"[a-f0-9]{64}", notification_key):
+            raise StoreError("runner_manager_notification_invalid", "Runner Manager 通知摘要无效")
+        if state not in RUNNER_MANAGER_V2_TASK_STATES:
+            raise StoreError("runner_manager_state_invalid", "Runner Manager task 状态无效")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE runner_manager_v2_watches
+                SET last_state=?,last_stage=?,last_updated_at=?,last_notification_key=?,
+                    closed=?,attempts=0,last_error=?,updated_at=?
+                WHERE task_id=?
+                """,
+                (
+                    state,
+                    stage,
+                    updated_at,
+                    notification_key,
+                    1 if closed else 0,
+                    error_code,
+                    utc_now(),
+                    task_id,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise StoreError("runner_manager_watch_missing", "Runner Manager task 跟踪不存在", status=404)
+
+    def mark_runner_manager_v2_error(self, task_id: str, error_code: str) -> None:
+        if not isinstance(error_code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", error_code):
+            error_code = "runner_manager_delivery_failed"
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE runner_manager_v2_watches SET attempts=attempts+1,last_error=?,updated_at=? WHERE task_id=? AND closed=0",
+                (error_code, utc_now(), task_id),
+            )
+
+    def runner_manager_v2_status(self) -> dict[str, Any]:
+        with self._connect() as connection:
+            total = int(connection.execute("SELECT COUNT(*) FROM runner_manager_v2_watches").fetchone()[0])
+            active = int(
+                connection.execute("SELECT COUNT(*) FROM runner_manager_v2_watches WHERE closed=0").fetchone()[0]
+            )
+            errors = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM runner_manager_v2_watches WHERE closed=0 AND last_error IS NOT NULL"
+                ).fetchone()[0]
+            )
+        return {"tracked": total, "active": active, "errors": errors}
 
     def expire_remote_work_tasks(self) -> int:
         with self._connect() as connection:

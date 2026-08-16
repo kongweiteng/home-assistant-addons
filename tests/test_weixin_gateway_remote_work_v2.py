@@ -381,6 +381,11 @@ class StubRunnerController:
     def __init__(self, *, fail: bool = False) -> None:
         self.requests = []
         self.fail = fail
+        self.task_id = "RW-ABCDEFGHIJ"
+        self.state = "waiting_runner"
+        self.stage = "queue"
+        self.summary = None
+        self.test_summary = None
 
     async def start(self) -> None:
         return None
@@ -398,10 +403,12 @@ class StubRunnerController:
                 "version": 2,
                 "request_id": request.request_id,
                 "operation": request.body["operation"],
-                "task_id": "RW-ABCDEFGHIJ",
-                "state": "waiting_runner",
+                "task_id": self.task_id,
+                "state": self.state,
                 "updated_at": "2026-08-10T12:00:00+08:00",
-                "stage": "queue",
+                "stage": self.stage,
+                **({"summary": self.summary} if self.summary is not None else {}),
+                **({"test_summary": self.test_summary} if self.test_summary is not None else {}),
                 "next_actions": ["等待符合策略的在线 Runner"],
             },
             expected_request_id=request.request_id,
@@ -454,6 +461,7 @@ class GatewayV2IntegrationTests(unittest.TestCase):
         self.assertIn("RW-ABCDEFGHIJ", self.client.sent[0]["text"])
         self.assertEqual(self.store.remote_work_pending_outbox(), [])
         self.assertFalse(self.store.message_exists("v2-route-0001"))
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 1, "errors": 0})
 
     def test_near_match_remains_ordinary_controller_message(self) -> None:
         raw = raw_message("v2-near-0001", "fixture-owner", "/workx renovation-hub 修改页面")
@@ -469,6 +477,134 @@ class GatewayV2IntegrationTests(unittest.TestCase):
         self.assertEqual(self.store.remote_work_pending_outbox(), [])
         self.assertFalse(self.store.message_exists("v2-failure-0001"))
         self.assertIn("没有符合策略", self.client.sent[0]["text"])
+
+    def test_status_does_not_create_a_watch(self) -> None:
+        raw = raw_message("v2-status-0001", "fixture-owner", "/work status RW-ABCDEFGHIJ")
+        self.run_async(self.service._ingest(raw))
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 0, "active": 0, "errors": 0})
+
+    def test_state_changes_are_automatically_delivered_once_and_terminal_closes_watch(self) -> None:
+        raw = raw_message("v2-progress-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.controller.state = "dispatched"
+        self.controller.stage = "relay"
+        self.run_async(self.service._ingest(raw))
+
+        self.controller.state = "running"
+        self.controller.stage = "codex"
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        self.controller.state = "completed"
+        self.controller.stage = "handoff"
+        self.controller.summary = "只读检查已完成，工作区干净。"
+        self.controller.test_summary = "no changes"
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        self.assertEqual([item["text"].splitlines()[0] for item in self.client.sent], [
+            "Runner task RW-ABCDEFGHIJ：dispatched",
+            "Runner task RW-ABCDEFGHIJ：running",
+            "Runner task RW-ABCDEFGHIJ：completed",
+        ])
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 0, "errors": 0})
+
+        self.controller.state = "dispatched"
+        self.controller.stage = "relay"
+        self.controller.summary = None
+        self.controller.test_summary = None
+        self.run_async(self.service._ingest(raw))
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 0, "errors": 0})
+        self.assertEqual(len(self.client.sent), 3)
+
+    def test_pending_watch_survives_gateway_restart(self) -> None:
+        raw = raw_message("v2-restart-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.controller.state = "running"
+        self.controller.stage = "codex"
+        self.run_async(self.service._ingest(raw))
+
+        restarted_controller = StubRunnerController()
+        restarted_controller.state = "completed"
+        restarted_controller.stage = "handoff"
+        restarted_controller.summary = "重启后恢复跟踪并完成。"
+        restarted = GatewayService(
+            identity_store=self.identity_store,
+            store=GatewayStore(self.store.database_path, data_dir=self.store.data_dir),
+            controller=restarted_controller,  # type: ignore[arg-type]
+            bootstrap_identity={},
+            poller_enabled=False,
+            owner_pairing_enabled=False,
+            activation_confirmation="",
+            max_media_bytes=1024,
+            remote_work_enabled=True,
+            runner_manager_v2_enabled=True,
+            remote_work_ttl_seconds=1800,
+        )
+        restarted_client = StubIlinkClient()
+        restarted.client = restarted_client  # type: ignore[assignment]
+
+        self.run_async(restarted._deliver_runner_manager_v2_updates())
+
+        self.assertEqual(len(restarted_client.sent), 1)
+        self.assertIn("completed", restarted_client.sent[0]["text"])
+        self.assertEqual(restarted.store.runner_manager_v2_status()["active"], 0)
+
+    def test_session_expired_keeps_watch_pending_until_delivery_recovers(self) -> None:
+        raw = raw_message("v2-expired-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.run_async(self.service._ingest(raw))
+        self.controller.state = "running"
+        self.controller.stage = "codex"
+        self.service.poller_state = "session_expired"
+
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        status = self.store.runner_manager_v2_status()
+        self.assertEqual(status["active"], 1)
+        self.assertEqual(status["errors"], 1)
+        self.service.poller_state = "polling"
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+        self.assertEqual(self.store.runner_manager_v2_status()["errors"], 0)
+        self.assertIn("running", self.client.sent[-1]["text"])
+
+    def test_identity_route_change_suppresses_and_closes_old_watch(self) -> None:
+        raw = raw_message("v2-identity-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.run_async(self.service._ingest(raw))
+        self.controller.state = "running"
+        self.controller.stage = "codex"
+        with self.store._connect() as connection:
+            connection.execute("UPDATE identity_bindings SET state='suspended'")
+
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 0, "errors": 0})
+
+    def test_controller_outage_retries_watch_without_v1_fallback(self) -> None:
+        raw = raw_message("v2-retry-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.run_async(self.service._ingest(raw))
+        self.controller.fail = True
+
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        self.assertEqual(self.store.runner_manager_v2_status()["errors"], 1)
+        self.assertEqual(self.store.remote_work_pending_outbox(), [])
+        self.controller.fail = False
+        self.controller.state = "completed"
+        self.controller.stage = "handoff"
+        self.controller.summary = "重试后完成。"
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 0, "errors": 0})
+        self.assertIn("completed", self.client.sent[-1]["text"])
+
+    def test_confirmation_and_recovery_states_notify_but_remain_tracked(self) -> None:
+        raw = raw_message("v2-nonterminal-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.run_async(self.service._ingest(raw))
+
+        for state, stage in (("awaiting_confirmation", "gate"), ("recovery_required", "recovery")):
+            self.controller.state = state
+            self.controller.stage = stage
+            self.run_async(self.service._deliver_runner_manager_v2_updates())
+            self.assertEqual(self.store.runner_manager_v2_status()["active"], 1)
+            self.assertIn(state, self.client.sent[-1]["text"])
 
 
 if __name__ == "__main__":

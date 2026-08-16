@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.2
+
+- Allow an explicitly configured automatic polling interval as low as 10
+  minutes while retaining the 360-minute default and per-account manual refresh
+  cooldown.
+- Keep the same five fixed read-only GET endpoint classes and existing
+  cache/stale behavior; this release adds no write API or identity field to
+  MQTT.
+
 ## 0.3.1
 
 - Keep Supervisor MQTT service discovery as the preferred path, while allowing

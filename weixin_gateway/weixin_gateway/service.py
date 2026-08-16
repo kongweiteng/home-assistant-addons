@@ -1264,7 +1264,11 @@ class GatewayService:
             "controller_job_id": self._runner_manager_v2_controller_job_id(
                 result.task_id,
                 notification_key,
-                seed=f"{result.operation}:{message['message_id']}",
+                seed=(
+                    f"status:{message['message_id']}"
+                    if command.operation == "status"
+                    else f"watch:{message['message_id']}"
+                ),
             ),
         }
         suppression = await self._send_result(outbound, text)
@@ -1684,7 +1688,7 @@ class GatewayService:
                 "controller_job_id": self._runner_manager_v2_controller_job_id(
                     task_id,
                     notification_key,
-                    seed="automatic-status",
+                    seed=f"watch:{watch['source_message_id']}",
                 ),
             }
             try:
@@ -2735,7 +2739,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.5",
+            "version": "0.4.6",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

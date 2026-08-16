@@ -219,7 +219,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.5"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.6"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):

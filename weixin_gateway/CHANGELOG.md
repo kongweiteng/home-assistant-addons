@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.4.6
+
+- 修复 Runner Manager v2 首次 `dispatched` 回复与后台 watch 同时发送时的竞态：同一 watch 代次现在按 `task_id + 安全结果指纹 + source_message_id` 复用同一持久出站作业和 iLink client ID。
+- 通知指纹仍只在实际发送成功或明确抑制后更新；失败可使用原发送键重试，continue/cancel 的新 source message 会形成新的 watch 代次，不会吞掉合理的新阶段回复。
+- 新增并发回归测试，稳定复现首次回复尚未落库时后台查询抢占发送锁的时序，验证 `dispatched`、`running`、终态各阶段最多发送一次。
+
 ## 0.4.5
 
 - 修复长任务最终回传误把 iLink `-2 + unknown error` 当成普通限流的问题：该组合表示当前用户的 `context_token` 已陈旧，Gateway 会只清除这一条上下文并使用同一确定性 client ID 无 token 重试一次。

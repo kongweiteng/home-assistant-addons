@@ -10,7 +10,11 @@ from aiohttp.test_utils import TestServer
 
 from codex_runner_relay import __version__
 from codex_runner_relay.app import ConnectionRate, RelayHub, create_app
-from codex_runner_relay.controller import ControllerClient, validate_controller_base_url
+from codex_runner_relay.controller import (
+    ControllerClient,
+    ControllerRelayError,
+    validate_controller_base_url,
+)
 from codex_runner_relay.protocol import (
     RelayProtocolError,
     validate_event_message,
@@ -29,8 +33,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.5")
-        self.assertIn('version: "0.2.5"', config)
+        self.assertEqual(__version__, "0.2.6")
+        self.assertIn('version: "0.2.6"', config)
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
         self.assertIn("local-codex-controller", run_script)
         self.assertNotIn("http://codex-controller:8102", config + run_script)
@@ -101,6 +105,7 @@ class FakeController:
         self.authentications: list[tuple[str, str]] = []
         self.events: list[tuple[str, dict, str]] = []
         self.install_tickets: list[str] = []
+        self.event_error_code: str | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -144,6 +149,12 @@ class FakeController:
 
     async def event(self, event_type: str, document: dict, *, credential: str) -> dict:
         self.events.append((event_type, dict(document), credential))
+        if self.event_error_code is not None:
+            raise ControllerRelayError(
+                self.event_error_code,
+                "fixture rejection",
+                status=409,
+            )
         return {"accepted": True}
 
 
@@ -225,6 +236,44 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ack = await ws.receive_json(timeout=2)
         self.assertEqual(ack["type"], "ack")
         self.assertEqual(self.controller.events, [("heartbeat", heartbeat, CREDENTIAL)])
+        await ws.close()
+
+    async def test_late_terminal_event_is_transport_acked_without_closing_runner(self) -> None:
+        self.controller.event_error_code = "runner_late_message"
+        ws = await self.enroll()
+        late = {
+            "message_type": "result",
+            "runner_id": RUNNER_ID,
+            "task_id": "RW-TERMINAL-FIXTURE",
+            "body_digest": "sha256:" + "b" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "result", "document": late})
+        ack = await ws.receive_json(timeout=2)
+        self.assertEqual(
+            ack,
+            {"type": "ack", "event_type": "result", "body_digest": late["body_digest"]},
+        )
+        heartbeat = {
+            "message_type": "heartbeat",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "c" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
+        second_ack = await ws.receive_json(timeout=2)
+        self.assertEqual(second_ack["event_type"], "heartbeat")
+        await ws.close()
+
+    async def test_non_terminal_controller_rejection_still_closes_runner(self) -> None:
+        self.controller.event_error_code = "runner_digest_invalid"
+        ws = await self.enroll()
+        heartbeat = {
+            "message_type": "heartbeat",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "d" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
+        error = await ws.receive_json(timeout=2)
+        self.assertEqual(error, {"type": "error", "code": "runner_digest_invalid"})
         await ws.close()
 
     async def test_internal_publish_requires_bearer_and_runner_must_be_online(self) -> None:

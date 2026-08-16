@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.6
+
+- Controller 已将 assignment 置为不可覆盖终态并返回 `runner_late_message` 时，Relay 向 Runner 返回对应 event ACK，避免旧 result 永久阻塞 heartbeat 和在线状态。
+- Controller 的 `recovery_required`、Runner 本地 task/result 与 worktree 证据保持不变；其他 Controller 拒绝仍关闭连接并失败关闭。
+
 ## 0.2.5
 
 - Relay 到 Controller 的内部 aiohttp 客户端固定使用 IPv4，避免 HAOS 容器 DNS 只返回 IPv6 Add-on 地址时把实际 ready 的 IPv4 Controller 误判为 `controller_unavailable`。

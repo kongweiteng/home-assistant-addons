@@ -23,6 +23,9 @@ from .protocol import (
 )
 
 
+CONSUMED_EVENT_REJECTIONS = frozenset({"runner_late_message"})
+
+
 class ConnectionRate:
     def __init__(self, maximum: int) -> None:
         self.maximum = maximum
@@ -122,7 +125,11 @@ class RelayHub:
                     event_type, document = validate_event_message(
                         self._json_message(incoming.data), runner_id=runner_id
                     )
-                    await self.controller.event(event_type, document, credential=credential)
+                    try:
+                        await self.controller.event(event_type, document, credential=credential)
+                    except ControllerRelayError as exc:
+                        if exc.code not in CONSUMED_EVENT_REJECTIONS:
+                            raise
                     await ws.send_json(
                         {
                             "type": "ack",

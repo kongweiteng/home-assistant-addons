@@ -4,4 +4,4 @@
 
 Relay 不拥有 Runner Registry、凭据摘要、任务 lease、Git、Codex、项目策略或生产部署权限。它没有 Ingress、host network、privileged、Docker socket、主机目录挂载或宿主端口默认映射。
 
-`0.2.5` 在既有 WSS 数据面和受限 `/install/<ticket>` 基础上，强制 Relay 到 Controller 的内部 aiohttp 客户端使用 IPv4。这样即使 HAOS 内部 DNS 同时发布不可用的 IPv6 Add-on 地址，也不会让只监听 IPv4 的 Controller 被误判为不可用。固定 hostname、双 token、WSS、Registry/lease 所有权和 Runner `0.3.4` 安装制品均不改变。
+`0.2.6` 在既有 WSS 数据面和受限 `/install/<ticket>` 基础上，固定 Relay 到 Controller 使用 IPv4，并处理 Controller 明确拒绝的迟到终态事件。只有 `runner_late_message` 会被视为已经由 Controller 权威消费并向 Runner 返回传输 ACK，避免旧 outbox 事件永久阻塞后续 heartbeat；Controller 的 `recovery_required`、Runner 本地 task/result 证据和 worktree 都不改变，其他 Controller 错误继续失败关闭。

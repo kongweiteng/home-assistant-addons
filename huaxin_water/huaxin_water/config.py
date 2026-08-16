@@ -79,7 +79,7 @@ class AppConfig:
             base_url=base_url,
             allow_insecure_http=allow_insecure_http,
             poll_interval_seconds=_bounded_int(
-                raw, "poll_interval_minutes", 360, 60, 10080
+                raw, "poll_interval_minutes", 360, 10, 10080
             )
             * 60,
             request_timeout_seconds=_bounded_int(

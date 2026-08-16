@@ -248,6 +248,16 @@ class FakeMqttModule:
 
 
 class HuaxinWaterAddonTests(unittest.TestCase):
+    def test_poll_interval_accepts_ten_minutes_and_rejects_less(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = pathlib.Path(tmp)
+            config = write_options(
+                directory / "options.json", poll_interval_minutes=10
+            )
+            self.assertEqual(config.poll_interval_seconds, 600)
+            with self.assertRaisesRegex(ValueError, "outside its allowed range"):
+                write_options(directory / "too-fast.json", poll_interval_minutes=9)
+
     def test_required_files_and_minimum_permissions(self) -> None:
         for relative in (
             "config.yaml",
@@ -271,7 +281,8 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertIn("services:", config)
         self.assertIn("  - mqtt:want", config)
         self.assertIn('mqtt_password: "password?"', config)
-        self.assertIn('version: "0.3.1"', config)
+        self.assertIn('version: "0.3.2"', config)
+        self.assertIn('poll_interval_minutes: "int(10,10080)"', config)
         run_script = (ADDON / "run.sh").read_text(encoding="utf-8")
         self.assertIn("Supervisor-provided MQTT service", run_script)
         self.assertIn("Using configured MQTT broker", run_script)
@@ -673,7 +684,7 @@ class HuaxinWaterAddonTests(unittest.TestCase):
         self.assertEqual(len(account["endpoints"]), 5)
         self.assertEqual(account["statistics"]["latest_year"], 2026)
         self.assertEqual(len(account["statistics"]["monthly_by_year"]["2026"]), 12)
-        self.assertIn('"version":"0.3.1"', health_text)
+        self.assertIn('"version":"0.3.2"', health_text)
 
     def test_runtime_publishes_only_projected_account_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

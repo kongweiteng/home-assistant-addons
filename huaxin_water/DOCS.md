@@ -29,7 +29,8 @@ mqtt_ssl: false
   has no working HTTPS listener, so use of its default HTTP URL requires an
   explicit acknowledgement. Customer numbers and returned personal data then
   travel over plaintext HTTP outside Home Assistant.
-- Polling is at least hourly. Manual refresh is limited per account.
+- Polling can be configured from 10 minutes through 7 days; the default remains
+  360 minutes. Manual refresh is limited per account.
 - MQTT connection settings may stay empty when the installed broker registers a
   Supervisor `mqtt` service. Brokers such as EMQX that do not register that
   service require a reachable host, port and their private credentials here.

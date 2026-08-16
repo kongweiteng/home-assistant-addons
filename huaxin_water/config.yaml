@@ -1,5 +1,5 @@
 name: Huaxin Water
-version: "0.3.1"
+version: "0.3.2"
 slug: huaxin_water
 description: "Read-only multi-account water history, statistics and MQTT Discovery for Tianjin Huaxin Water."
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/huaxin_water"
@@ -37,7 +37,7 @@ schema:
       customer_no: "match(^[0-9]{6,32}$)"
   base_url: url
   allow_insecure_http: bool
-  poll_interval_minutes: "int(60,10080)"
+  poll_interval_minutes: "int(10,10080)"
   request_timeout_seconds: "int(3,50)"
   stale_after_minutes: "int(60,43200)"
   manual_refresh_cooldown_seconds: "int(30,3600)"

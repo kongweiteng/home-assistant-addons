@@ -43,7 +43,7 @@ class SupervisorClient:
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
-                "User-Agent": "ha-operations-broker/0.5.0",
+                "User-Agent": "ha-operations-broker/0.5.1",
             },
             method="GET",
         )
@@ -96,7 +96,7 @@ class SupervisorClient:
         if not ADDON_SLUG_RE.fullmatch(slug):
             raise SupervisorError("invalid_addon_slug", "Add-on target must be an exact slug")
         data = self._get(f"/addons/{slug}/info")
-        return _select(
+        result = _select(
             data,
             "slug",
             "name",
@@ -114,6 +114,11 @@ class SupervisorClient:
             "host_network",
             "full_access",
         )
+        if result.get("installed") is None:
+            # A successful /addons/<slug>/info response already proves the
+            # Add-on is installed. Current HAOS releases omit this field.
+            result["installed"] = True
+        return result
 
     def restart_addon(self, slug: str) -> None:
         if not ADDON_SLUG_RE.fullmatch(slug):
@@ -125,7 +130,7 @@ class SupervisorClient:
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "ha-operations-broker/0.5.0",
+                "User-Agent": "ha-operations-broker/0.5.1",
             },
             method="POST",
         )

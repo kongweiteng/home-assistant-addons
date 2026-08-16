@@ -50,7 +50,7 @@ def create_server(
         )
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "HAOperationsBroker/0.5.0"
+        server_version = "HAOperationsBroker/0.5.1"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

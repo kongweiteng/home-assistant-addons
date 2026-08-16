@@ -43,7 +43,7 @@ class SupervisorClient:
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
-                "User-Agent": "ha-manager-executor/0.1.0",
+                "User-Agent": "ha-manager-executor/0.1.1",
             },
             method="GET",
         )
@@ -62,4 +62,9 @@ class SupervisorClient:
             raise SupervisorError("supervisor_invalid_json", "Supervisor response is invalid") from exc
         if not isinstance(payload, dict) or payload.get("result") != "ok" or not isinstance(payload.get("data"), dict):
             raise SupervisorError("supervisor_rejected", "Supervisor did not return Add-on information")
-        return normalize_addon_info(payload["data"])
+        result = normalize_addon_info(payload["data"])
+        if result.get("installed") is None:
+            # A successful /addons/<slug>/info response already proves the
+            # Add-on is installed. Current HAOS releases omit this field.
+            result["installed"] = True
+        return result

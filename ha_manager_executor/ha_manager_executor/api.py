@@ -22,7 +22,7 @@ def create_server(
     allowlist_count: int,
 ) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "HAManagerExecutor/0.1.0"
+        server_version = "HAManagerExecutor/0.1.1"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

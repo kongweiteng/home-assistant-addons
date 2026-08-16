@@ -1,5 +1,12 @@
 # 变更日志
 
+## [0.5.1] - 2026-08-16
+
+### 修复
+
+- 兼容 Home Assistant OS Supervisor 的 `/addons/<slug>/info` 成功响应省略或返回空 `installed` 字段；仅在该固定已安装 Add-on 信息端点内规范化为 `true`，使 baseline、Manager shadow 和执行前复核保持一致。
+- 显式布尔值仍原样保留；未扩大 action、target、Supervisor endpoint 或执行权限，默认执行开关、动作列表和白名单继续关闭。
+
 ## [0.5.0] - 2026-08-05
 
 ### 新增

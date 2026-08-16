@@ -137,11 +137,11 @@ class PackagingTests(unittest.TestCase):
         package = (ADDON / "operations_broker" / "__init__.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('version: "0.5.0"', config)
-        self.assertIn('server_version = "HAOperationsBroker/0.5.0"', api)
+        self.assertIn('version: "0.5.1"', config)
+        self.assertIn('server_version = "HAOperationsBroker/0.5.1"', api)
         self.assertNotIn('ha-operations-broker/0.1"', supervisor)
-        self.assertIn('ha-operations-broker/0.5.0"', supervisor)
-        self.assertIn('__version__ = "0.5.0"', package)
+        self.assertIn('ha-operations-broker/0.5.1"', supervisor)
+        self.assertIn('__version__ = "0.5.1"', package)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: manager", config)
@@ -362,6 +362,24 @@ class SupervisorClientTests(unittest.TestCase):
         self.assertNotIn("options", result)
         self.assertNotIn("network", result)
         self.assertNotIn("must-not-return", json.dumps(result))
+        self.assertIs(result["installed"], True)
+
+    def test_client_preserves_explicit_installed_false(self) -> None:
+        client = SupervisorClient(
+            "supervisor-test-token",
+            opener=lambda *_args, **_kwargs: FakeResponse(
+                {
+                    "result": "ok",
+                    "data": {
+                        "slug": "example_addon",
+                        "state": "stopped",
+                        "version": "1.2.3",
+                        "installed": False,
+                    },
+                }
+            ),
+        )
+        self.assertIs(client.addon_info("example_addon")["installed"], False)
 
     def test_client_rejects_slug_before_network(self) -> None:
         client = SupervisorClient(

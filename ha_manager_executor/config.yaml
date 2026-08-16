@@ -1,5 +1,5 @@
 name: HA Manager Executor
-version: "0.1.0"
+version: "0.1.1"
 slug: ha_manager_executor
 description: "只读 shadow 模式的独立 Home Assistant Add-on manager 权限域执行器。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ha_manager_executor"

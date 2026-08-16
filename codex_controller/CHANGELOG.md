@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.8
+
+- 固定 Runner 制品升级为 `0.3.5`。临时 Controller/Relay 认证不可用改为 Runner 进程内指数退避重连，不再退出并依赖 LaunchAgent 反复拉起；永久凭据错误、身份不匹配和非法认证响应仍立即失败关闭。
+- Runner 只替换尚未发送的心跳，保留已发送未 ACK 的持久心跳，清理过期心跳并安全忽略迟到 ACK；Codex 长任务在工作线程执行时，WSS 主循环继续发送 `busy` 心跳，避免短暂控制面不可用被放大为 90 秒离线和 `recovery_required`。
+- Controller 镜像内置与公开 Runner `0.3.5` Release 同字节的 manifest。配套 Relay `0.2.7` 只更新安装脚本的固定 Runner 版本；Registry、lease、恢复确认、普通微信、MCP、Renovation Hub 和 Operations 权限边界不变。
+
 ## 0.5.7
 
 - 修复旧 Runner result 在任务已经进入终态或 `recovery_required` 后，仍被新 Schema 提前拒绝为 `runner_payload_invalid` 而无法传输 ACK 的问题。只有凭据、body digest、Runner/task、assignment epoch 和 lease 全部匹配的不可覆盖旧结果才返回 `runner_late_message`；活动任务的旧 Schema 仍 fail closed。

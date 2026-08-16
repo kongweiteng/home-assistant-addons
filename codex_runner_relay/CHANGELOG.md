@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.7
+
+- `/install/<ticket>` 固定升级到 Runner `0.3.5`，与 Controller `0.5.8` 的内置 manifest 和四平台自包含制品保持一致。
+- WSS、IPv4 Controller 客户端、迟到终态 ACK、ticket/enrollment 不落盘、Registry/lease 所有权和最小权限数据面不变。
+
 ## 0.2.6
 
 - Controller 已将 assignment 置为不可覆盖终态并返回 `runner_late_message` 时，Relay 向 Runner 返回对应 event ACK，避免旧 result 永久阻塞 heartbeat 和在线状态。

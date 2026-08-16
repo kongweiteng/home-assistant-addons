@@ -4,4 +4,4 @@
 
 Relay 不拥有 Runner Registry、凭据摘要、任务 lease、Git、Codex、项目策略或生产部署权限。它没有 Ingress、host network、privileged、Docker socket、主机目录挂载或宿主端口默认映射。
 
-`0.2.6` 在既有 WSS 数据面和受限 `/install/<ticket>` 基础上，固定 Relay 到 Controller 使用 IPv4，并处理 Controller 明确拒绝的迟到终态事件。只有 `runner_late_message` 会被视为已经由 Controller 权威消费并向 Runner 返回传输 ACK，避免旧 outbox 事件永久阻塞后续 heartbeat；Controller 的 `recovery_required`、Runner 本地 task/result 证据和 worktree 都不改变，其他 Controller 错误继续失败关闭。
+`0.2.7` 在既有 WSS 数据面和受限 `/install/<ticket>` 基础上，将安装脚本固定版本升级为 Runner `0.3.5`，使 Controller `0.5.8` 的四平台制品可以通过严格版本身份校验。Relay 到 Controller 的 IPv4、迟到终态 ACK、Registry/lease 所有权、ticket 不落盘和其他错误失败关闭边界保持不变。

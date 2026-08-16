@@ -43,7 +43,7 @@ class SupervisorClient:
             headers={
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
-                "User-Agent": "ha-operations-broker/0.5.1",
+                "User-Agent": "ha-operations-broker/0.5.2",
             },
             method="GET",
         )
@@ -130,7 +130,7 @@ class SupervisorClient:
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "ha-operations-broker/0.5.1",
+                "User-Agent": "ha-operations-broker/0.5.2",
             },
             method="POST",
         )

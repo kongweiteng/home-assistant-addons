@@ -1,5 +1,5 @@
 name: HA Operations Broker
-version: "0.5.1"
+version: "0.5.2"
 slug: ha_operations_broker
 description: "默认禁用、由 Passkey 授权且只允许精确白名单 Add-on 重启的 Home Assistant 操作代理。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/ha_operations_broker"

@@ -137,11 +137,11 @@ class PackagingTests(unittest.TestCase):
         package = (ADDON / "operations_broker" / "__init__.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('version: "0.5.1"', config)
-        self.assertIn('server_version = "HAOperationsBroker/0.5.1"', api)
+        self.assertIn('version: "0.5.2"', config)
+        self.assertIn('server_version = "HAOperationsBroker/0.5.2"', api)
         self.assertNotIn('ha-operations-broker/0.1"', supervisor)
-        self.assertIn('ha-operations-broker/0.5.1"', supervisor)
-        self.assertIn('__version__ = "0.5.1"', package)
+        self.assertIn('ha-operations-broker/0.5.2"', supervisor)
+        self.assertIn('__version__ = "0.5.2"', package)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: manager", config)
@@ -195,6 +195,17 @@ class PackagingTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn("pip install --no-cache-dir --no-deps", dockerfile)
+
+    def test_ingress_ui_requires_a_top_level_passkey_context(self) -> None:
+        ui = (ADDON / "operations_broker" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn('const passkeyRequiresTopLevel = window.self !== window.top;', ui)
+        self.assertIn('id="secure-window"', ui)
+        self.assertIn('target="_blank" rel="noopener noreferrer"', ui)
+        self.assertIn('$("open-secure-window").href = window.location.href;', ui)
+        self.assertIn('$("enroll").classList.add("hidden");', ui)
+        self.assertIn('$("authorize").disabled = true;', ui)
+        self.assertIn("navigator.credentials.create", ui)
+        self.assertIn("navigator.credentials.get", ui)
 
     def test_source_has_only_fixed_execution_and_no_arbitrary_process_capability(self) -> None:
         combined = "\n".join(

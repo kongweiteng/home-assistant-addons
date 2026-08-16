@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-版本 `0.5.1` 提供只读预检、Broker 自有 Passkey 授权根、默认关闭的 restart-only 执行器、恢复/备份证据凭据隔离、策略/适配器/基线/证据绑定和持久租约，并兼容 HAOS Add-on 信息接口省略 `installed` 字段的响应。唯一实现的写动作仍是 `restart_addon`；HACS、官方 Integration、页面整理、备份、Recorder、缓存和其他 Add-on 生命周期动作仍未实现。
+版本 `0.5.2` 提供只读预检、Broker 自有 Passkey 授权根、默认关闭的 restart-only 执行器、恢复/备份证据凭据隔离、策略/适配器/基线/证据绑定和持久租约，并兼容 HAOS Add-on 信息接口省略 `installed` 字段的响应。Ingress iframe 内只用于核对提案并引导打开同一会话的顶层安全窗口；Passkey 注册与签名固定在顶层 WebAuthn 上下文中完成。唯一实现的写动作仍是 `restart_addon`；HACS、官方 Integration、页面整理、备份、Recorder、缓存和其他 Add-on 生命周期动作仍未实现。
 
 源码与本地测试通过不等于已经在正式 HAOS 完成权限、Passkey、重启或恢复验收。
 
@@ -75,8 +75,8 @@
 ## Passkey 授权
 
 1. `POST /v1/authorization/requests` 提交 `{"version":1,"action_id":"..."}`。
-2. HA 管理员从 Ingress 打开对应 `approval_id`。
-3. 已注册的 Passkey 在精确 RP/origin 下完成用户验证。
+2. HA 管理员从 Ingress 打开对应 `approval_id`，核对提案后点击“在安全窗口中打开”。
+3. 同一已登录会话的顶层安全窗口保留原 `approval_id`，已注册的 Passkey 在精确 RP/origin 下完成用户验证；不得绕过 Touch ID 或安全密钥。
 4. Broker 生成绑定 action、proposal hash、HA 用户哈希、credential 哈希和有效期的一次性收据。
 
 授权本身不会调用 Supervisor。浏览器也没有执行按钮；执行只能由内部 bearer API 发起。

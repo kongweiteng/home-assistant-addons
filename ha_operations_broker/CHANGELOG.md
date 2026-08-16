@@ -1,5 +1,16 @@
 # 变更日志
 
+## [0.5.2] - 2026-08-16
+
+### 修复
+
+- Ingress iframe 中不再直接发起 WebAuthn；页面保留提案核对，并提供 `noopener noreferrer` 的顶层安全窗口入口，避免 Chrome 报 `Invalid 'sameOriginWithAncestors' value`。
+- 顶层窗口继续使用原精确 HTTPS RP/origin、HA Ingress 用户身份、enrollment token 和一次性 challenge；仍要求本人完成 Touch ID 或安全密钥验证，没有增加旁路注册或签名能力。
+
+### 安全
+
+- 执行总开关、动作列表与精确白名单默认值不变；本版本不新增 action、Supervisor endpoint、宿主端口或权限。
+
 ## [0.5.1] - 2026-08-16
 
 ### 修复

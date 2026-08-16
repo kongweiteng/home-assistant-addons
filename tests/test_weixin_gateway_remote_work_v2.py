@@ -516,6 +516,63 @@ class GatewayV2IntegrationTests(unittest.TestCase):
         self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 0, "errors": 0})
         self.assertEqual(len(self.client.sent), 3)
 
+    def test_start_reply_racing_automatic_watch_is_delivered_once(self) -> None:
+        class BlockingFirstSendClient(StubIlinkClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.first_send_started = None
+                self.release_first_send = None
+
+            async def send_text(self, to_user_id, text, context_token, client_id):
+                self.sent.append(
+                    {
+                        "to": to_user_id,
+                        "text": text,
+                        "context": context_token,
+                        "client_id": client_id,
+                    }
+                )
+                if len(self.sent) == 1:
+                    assert self.first_send_started is not None
+                    assert self.release_first_send is not None
+                    self.first_send_started.set()
+                    await self.release_first_send.wait()
+                return {"ret": 0}
+
+        client = BlockingFirstSendClient()
+        raw = raw_message("v2-race-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.controller.state = "dispatched"
+        self.controller.stage = "relay"
+
+        async def exercise_race() -> None:
+            service = GatewayService(
+                identity_store=self.identity_store,
+                store=self.store,
+                controller=self.controller,  # type: ignore[arg-type]
+                bootstrap_identity={},
+                poller_enabled=False,
+                owner_pairing_enabled=False,
+                activation_confirmation="",
+                max_media_bytes=1024,
+                remote_work_enabled=True,
+                runner_manager_v2_enabled=True,
+                remote_work_ttl_seconds=1800,
+            )
+            service.client = client  # type: ignore[assignment]
+            client.first_send_started = asyncio.Event()
+            client.release_first_send = asyncio.Event()
+            initial = asyncio.create_task(service._ingest(raw))
+            await client.first_send_started.wait()
+            automatic = asyncio.create_task(service._deliver_runner_manager_v2_updates())
+            await asyncio.sleep(0)
+            client.release_first_send.set()
+            await asyncio.gather(initial, automatic)
+
+        self.run_async(exercise_race())
+
+        self.assertEqual(len(client.sent), 1)
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 1, "errors": 0})
+
     def test_pending_watch_survives_gateway_restart(self) -> None:
         raw = raw_message("v2-restart-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
         self.controller.state = "running"

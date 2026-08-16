@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.5`。
+当前版本：`0.4.6`。
 
 ## 配置
 
@@ -180,7 +180,7 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 
 - v2 start/status/continue/cancel 使用有界 JSON、稳定 request ID、owner principal hash 和严格响应契约。
 - start、continue、cancel 成功后会在 SQLite 中持久保存 task 与原始微信身份路由；Gateway 重启后继续调用 status，并在状态、阶段或安全结果摘要变化时自动回复。
-- 自动回复使用 task 与结果指纹派生的确定性出站 ID。相同结果最多发送一次；`completed`、`failed`、`cancelled`、`expired` 送达后关闭跟踪，`awaiting_confirmation`、`recovery_required` 提示后继续跟踪。
+- 自动回复使用 task、结果指纹和当前 watch 来源消息派生的确定性出站 ID。首次立即回复与后台 watch 对同一结果复用同一持久作业和 iLink client ID，相同结果最多发送一次；只有实际发送成功或明确抑制后才更新通知指纹。`completed`、`failed`、`cancelled`、`expired` 送达后关闭跟踪，`awaiting_confirmation`、`recovery_required` 提示后继续跟踪。
 - Controller 暂时不可用、微信会话过期或发送失败时保留活动跟踪并重试；陈旧上下文按同一 client ID 无 token 降级一次，真正的 iLink 限流按 5 秒起步、最高 1 分钟指数退避。owner、用户或身份路由变化时发送前门禁会抑制并关闭旧路由。`/work status` 只执行一次查询，不会单独创建新跟踪。
 - v2 命令不会同时进入 v1 MQTT；Controller 失败、超时、返回非法 DTO 或没有匹配 Runner 时，Gateway 只回复一次脱敏错误，不回退 v1 或普通聊天。
 - `runner_manager_v2_enabled=false` 时维持原 v1/普通聊天分流；`remote_work_enabled=false` 与 v2 开关相互独立，但正式迁移时必须保证同一精确命令只有一个执行路径。
@@ -206,6 +206,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 从 `0.4.4` 回退到 `0.4.3` 前先确认 Runner Manager v2 的 active 跟踪为 0，或明确接受旧版本暂时不再自动查询这些 task。`0.4.3` 会忽略 additive `runner_manager_v2_watches` 表，不会删除记录；恢复 `0.4.4` 后可继续跟踪。回退不会影响 Poller、多身份、普通聊天、通知、附件、Remote Work v1、Controller、Relay 或 Runner。
 
 从 `0.4.5` 回退到 `0.4.4` 不涉及数据库降级；旧版本会继续读取同一 Runner watch，但会重新把陈旧上下文 `-2 + unknown error` 当作普通限流并高频重试。回退前应确认 active 跟踪为 0，或先恢复当前用户的有效上下文，避免重新触发该缺陷。
+
+从 `0.4.6` 回退到 `0.4.5` 不涉及数据库降级；旧版本仍能读取现有 watch 和出站分块，但首次立即回复与后台 watch 会重新使用不同发送键。回退前应确认没有新启动的 active Runner task，避免重新出现 `dispatched` 并发重复通知。
 
 从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
 

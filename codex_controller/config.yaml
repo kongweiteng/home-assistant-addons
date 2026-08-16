@@ -1,5 +1,5 @@
 name: Codex Controller
-version: "0.5.9"
+version: "0.5.10"
 slug: codex_controller
 description: "基于官方 Codex app-server 的持久任务、认证与受限工具控制器。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_controller"

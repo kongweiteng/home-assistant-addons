@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.10
+
+- 修复已经收到 `awaiting_confirmation` 结构化结果并释放 lease 的任务仍被离线 sweep 误判为 `recovery_required` 的问题。等待确认现在保持可继续/可取消状态，不会因 Runner 后续离线而伪造未知执行结果。
+- 真正进入 `recovery_required` 时会原子恢复 Runner 的 `current_task_id` 关联；对旧版本已经形成的 `idle + current_task_id=null` 孤立 recovery，管理员在确认没有其他活动任务后仍可使用审计式 `confirmed_failed` 收口，不删除、不重放 task、worktree、分支或 Session。
+
 ## 0.5.9
 
 - 有效的 active-task `busy` heartbeat 现在在同一 SQLite 事务内同时延长任务和 active lease 的到期时间，保持原 Runner、lease ID 和 assignment epoch 不变；重复 heartbeat 仍按 sequence/body digest 幂等处理。

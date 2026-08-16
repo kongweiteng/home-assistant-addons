@@ -1734,18 +1734,30 @@ class RunnerStore:
                 "SELECT * FROM runner_tasks WHERE task_id=?",
                 (task_id,),
             ).fetchone()
-            if (
-                task is None
-                or task["assigned_runner_id"] != runner_id
-                or runner["current_task_id"] != task_id
-            ):
+            if task is None or task["assigned_runner_id"] != runner_id:
                 connection.rollback()
                 raise StoreError(
                     "runner_task_not_found",
                     "Runner recovery task 不存在",
                     status=404,
                 )
-            if task["state"] != "recovery_required" or runner["work_state"] != "recovery_required":
+            conflicting_task = connection.execute(
+                "SELECT 1 FROM runner_tasks WHERE assigned_runner_id=? AND task_id<>? "
+                "AND state IN ('leased','dispatched','queued','running','awaiting_confirmation','recovery_required') LIMIT 1",
+                (runner_id, task_id),
+            ).fetchone()
+            orphaned_recovery = (
+                runner["current_task_id"] is None
+                and runner["work_state"] == "idle"
+                and task["stage"] == "recovery"
+                and task["action_required"] == "Runner 失联且任务已运行，禁止自动转移"
+                and conflicting_task is None
+            )
+            linked_recovery = (
+                runner["current_task_id"] == task_id
+                and runner["work_state"] == "recovery_required"
+            )
+            if task["state"] != "recovery_required" or not (linked_recovery or orphaned_recovery):
                 connection.rollback()
                 raise StoreError(
                     "runner_task_state_conflict",
@@ -1809,7 +1821,7 @@ class RunnerStore:
         reset = recovery = expired = disabled = 0
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            for task in connection.execute("SELECT * FROM runner_tasks WHERE state IN ('waiting_runner','leased','dispatched','queued','running','awaiting_confirmation')").fetchall():
+            for task in connection.execute("SELECT * FROM runner_tasks WHERE state IN ('waiting_runner','leased','dispatched','queued','running')").fetchall():
                 if _parse_time(task["expires_at"]) <= now_time and task["state"] == "waiting_runner":
                     connection.execute("UPDATE runner_tasks SET state='expired',stage='expired',updated_at=? WHERE task_id=?", (now, task["task_id"]))
                     expired += 1
@@ -1826,8 +1838,8 @@ class RunnerStore:
                         (now, task["task_id"]),
                     )
                     connection.execute(
-                        "UPDATE runner_registry SET work_state='recovery_required',updated_at=? WHERE runner_id=?",
-                        (now, runner["runner_id"]),
+                        "UPDATE runner_registry SET work_state='recovery_required',current_task_id=?,updated_at=? WHERE runner_id=?",
+                        (task["task_id"], now, runner["runner_id"]),
                     )
                     recovery += 1
                 elif lease_expired:

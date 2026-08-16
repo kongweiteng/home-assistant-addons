@@ -427,6 +427,67 @@ class RunnerSchedulerTests(unittest.TestCase):
         self.assertEqual(lease["state"], "released")
         self.assertIsNotNone(lease["released_at"])
 
+    def test_awaiting_confirmation_result_is_not_swept_into_recovery(self) -> None:
+        runner_id, credential = self.add_runner("Runner Clarification")
+        task = self.add_task(61)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+
+        waiting = self.result(
+            assignment,
+            credential,
+            sequence=3,
+            state="awaiting_confirmation",
+        )
+        self.assertEqual(waiting["state"], "awaiting_confirmation")
+        self.assertEqual(self.store.runner(runner_id)["work_state"], "idle")
+        self.assertIsNone(self.store.runner(runner_id)["current_task_id"])
+        self.assertEqual(self.active_lease(assignment["request"]["lease_id"])["state"], "released")
+
+        self.heartbeat_idle(runner_id, credential, sequence=2)
+        self.clock.advance(21)
+        outcome = self.store.sweep()
+
+        self.assertEqual(outcome["recovery_required"], 0)
+        current = self.store.work_task(task["task_id"])
+        self.assertEqual(current["state"], "awaiting_confirmation")
+        self.assertEqual(current["stage"], "handoff")
+        self.assertEqual(current["action_required"], "clarification")
+        self.assertEqual(self.store.runner(runner_id)["work_state"], "idle")
+        self.assertIsNone(self.store.runner(runner_id)["current_task_id"])
+
+    def test_recovery_resolution_closes_legacy_orphan_without_replay(self) -> None:
+        runner_id, credential = self.add_runner("Runner Orphan Recovery")
+        task = self.add_task(62)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+        self.clock.advance(21)
+        self.store.sweep()
+
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute(
+                "UPDATE runner_registry SET work_state='idle',current_task_id=NULL WHERE runner_id=?",
+                (runner_id,),
+            )
+
+        runner = self.store.runner(runner_id)
+        resolution = {
+            "task_id": task["task_id"],
+            "resolution": "confirmed_failed",
+            "revision": runner["revision"],
+            "request_id": "resolve-orphaned-recovery-0001",
+        }
+        resolved = self.store.resolve_task_recovery(runner_id, resolution)
+
+        self.assertEqual(resolved["task"]["state"], "failed")
+        self.assertEqual(resolved["task"]["stage"], "recovery_resolved")
+        self.assertEqual(resolved["task"]["error_code"], "recovery_confirmed_failed")
+        self.assertEqual(resolved["runner"]["work_state"], "idle")
+        self.assertIsNone(resolved["runner"]["current_task_id"])
+        self.assertEqual(self.store.resolve_task_recovery(runner_id, resolution), resolved)
+
     def test_legacy_invalid_result_is_classified_as_late_only_after_recovery(self) -> None:
         runner_id, credential = self.add_runner("Runner Legacy")
         task = self.add_task(55)

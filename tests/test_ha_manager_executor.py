@@ -76,7 +76,7 @@ class PackagingTests(unittest.TestCase):
         ):
             self.assertTrue((ADDON / relative).is_file(), relative)
         config = (ADDON / "config.yaml").read_text(encoding="utf-8")
-        self.assertIn('version: "0.1.0"', config)
+        self.assertIn('version: "0.1.1"', config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: manager", config)
         self.assertRegex(config, r"(?ms)ports:\n\s+8099/tcp: null")
@@ -159,6 +159,28 @@ class SupervisorClientTests(unittest.TestCase):
         self.assertEqual(seen["method"], "GET")
         self.assertEqual(seen["url"], "http://supervisor/addons/example_addon/info")
         self.assertNotIn("secret", result)
+
+    def test_missing_installed_is_normalized_for_installed_info_endpoint(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return None
+            def read(self, _limit):
+                return json.dumps(
+                    {
+                        "result": "ok",
+                        "data": {
+                            key: value
+                            for key, value in OBSERVATION.items()
+                            if key != "installed"
+                        },
+                    }
+                ).encode()
+
+        result = SupervisorClient(
+            "s" * 32, opener=lambda *_args, **_kwargs: Response()
+        ).addon_info("example_addon")
+        self.assertIs(result["installed"], True)
+        self.assertEqual(addon_baseline_etag(result), addon_baseline_etag(OBSERVATION))
 
     def test_timeout_and_large_response_have_stable_errors(self):
         def timeout_opener(*_args, **_kwargs): raise URLError("down")

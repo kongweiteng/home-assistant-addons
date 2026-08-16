@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-版本 `0.1.0` 是 Manager 权限域的只读 shadow。它只读取 `/addons/<slug>/info`，不调用任何 Supervisor 写端点，也不接受任意 URL、endpoint、参数、配置、Shell、路径或自由 JSON。
+版本 `0.1.1` 是 Manager 权限域的只读 shadow。它只读取 `/addons/<slug>/info`，并把该成功响应中缺失或为空的 `installed` 规范化为 `true`，不调用任何 Supervisor 写端点，也不接受任意 URL、endpoint、参数、配置、Shell、路径或自由 JSON。
 
 ## 配置
 

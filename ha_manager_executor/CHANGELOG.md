@@ -1,5 +1,12 @@
 # 变更日志
 
+## [0.1.1] - 2026-08-16
+
+### 修复
+
+- 兼容 HAOS Supervisor 成功的 Add-on 信息响应省略或返回空 `installed` 字段，使 Manager shadow 与 Broker 的 baseline 计算一致。
+- 仍只调用固定 GET 信息端点，`execution_allowed=false`，未增加任何 Supervisor 写方法、宿主端口或 Ingress。
+
 ## [0.1.0] - 2026-08-05
 
 ### 新增

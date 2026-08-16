@@ -1,6 +1,6 @@
 # HA Operations Broker
 
-HA Operations Broker 是 Home Assistant 的独立操作授权与最小执行边界。`0.5.0` 在 restart-only 基础上增加恢复/备份证据凭据隔离、不可变策略/适配器/基线/备份证据绑定，以及 SQLite 持久 singleton/resource lease。唯一受支持的写动作仍是重启精确白名单中的 Add-on。
+HA Operations Broker 是 Home Assistant 的独立操作授权与最小执行边界。`0.5.3` 在 restart-only 基础上提供恢复/备份证据凭据隔离、不可变策略/适配器/基线/备份证据绑定和 SQLite 持久 singleton/resource lease，并兼容 HAOS 省略 `installed` 字段的 Add-on 信息响应。Ingress 内嵌页面会把 Passkey 注册与签名引导到同一会话、带显式顶层上下文标记的安全窗口，避免浏览器在 iframe WebAuthn 上下文中失败。唯一受支持的写动作仍是重启精确白名单中的 Add-on。
 
 默认配置绝不执行写操作：
 

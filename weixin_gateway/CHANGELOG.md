@@ -5,6 +5,9 @@
 - 新增持久装修进度采集会话和附件映射，支持跨消息图片/视频/说明、一次模糊确认、暂停恢复、状态、取消、完成、256 项上限与重启恢复。
 - 普通附件继续不构成保存授权；明确“刚才这些图片归档为装修进度”时复用 `media_archive_context@1` 的精确批次并升级为新采集会话，不丢失旧重试契约。
 - 完成接口严格核对 Gateway received、Hub stored 和事件 linked 数量；Controller 抑制普通连续单图回复时，Gateway 仍会停止输入状态并持久完成消息。
+- 修复 Runner Manager v2 首次 `dispatched` 回复与后台 watch 同时发送时的竞态：同一 watch 代次现在按 `task_id + 安全结果指纹 + source_message_id` 复用同一持久出站作业和 iLink client ID。
+- 通知指纹仍只在实际发送成功或明确抑制后更新；失败可使用原发送键重试，continue/cancel 的新 source message 会形成新的 watch 代次，不会吞掉合理的新阶段回复。
+- 新增并发回归测试，稳定复现首次回复尚未落库时后台查询抢占发送锁的时序，验证 `dispatched`、`running`、终态各阶段最多发送一次。
 
 ## 0.4.5
 

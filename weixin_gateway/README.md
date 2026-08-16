@@ -21,6 +21,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.4.4` 为 Runner Manager v2 增加持久任务跟踪与自动微信回传：start、continue、cancel 成功后会在 Gateway 重启后继续查询状态，自动发送阶段变化和最终结果；相同结果不会重复发送，终态送达后关闭跟踪。
 - `0.4.5` 区分陈旧 `context_token` 与真实 iLink 限流：长任务回传遇到 `-2 + unknown error` 时清除该用户旧上下文并用同一 client ID 无 token 重试一次；真实限流改为有界指数退避，避免高频重试。
 - `0.4.7` 新增按 identity + principal + conversation 隔离的装修进度采集会话，支持明确开始、一次模糊确认、暂停/恢复/状态/取消/完成、256 项清单和重启恢复；先发图片再明确归档为装修进度时会保留旧归档契约并自动升级到新会话。
+- `0.4.7` 同时保留 `0.4.6` 的首次 `dispatched` 回复与后台 watch 并发去重：同一 watch 代次复用同一持久出站作业和微信 client ID，只有实际发送成功后才更新通知指纹，失败重试与 continue/cancel 新代次保持可用。
 - `0.4.3` 修复多身份页面变量覆盖导致的 `document.createElement is not a function`，并新增不改长期 desired state 的有界维护暂停/恢复接口；维护超时或 Gateway 重启后会按原状态自动恢复。
 - 新成员由 Owner 在 Ingress 生成独立二维码和一次性接入码；扫码微信与发送接入码的微信必须一致，绑定消息不会进入 Controller。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。
@@ -78,7 +79,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.4.1` 的归档请求按 identity + principal + conversation 隔离，只选择未消费、未过期且未被活动/完成请求占用的附件。附件本身仍不构成归档授权；数量不匹配、取消、过期或模糊指令不会把图片提交给媒体写工具。
 - `0.4.7` 的采集完成 ACK 只有在 Controller 回报 Gateway received、Hub stored 和事件 linked 三数相等，且 Gateway 自身 received 未发生变化时才接受；普通图片仍不因附件本身自动写入装修档案。
 
-Runner Manager v2 使用与 v1 相同的精确命令外形，但由 `runner_manager_v2_enabled` 单独控制并调用 Controller 的确定性 API。启用 v2 时不会同时向 v1 MQTT 发布；Controller 返回错误、超时或契约不匹配时只发送一次有界失败回复，不回退到 v1 或普通 Controller job。`0.4.4` 起，start、continue、cancel 会持久登记 task 和原微信路由，后台自动查询并回传状态变化与终态；Gateway 重启后继续跟踪，相同结果使用确定性指纹最多发送一次。`0.4.5` 起，陈旧单用户上下文会使用同一 client ID 无 token 降级一次，真正的限流按 5 秒起步、最高 1 分钟退避。默认关闭时现有 v1、普通聊天、通知、Poller 和多身份链路不变。
+Runner Manager v2 使用与 v1 相同的精确命令外形，但由 `runner_manager_v2_enabled` 单独控制并调用 Controller 的确定性 API。启用 v2 时不会同时向 v1 MQTT 发布；Controller 返回错误、超时或契约不匹配时只发送一次有界失败回复，不回退到 v1 或普通 Controller job。`0.4.4` 起，start、continue、cancel 会持久登记 task 和原微信路由，后台自动查询并回传状态变化与终态；Gateway 重启后继续跟踪，相同结果使用确定性指纹最多发送一次。`0.4.5` 起，陈旧单用户上下文会使用同一 client ID 无 token 降级一次，真正的限流按 5 秒起步、最高 1 分钟退避。`0.4.6` 起，首次立即回复与后台 watch 对同一结果复用同一个持久出站键，消除并发窗口中的重复阶段消息。默认关闭时现有 v1、普通聊天、通知、Poller 和多身份链路不变。
 
 ## 本地验证
 

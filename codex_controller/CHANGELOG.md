@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.7
+
+- 修复旧 Runner result 在任务已经进入终态或 `recovery_required` 后，仍被新 Schema 提前拒绝为 `runner_payload_invalid` 而无法传输 ACK 的问题。只有凭据、body digest、Runner/task、assignment epoch 和 lease 全部匹配的不可覆盖旧结果才返回 `runner_late_message`；活动任务的旧 Schema 仍 fail closed。
+- 新增幂等且审计式的 Runner recovery 确认失败操作，只接受 HA Ingress 管理员 CSRF、当前 Runner revision、稳定 request ID 与 `confirmed_failed`。操作保留任务和审计历史，释放 lease 并让 Runner 回到 idle；不删除、不重放 task、worktree 或 Session。
+
 ## 0.5.6
 
 - 固定 Runner 制品升级为 `0.3.4`。Runner 在启动 Codex 前核对已登记仓库与任务 linked worktree 的绝对 Git common dir 一致，并只把该目录作为 `workspace-write` 的附加可写目录，使 `git add`、本地 commit、refs 和 reflog 可以在隔离任务中完成。

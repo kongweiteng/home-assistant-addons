@@ -125,6 +125,12 @@ class RunnerManagerService:
         self._require_enabled()
         return self.store.request_self_check(runner_id, payload)
 
+    def resolve_task_recovery(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._require_enabled()
+        result = self.store.resolve_task_recovery(runner_id, payload)
+        self.dispatch_waiting()
+        return result
+
     def revoke_enrollment(self, runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
         return self.store.revoke_enrollment(runner_id, payload)

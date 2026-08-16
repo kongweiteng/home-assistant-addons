@@ -1500,6 +1500,7 @@ class RunnerStore:
         return self._public_task(updated)
 
     def record_result(self, payload: dict[str, Any], *, credential: str) -> dict[str, Any]:
+        self._reject_immutable_late_result(payload, credential=credential)
         required = {
             "version",
             "message_type",
@@ -1601,6 +1602,60 @@ class RunnerStore:
             connection.commit()
         return self._public_task(updated)
 
+    def _reject_immutable_late_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        credential: str,
+    ) -> None:
+        """Classify an authenticated legacy result after the task became immutable."""
+
+        if payload.get("version") != 2 or payload.get("message_type") != "result":
+            return
+        try:
+            runner_id = self._runner_id(payload.get("runner_id"))
+            task_id = self._task_id(payload.get("task_id"))
+        except StoreError:
+            return
+        epoch = payload.get("assignment_epoch")
+        sequence = payload.get("sequence")
+        lease_id = payload.get("lease_id")
+        digest = payload.get("body_digest")
+        if (
+            not isinstance(epoch, int)
+            or isinstance(epoch, bool)
+            or epoch < 1
+            or not isinstance(sequence, int)
+            or isinstance(sequence, bool)
+            or sequence < 1
+            or not isinstance(lease_id, str)
+            or not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+        ):
+            return
+        body = dict(payload)
+        body.pop("body_digest", None)
+        if digest != _digest(body):
+            return
+        self.verify_credential(runner_id, credential)
+        with self._connect() as connection:
+            task = connection.execute(
+                "SELECT assigned_runner_id,assignment_epoch,lease_id,state FROM runner_tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        if (
+            task is not None
+            and task["assigned_runner_id"] == runner_id
+            and task["assignment_epoch"] == epoch
+            and task["lease_id"] == lease_id
+            and task["state"] in TERMINAL_TASK_STATES | {"awaiting_confirmation", "recovery_required"}
+        ):
+            raise StoreError(
+                "runner_late_message",
+                "Runner task 已进入不可覆盖状态，迟到消息被拒绝",
+                status=409,
+            )
+
     def work_task(self, task_id: str) -> dict[str, Any]:
         task_id = self._task_id(task_id)
         with self._connect() as connection:
@@ -1608,6 +1663,102 @@ class RunnerStore:
         if row is None:
             raise StoreError("runner_task_not_found", "Runner task 不存在", status=404)
         return self._public_task(row)
+
+    def resolve_task_recovery(
+        self,
+        runner_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Record an operator-reviewed failed outcome without replay or deletion."""
+
+        required = {"task_id", "resolution", "revision", "request_id"}
+        if set(payload) != required or payload.get("resolution") != "confirmed_failed":
+            raise StoreError("runner_payload_invalid", "Runner recovery 解决字段无效")
+        runner_id = self._runner_id(runner_id)
+        task_id = self._task_id(payload.get("task_id"))
+        revision = self._revision(payload.get("revision"))
+        request_id = self._request_id(payload.get("request_id"))
+        body_digest = _digest(payload)
+        action = f"resolve_task_recovery:{task_id}"
+        now = self.clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = self._admin_replay(
+                connection,
+                request_id,
+                action,
+                body_digest,
+                runner_id,
+            )
+            if replay is not None:
+                connection.commit()
+                return replay
+            runner = self._locked_runner(connection, runner_id, revision)
+            task = connection.execute(
+                "SELECT * FROM runner_tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if (
+                task is None
+                or task["assigned_runner_id"] != runner_id
+                or runner["current_task_id"] != task_id
+            ):
+                connection.rollback()
+                raise StoreError(
+                    "runner_task_not_found",
+                    "Runner recovery task 不存在",
+                    status=404,
+                )
+            if task["state"] != "recovery_required" or runner["work_state"] != "recovery_required":
+                connection.rollback()
+                raise StoreError(
+                    "runner_task_state_conflict",
+                    "仅 recovery_required task 可以确认失败",
+                    status=409,
+                )
+            connection.execute(
+                "UPDATE runner_tasks SET state='failed',stage='recovery_resolved',error_code='recovery_confirmed_failed',action_required=NULL,updated_at=? WHERE task_id=?",
+                (now, task_id),
+            )
+            connection.execute(
+                "UPDATE runner_leases SET state='released',released_at=? WHERE task_id=? AND state='active'",
+                (now, task_id),
+            )
+            next_admin = "disabled" if runner["admin_state"] == "draining" else runner["admin_state"]
+            connection.execute(
+                "UPDATE runner_registry SET admin_state=?,work_state='idle',current_task_id=NULL,revision=revision+1,updated_at=? WHERE runner_id=?",
+                (next_admin, now, runner_id),
+            )
+            self._event(
+                connection,
+                "runner_task_recovery_resolved",
+                runner_id=runner_id,
+                task_id=task_id,
+                metadata={"resolution": "confirmed_failed"},
+            )
+            updated_task = connection.execute(
+                "SELECT * FROM runner_tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            updated_runner = connection.execute(
+                "SELECT * FROM runner_registry WHERE runner_id=?",
+                (runner_id,),
+            ).fetchone()
+            response = {
+                "task": self._public_task(updated_task),
+                "runner": self._public_runner(updated_runner, now=now),
+                "resolution": "confirmed_failed",
+            }
+            self._save_admin_replay(
+                connection,
+                request_id,
+                action,
+                body_digest,
+                runner_id,
+                response,
+            )
+            connection.commit()
+        return response
 
     def list_tasks(self, *, limit: int = 100) -> dict[str, Any]:
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1000:

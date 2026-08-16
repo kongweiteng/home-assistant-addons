@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.6`。
+当前版本：`0.5.7`。
 
 ## 通用微信会话
 
@@ -24,7 +24,7 @@
 
 ## Runner Center v2
 
-`0.5.6` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.7` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
@@ -38,6 +38,8 @@
 - enrollment 状态固定为 `pending`、`claimed`、`expired` 或 `revoked`。pending 可以撤销或重新生成；重新生成会吊销所有未领取旧 token。已领取长期凭据的 Runner 只能使用凭据轮换，不能重新生成 enrollment。相同 request ID 重放只返回脱敏状态，不恢复命令、token 或凭据。
 - 页面可启用、停用、排空停用、紧急停用、轮换凭据和吊销删除。凭据轮换值仍只显示一次；删除只吊销并归档，不删除服务器、Agent、worktree、分支或 Codex Session。
 - Scheduler 只向 `enabled + online + idle` 且项目、标签、能力和 policy revision 匹配的 Runner 原子分配一个 lease。已运行任务失联进入 `recovery_required`，禁止自动转移；未运行且 lease 过期的任务才可递增 assignment epoch 重新调度。
+- 旧 Runner 在 task 已进入终态或 `recovery_required` 后重发旧 Schema result 时，Controller 只在凭据、body digest、Runner/task、assignment epoch 和 lease 全部匹配后返回 `runner_late_message`；Relay 可仅对该明确不可覆盖结果 ACK。活动任务仍先执行完整当前 Schema 校验。
+- 管理员在已核对 Runner 本地状态和 worktree 后，可调用 `POST /api/runners/<runner_id>/recovery-resolution`，正文仅接受 `task_id`、`resolution=confirmed_failed`、当前 Runner `revision` 和幂等 `request_id`。该操作仅保留并确认失败结果、释放 lease 和清除 Runner 的 recovery 忙状态；不删除或重放任务、worktree、分支或 Session。
 - 页面与 API 不显示源码、diff、raw Codex JSONL、完整主机路径、私钥或独立 enrollment token；一次性 token 只存在于当前页面内存中的完整安装命令，列表、详情、状态、幂等重放和日志均不回显。写操作继续使用 HA 管理员 Ingress、短期 CSRF、revision 和 request ID。
 - Controller 使用带独立 bearer 的固定内部 HTTP URL 向 Relay 发布 request/control；Relay 通过受 bearer 保护的 `/internal/v2/runner-relay/enroll`、`authenticate` 和 heartbeat/status/result 入口回传。Relay 只负责传输，Registry、enrollment、长期凭据、lease、审计和任务状态仍由 Controller 单独拥有。
 - macOS 安装为当前桌面用户 LaunchAgent。由于没有 Developer ID 签名，首次运行可能仍需系统信任确认；这不属于 Python/Codex 运行环境缺失。
@@ -172,7 +174,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；继续回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。若继续回退到 `0.4.2`，还必须撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
+从 `0.5.7` 回退到 `0.5.6` 会失去旧 Schema result 的安全 late ACK 与 Runner recovery 确认失败 API。回退前先确认 Relay outbox 无积压，且没有待核对的 `recovery_required` 任务。继续从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；继续回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。若继续回退到 `0.4.2`，还必须撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
 
 继续从 `0.4.2` 回退到 `0.3.1` 前，必须等待所有旧式未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档；`0.3.1` 不识别 enrollment 的 `revoked_at`。只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。
 

@@ -15,7 +15,7 @@ from .runner_service import RunnerManagerService
 
 RUNNER_PATH_RE = re.compile(r"^/api/runners/(RN-[A-Z2-7]{20,32})$")
 RUNNER_ACTION_RE = re.compile(
-    r"^/api/runners/(RN-[A-Z2-7]{20,32})/(self-check|drain|emergency-disable|credential-rotation|enrollment-revocation|enrollment-regeneration)$"
+    r"^/api/runners/(RN-[A-Z2-7]{20,32})/(self-check|drain|emergency-disable|credential-rotation|enrollment-revocation|enrollment-regeneration|recovery-resolution)$"
 )
 
 
@@ -49,6 +49,8 @@ def post_runner_api(
         return service.emergency_disable(runner_id, payload)
     if action == "credential-rotation":
         return service.rotate_credential(runner_id, payload)
+    if action == "recovery-resolution":
+        return service.resolve_task_recovery(runner_id, payload)
     if action == "enrollment-revocation":
         return service.revoke_enrollment(runner_id, payload)
     if action == "enrollment-regeneration":

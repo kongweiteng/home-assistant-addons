@@ -286,6 +286,93 @@ class RunnerSchedulerTests(unittest.TestCase):
         self.assertIsNone(self.store.claim_next())
         self.assertEqual(self.store.runner(other_id)["work_state"], "idle")
 
+    def test_legacy_invalid_result_is_classified_as_late_only_after_recovery(self) -> None:
+        runner_id, credential = self.add_runner("Runner Legacy")
+        task = self.add_task(55)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+        request = assignment["request"]
+        legacy = {
+            "version": 2,
+            "message_type": "result",
+            "runner_id": request["runner_id"],
+            "task_id": request["task_id"],
+            "assignment_epoch": request["assignment_epoch"],
+            "sequence": 3,
+            "created_at": self.clock(),
+            "expires_at": (self.clock.value + dt.timedelta(minutes=10)).isoformat(),
+            "lease_id": request["lease_id"],
+            "state": "failed",
+            "finished_at": self.clock(),
+            "summary": "旧版失败结果。",
+            "commits": [],
+            "changed_path_count": 0,
+            "next_actions": [],
+            "candidate_id": None,
+            "result_hash": "sha256:" + "0" * 64,
+            "error_code": "git_metadata_write_denied",
+        }
+        document = with_digest(legacy)
+        with self.assertRaises(StoreError) as active:
+            self.store.record_result(document, credential=credential)
+        self.assertEqual(active.exception.code, "runner_payload_invalid")
+
+        self.clock.advance(21)
+        self.store.sweep()
+        with self.assertRaises(StoreError) as recovered:
+            self.store.record_result(document, credential=credential)
+        self.assertEqual(recovered.exception.code, "runner_late_message")
+        current = self.store.work_task(task["task_id"])
+        self.assertEqual(current["state"], "recovery_required")
+        self.assertEqual(current["error_code"], None)
+
+        runner = self.store.runner(runner_id)
+        resolution = {
+            "task_id": task["task_id"],
+            "resolution": "confirmed_failed",
+            "revision": runner["revision"],
+            "request_id": "resolve-legacy-result-0001",
+        }
+        resolved = self.store.resolve_task_recovery(runner_id, resolution)
+        self.assertEqual(resolved["task"]["state"], "failed")
+        self.assertEqual(resolved["task"]["stage"], "recovery_resolved")
+        self.assertEqual(resolved["task"]["error_code"], "recovery_confirmed_failed")
+        self.assertEqual(resolved["runner"]["work_state"], "idle")
+        self.assertIsNone(resolved["runner"]["current_task_id"])
+        self.assertEqual(self.store.resolve_task_recovery(runner_id, resolution), resolved)
+
+        with self.assertRaises(StoreError) as late_after_resolution:
+            self.store.record_result(document, credential=credential)
+        self.assertEqual(late_after_resolution.exception.code, "runner_late_message")
+
+    def test_recovery_resolution_rejects_active_task_and_idempotency_conflict(self) -> None:
+        runner_id, credential = self.add_runner("Runner Recovery")
+        task = self.add_task(56)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+        runner = self.store.runner(runner_id)
+        payload = {
+            "task_id": task["task_id"],
+            "resolution": "confirmed_failed",
+            "revision": runner["revision"],
+            "request_id": "resolve-active-result-0001",
+        }
+        with self.assertRaises(StoreError) as active:
+            self.store.resolve_task_recovery(runner_id, payload)
+        self.assertEqual(active.exception.code, "runner_task_state_conflict")
+
+        self.clock.advance(21)
+        self.store.sweep()
+        resolved = self.store.resolve_task_recovery(runner_id, payload)
+        self.assertEqual(resolved["task"]["state"], "failed")
+        conflict = dict(payload)
+        conflict["task_id"] = "RW-OTHER000000000000000"
+        with self.assertRaises(StoreError) as replay:
+            self.store.resolve_task_recovery(runner_id, conflict)
+        self.assertEqual(replay.exception.code, "idempotency_conflict")
+
     def test_unstarted_expired_lease_can_reschedule_with_new_epoch(self) -> None:
         first_id, _ = self.add_runner("Runner A")
         second_id, _ = self.add_runner("Runner B")

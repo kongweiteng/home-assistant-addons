@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from codex_controller.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
 from codex_controller.runner_service import RunnerManagerService
@@ -238,7 +239,7 @@ class RunnerCenterUiTests(unittest.TestCase):
 
     def test_controller_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.6"
+        expected = "0.5.7"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/__init__.py",
@@ -282,7 +283,7 @@ class RunnerCenterUiTests(unittest.TestCase):
         runners_status, runners = self.request("GET", "/api/runners")
         self.assertEqual(runners_status, 200)
         self.assertEqual(runners["result"]["summary"]["total"], 0)
-        self.assertEqual(document["version"], "0.5.6")
+        self.assertEqual(document["version"], "0.5.7")
 
         disabled_manager = RunnerManagerService(self.runner_store, enabled=False)
         disabled_service = ControllerService(
@@ -392,6 +393,38 @@ class RunnerCenterUiTests(unittest.TestCase):
         )
         self.assertEqual(deleted_status, 200)
         self.assertEqual(deleted["result"]["runner"]["admin_state"], "revoked")
+
+    def test_runner_recovery_resolution_requires_csrf_and_routes_exact_payload(self) -> None:
+        csrf = self.csrf()
+        runner, _token = self.create_runner(csrf)
+        payload = {
+            "task_id": "RW-RECOVERY000000000001",
+            "resolution": "confirmed_failed",
+            "revision": runner["revision"],
+            "request_id": "ui-resolve-recovery-0001",
+        }
+        blocked_status, blocked = self.request(
+            "POST",
+            f"/api/runners/{runner['runner_id']}/recovery-resolution",
+            payload,
+        )
+        self.assertEqual((blocked_status, blocked["error"]["code"]), (403, "csrf_required"))
+
+        expected = {"task": {"state": "failed"}, "resolution": "confirmed_failed"}
+        with mock.patch.object(
+            self.manager,
+            "resolve_task_recovery",
+            return_value=expected,
+        ) as resolve:
+            status, document = self.request(
+                "POST",
+                f"/api/runners/{runner['runner_id']}/recovery-resolution",
+                payload,
+                {"X-CSRF-Token": csrf},
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(document["result"], expected)
+        resolve.assert_called_once_with(runner["runner_id"], payload)
 
     def test_enrollment_revoke_regenerate_and_internal_relay_auth_are_fail_closed(self) -> None:
         csrf = self.csrf()

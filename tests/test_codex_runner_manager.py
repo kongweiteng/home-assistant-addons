@@ -138,6 +138,7 @@ class RunnerManagerTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_create_returns_full_command_without_separate_token_and_status_is_ready(self) -> None:
+        self.assertEqual(self.store.lease_ttl_seconds, 600)
         result = self.service.create_enrollment(enrollment_payload("manager-create-0001"))
         runner_id = result["runner"]["runner_id"]
         token = self.installer.tokens[runner_id]

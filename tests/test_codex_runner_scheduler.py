@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -180,6 +181,57 @@ class RunnerSchedulerTests(unittest.TestCase):
         )
         return self.store.heartbeat(heartbeat, credential=credential)
 
+    def heartbeat_busy(
+        self,
+        assignment: dict,
+        credential: str,
+        *,
+        sequence: int,
+    ) -> dict:
+        request = assignment["request"]
+        runner = self.store.runner(request["runner_id"])
+        heartbeat = with_digest(
+            {
+                "version": 2,
+                "message_type": "heartbeat",
+                "runner_id": request["runner_id"],
+                "task_id": request["task_id"],
+                "assignment_epoch": request["assignment_epoch"],
+                "sequence": sequence,
+                "created_at": self.clock(),
+                "expires_at": (self.clock.value + dt.timedelta(seconds=90)).isoformat(),
+                "online": True,
+                "protocol_version": 2,
+                "agent_version": str(runner["agent_version"]),
+                "codex_version": str(runner["codex_version"]),
+                "os": str(runner["os"]),
+                "arch": str(runner["arch"]),
+                "labels": list(runner["labels"]),
+                "allowed_projects": list(runner["allowed_projects"]),
+                "capabilities": list(runner["capabilities"]),
+                "queue_depth": 0,
+                "work_state": "busy",
+                "active_lease_id": request["lease_id"],
+                "self_check": "ok",
+                "policy_revision": int(runner["policy_revision"]),
+                "updated_at": self.clock(),
+            }
+        )
+        return self.store.heartbeat(heartbeat, credential=credential)
+
+    def active_lease(self, lease_id: str) -> sqlite3.Row:
+        connection = sqlite3.connect(self.store.path)
+        connection.row_factory = sqlite3.Row
+        try:
+            row = connection.execute(
+                "SELECT * FROM runner_leases WHERE lease_id=?",
+                (lease_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert row is not None
+        return row
+
     def add_task(self, index: int = 1) -> dict:
         task, _ = self.store.create_work_task(
             {
@@ -285,6 +337,95 @@ class RunnerSchedulerTests(unittest.TestCase):
         self.assertEqual(recovered["assigned_runner_id"], assigned_id)
         self.assertIsNone(self.store.claim_next())
         self.assertEqual(self.store.runner(other_id)["work_state"], "idle")
+
+    def test_busy_heartbeat_atomically_renews_task_and_active_lease(self) -> None:
+        _runner_id, credential = self.add_runner("Runner Renew")
+        task = self.add_task(57)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+        original_expiry = assignment["request"]["lease_expires_at"]
+
+        self.clock.advance(4)
+        self.heartbeat_busy(assignment, credential, sequence=2)
+
+        current = self.store.work_task(task["task_id"])
+        lease = self.active_lease(assignment["request"]["lease_id"])
+        expected_expiry = (self.clock.value + dt.timedelta(seconds=5)).isoformat()
+        self.assertEqual(current["lease_expires_at"], expected_expiry)
+        self.assertEqual(lease["expires_at"], expected_expiry)
+        self.assertGreater(current["lease_expires_at"], original_expiry)
+        self.assertEqual(current["assignment_epoch"], assignment["request"]["assignment_epoch"])
+        self.assertEqual(current["lease_id"], assignment["request"]["lease_id"])
+
+    def test_offline_running_task_waits_for_lease_expiry_before_recovery(self) -> None:
+        self.store = RunnerStore(
+            Path(self.temporary.name) / "long-lease.sqlite3",
+            clock=self.clock,
+            online_after_seconds=10,
+            offline_after_seconds=20,
+            lease_ttl_seconds=60,
+        )
+        runner_id, credential = self.add_runner("Runner Grace")
+        task = self.add_task(58)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+
+        self.clock.advance(21)
+        before_expiry = self.store.sweep()
+        current = self.store.work_task(task["task_id"])
+        self.assertEqual(before_expiry["recovery_required"], 0)
+        self.assertEqual(current["state"], "running")
+        self.assertEqual(current["assigned_runner_id"], runner_id)
+        self.assertEqual(current["assignment_epoch"], assignment["request"]["assignment_epoch"])
+
+        self.clock.advance(40)
+        after_expiry = self.store.sweep()
+        recovered = self.store.work_task(task["task_id"])
+        self.assertEqual(after_expiry["recovery_required"], 1)
+        self.assertEqual(recovered["state"], "recovery_required")
+        self.assertEqual(recovered["assigned_runner_id"], runner_id)
+
+    def test_repeated_busy_heartbeats_keep_assignment_and_extend_lease_idempotently(self) -> None:
+        _runner_id, credential = self.add_runner("Runner Repeated")
+        task = self.add_task(59)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+
+        self.clock.advance(2)
+        first = self.heartbeat_busy(assignment, credential, sequence=2)
+        first_task = self.store.work_task(task["task_id"])
+        self.assertEqual(self.heartbeat_busy(assignment, credential, sequence=2), first)
+        duplicate_task = self.store.work_task(task["task_id"])
+        self.assertEqual(duplicate_task["lease_expires_at"], first_task["lease_expires_at"])
+
+        self.clock.advance(2)
+        self.heartbeat_busy(assignment, credential, sequence=3)
+        renewed = self.store.work_task(task["task_id"])
+        self.assertGreater(renewed["lease_expires_at"], first_task["lease_expires_at"])
+        self.assertEqual(renewed["assignment_epoch"], assignment["request"]["assignment_epoch"])
+        self.assertEqual(renewed["lease_id"], assignment["request"]["lease_id"])
+
+    def test_long_running_task_completes_after_heartbeat_renewal_and_releases_lease(self) -> None:
+        runner_id, credential = self.add_runner("Runner Complete")
+        task = self.add_task(60)
+        assignment = self.store.claim_next()
+        assert assignment is not None
+        self.status(assignment, credential, sequence=2)
+
+        self.clock.advance(4)
+        self.heartbeat_busy(assignment, credential, sequence=2)
+        self.clock.advance(4)
+        completed = self.result(assignment, credential, sequence=3)
+
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(self.store.runner(runner_id)["work_state"], "idle")
+        self.assertIsNone(self.store.runner(runner_id)["current_task_id"])
+        lease = self.active_lease(assignment["request"]["lease_id"])
+        self.assertEqual(lease["state"], "released")
+        self.assertIsNotNone(lease["released_at"])
 
     def test_legacy_invalid_result_is_classified_as_late_only_after_recovery(self) -> None:
         runner_id, credential = self.add_runner("Runner Legacy")

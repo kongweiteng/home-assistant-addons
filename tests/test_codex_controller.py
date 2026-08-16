@@ -1342,10 +1342,15 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn(
             'CONTROLLER_RUNNER_CENTER_V2_ENABLED", "true"', main_source
         )
+        self.assertIn("runner_lease_ttl_seconds: 600", config)
+        self.assertIn(".runner_lease_ttl_seconds // 600", run_script)
+        self.assertIn(
+            'CONTROLLER_RUNNER_LEASE_TTL_SECONDS", "600"', main_source
+        )
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.8"
+        expected = "0.5.9"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",

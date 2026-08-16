@@ -234,7 +234,7 @@ def main() -> None:
         database_path,
         online_after_seconds=int(os.environ.get("CONTROLLER_RUNNER_ONLINE_SECONDS", "30")),
         offline_after_seconds=int(os.environ.get("CONTROLLER_RUNNER_OFFLINE_SECONDS", "90")),
-        lease_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_LEASE_TTL_SECONDS", "60")),
+        lease_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_LEASE_TTL_SECONDS", "600")),
         task_ttl_seconds=int(os.environ.get("CONTROLLER_RUNNER_TASK_TTL_SECONDS", "1800")),
     )
     relay_base_url = os.environ.get("CONTROLLER_RUNNER_RELAY_BASE_URL", "")

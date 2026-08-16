@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.8`。
+当前版本：`0.5.9`。
 
 ## 通用微信会话
 
@@ -24,7 +24,7 @@
 
 ## Runner Center v2
 
-`0.5.8` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.9` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
@@ -72,7 +72,7 @@
 | `runner_center_v2_enabled` | 是否启用 Runner Center v2 API、页面和调度；默认开启，显式 false 可降级 |
 | `runner_online_seconds` | 心跳保持 online 的新鲜阈值 |
 | `runner_offline_seconds` | 超过该阈值后判定 offline；中间状态为 stale 且禁止新任务 |
-| `runner_lease_ttl_seconds` | 单次 assignment lease TTL；已运行任务失联不会因 TTL 自动转移 |
+| `runner_lease_ttl_seconds` | 单次 assignment lease TTL，默认 600 秒；有效 active-task heartbeat 会原子续期任务与 active lease，已运行任务仅在 Runner offline 且 lease 过期后进入人工恢复，绝不自动转移 |
 | `runner_task_ttl_seconds` | 等待或执行任务的总 TTL；终态与 recovery 仍按状态机处理 |
 | `runner_relay_base_url` | Relay Add-on 固定内部 HTTP 根地址，必须带显式端口且不能包含路径；与两个最小权限 token 同时配置 |
 | `runner_relay_api_token` | 仅供 Controller -> Relay 发布 request/control 的 bearer，至少 32 字符 |
@@ -175,7 +175,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.8` 回退到 `0.5.7` 会恢复 Runner `0.3.4` manifest，并失去进程内临时认证重连、慢心跳 ACK 保留和长任务稳定心跳修复；回退前先确认没有活动长任务，且 Runner/Relay outbox 已排空。从 `0.5.7` 回退到 `0.5.6` 会失去旧 Schema result 的安全 late ACK 与 Runner recovery 确认失败 API。回退前先确认 Relay outbox 无积压，且没有待核对的 `recovery_required` 任务。继续从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续从 `0.5.5` 回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续从 `0.5.4` 回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。从 `0.5.1` 回退到 `0.4.2` 前还要撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
+从 `0.5.9` 回退到 `0.5.8` 会失去 heartbeat 原子续租和“offline 且 lease 过期后才恢复”的保护，并把新安装默认 lease 恢复为 60 秒；回退前先停止新增 `/work`，等待活动任务结束并确认 Runner/Relay outbox 已排空。继续从 `0.5.8` 回退到 `0.5.7` 会恢复 Runner `0.3.4` manifest，并失去进程内临时认证重连、慢心跳 ACK 保留和长任务稳定心跳修复；回退前先确认没有活动长任务，且 Runner/Relay outbox 已排空。从 `0.5.7` 回退到 `0.5.6` 会失去旧 Schema result 的安全 late ACK 与 Runner recovery 确认失败 API。回退前先确认 Relay outbox 无积压，且没有待核对的 `recovery_required` 任务。继续从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续从 `0.5.5` 回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续从 `0.5.4` 回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。从 `0.5.1` 回退到 `0.4.2` 前还要撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
 
 继续从 `0.4.2` 回退到 `0.3.1` 前，必须等待所有旧式未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档；`0.3.1` 不识别 enrollment 的 `revoked_at`。只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。
 

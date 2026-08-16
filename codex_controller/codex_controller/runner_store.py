@@ -131,7 +131,7 @@ class RunnerStore:
         *,
         online_after_seconds: int = 30,
         offline_after_seconds: int = 90,
-        lease_ttl_seconds: int = 60,
+        lease_ttl_seconds: int = 600,
         task_ttl_seconds: int = 1800,
         clock: Callable[[], str] = utc_now,
     ) -> None:
@@ -1019,12 +1019,48 @@ class RunnerStore:
                 raise StoreError("runner_assignment_stale", "Runner heartbeat task 不匹配", status=409)
             else:
                 task = connection.execute(
-                    "SELECT assignment_epoch,lease_id FROM runner_tasks WHERE task_id=?",
+                    "SELECT assignment_epoch,lease_id,state,assigned_runner_id FROM runner_tasks WHERE task_id=?",
                     (active_task_id,),
                 ).fetchone()
-                if task is None or task["assignment_epoch"] != payload["assignment_epoch"] or task["lease_id"] != active_lease_id:
+                if (
+                    task is None
+                    or task["assigned_runner_id"] != runner_id
+                    or task["assignment_epoch"] != payload["assignment_epoch"]
+                    or task["lease_id"] != active_lease_id
+                ):
                     connection.rollback()
                     raise StoreError("runner_assignment_stale", "Runner heartbeat lease 不匹配", status=409)
+                if payload["online"] and task["state"] in ACTIVE_TASK_STATES:
+                    lease_expires_at = (
+                        _parse_time(now) + dt.timedelta(seconds=self.lease_ttl_seconds)
+                    ).isoformat()
+                    lease_updated = connection.execute(
+                        "UPDATE runner_leases SET expires_at=? WHERE lease_id=? AND task_id=? AND runner_id=? AND assignment_epoch=? AND state='active'",
+                        (
+                            lease_expires_at,
+                            active_lease_id,
+                            active_task_id,
+                            runner_id,
+                            payload["assignment_epoch"],
+                        ),
+                    ).rowcount
+                    task_updated = connection.execute(
+                        "UPDATE runner_tasks SET lease_expires_at=? WHERE task_id=? AND assigned_runner_id=? AND lease_id=? AND assignment_epoch=? AND state IN ('leased','dispatched','queued','running','awaiting_confirmation')",
+                        (
+                            lease_expires_at,
+                            active_task_id,
+                            runner_id,
+                            active_lease_id,
+                            payload["assignment_epoch"],
+                        ),
+                    ).rowcount
+                    if lease_updated != 1 or task_updated != 1:
+                        connection.rollback()
+                        raise StoreError(
+                            "runner_assignment_stale",
+                            "Runner heartbeat active lease 无效",
+                            status=409,
+                        )
             requested_work_state = payload["work_state"]
             if row["current_task_id"] and requested_work_state == "idle":
                 requested_work_state = row["work_state"]
@@ -1784,7 +1820,7 @@ class RunnerStore:
                 if runner is None or self._connectivity(runner, now_time) != "offline":
                     continue
                 lease_expired = task["lease_expires_at"] is not None and _parse_time(task["lease_expires_at"]) <= now_time
-                if task["ever_running"]:
+                if task["ever_running"] and lease_expired:
                     connection.execute(
                         "UPDATE runner_tasks SET state='recovery_required',stage='recovery',action_required='Runner 失联且任务已运行，禁止自动转移',updated_at=? WHERE task_id=?",
                         (now, task["task_id"]),

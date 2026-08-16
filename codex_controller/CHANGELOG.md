@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.9
+
+- 有效的 active-task `busy` heartbeat 现在在同一 SQLite 事务内同时延长任务和 active lease 的到期时间，保持原 Runner、lease ID 和 assignment epoch 不变；重复 heartbeat 仍按 sequence/body digest 幂等处理。
+- 已运行任务只有在 Runner 已判定 offline 且 lease 确实过期后才进入 `recovery_required`。offline 但 lease 仍有效时保留原 assignment，不重排、不恢复、不转移；迟到结果拒绝、人工 recovery resolution 和未运行任务安全重排边界不变。
+- 新安装默认 `runner_lease_ttl_seconds` 从 60 秒调整为 600 秒，为正常长任务和短期 Controller/Relay 不可用保留恢复窗口；现有实例升级时应显式把该 option 改为 600，其余配置不变。
+
 ## 0.5.8
 
 - 固定 Runner 制品升级为 `0.3.5`。临时 Controller/Relay 认证不可用改为 Runner 进程内指数退避重连，不再退出并依赖 LaunchAgent 反复拉起；永久凭据错误、身份不匹配和非法认证响应仍立即失败关闭。

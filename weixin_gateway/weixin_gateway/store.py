@@ -74,6 +74,9 @@ RUNNER_MANAGER_V2_TASK_STATES = frozenset(
         "recovery_required",
     }
 )
+RUNNER_MANAGER_V2_RETRY_MAX_SECONDS = 60
+
+
 def _chinese_media_count(value: str) -> int | None:
     digits = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
     if value == "十":
@@ -2923,9 +2926,24 @@ class GatewayStore:
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM runner_manager_v2_watches WHERE closed=0 ORDER BY updated_at,created_at,task_id LIMIT ?",
-                (limit,),
+                (max(limit * 4, limit),),
             ).fetchall()
-        return [dict(row) for row in rows]
+        now = datetime.now(timezone.utc)
+        ready: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            attempts = int(item.get("attempts") or 0)
+            if attempts:
+                delay_seconds = min(
+                    RUNNER_MANAGER_V2_RETRY_MAX_SECONDS,
+                    5 * (2 ** min(attempts - 1, 6)),
+                )
+                if parse_time(str(item["updated_at"])) + timedelta(seconds=delay_seconds) > now:
+                    continue
+            ready.append(item)
+            if len(ready) >= limit:
+                break
+        return ready
 
     def mark_runner_manager_v2_notified(
         self,

@@ -77,6 +77,16 @@ class ProtocolError(RuntimeError):
         self.delivery_unknown = delivery_unknown
 
 
+def is_stale_context_response(response: dict[str, Any]) -> bool:
+    """Distinguish iLink's stale-context ``-2`` from a genuine rate limit."""
+    ret = response.get("ret")
+    errcode = response.get("errcode")
+    if ret != RATE_LIMIT_ERRCODE and errcode != RATE_LIMIT_ERRCODE:
+        return False
+    message = str(response.get("errmsg") or response.get("msg") or "").strip().casefold()
+    return message == "unknown error"
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 

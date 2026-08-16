@@ -560,10 +560,60 @@ class GatewayV2IntegrationTests(unittest.TestCase):
         status = self.store.runner_manager_v2_status()
         self.assertEqual(status["active"], 1)
         self.assertEqual(status["errors"], 1)
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE runner_manager_v2_watches SET updated_at='2026-08-10T00:00:00+00:00'"
+            )
         self.service.poller_state = "polling"
         self.run_async(self.service._deliver_runner_manager_v2_updates())
         self.assertEqual(self.store.runner_manager_v2_status()["errors"], 0)
         self.assertIn("running", self.client.sent[-1]["text"])
+
+    def test_stale_context_retries_once_without_token_and_closes_terminal_watch(self) -> None:
+        raw = raw_message("v2-stale-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.run_async(self.service._ingest(raw))
+        self.controller.state = "completed"
+        self.controller.stage = "handoff"
+        self.controller.summary = "旧上下文降级后最终结果已送达。"
+
+        class StaleContextClient(StubIlinkClient):
+            async def send_text(self, to_user_id, text, context_token, client_id):
+                await super().send_text(to_user_id, text, context_token, client_id)
+                if context_token:
+                    return {"ret": -2, "errmsg": "unknown error"}
+                return {"ret": 0}
+
+        client = StaleContextClient()
+        self.service.client = client  # type: ignore[assignment]
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        self.assertEqual([item["context"] for item in client.sent], ["context-fixture-owner", None])
+        self.assertIsNone(self.identity_store.context(self.service.identity, "fixture-owner"))
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 0, "errors": 0})
+
+    def test_genuine_rate_limit_keeps_context_and_watch_for_bounded_retry(self) -> None:
+        raw = raw_message("v2-rate-limit-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
+        self.run_async(self.service._ingest(raw))
+        self.controller.state = "completed"
+        self.controller.stage = "handoff"
+
+        class RateLimitedClient(StubIlinkClient):
+            async def send_text(self, to_user_id, text, context_token, client_id):
+                await super().send_text(to_user_id, text, context_token, client_id)
+                return {"ret": -2, "errmsg": "rate limit"}
+
+        client = RateLimitedClient()
+        self.service.client = client  # type: ignore[assignment]
+        self.run_async(self.service._deliver_runner_manager_v2_updates())
+
+        self.assertEqual(len(client.sent), 1)
+        self.assertEqual(client.sent[0]["context"], "context-fixture-owner")
+        self.assertEqual(
+            self.identity_store.context(self.service.identity, "fixture-owner"),
+            "context-fixture-owner",
+        )
+        self.assertEqual(self.store.runner_manager_v2_status(), {"tracked": 1, "active": 1, "errors": 1})
+        self.assertEqual(self.store.pending_runner_manager_v2_watches(), [])
 
     def test_identity_route_change_suppresses_and_closes_old_watch(self) -> None:
         raw = raw_message("v2-identity-0001", "fixture-owner", "/work renovation-hub 只读检查仓库")
@@ -587,6 +637,10 @@ class GatewayV2IntegrationTests(unittest.TestCase):
 
         self.assertEqual(self.store.runner_manager_v2_status()["errors"], 1)
         self.assertEqual(self.store.remote_work_pending_outbox(), [])
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE runner_manager_v2_watches SET updated_at='2026-08-10T00:00:00+00:00'"
+            )
         self.controller.fail = False
         self.controller.state = "completed"
         self.controller.stage = "handoff"

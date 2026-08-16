@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.4.5
+
+- 修复长任务最终回传误把 iLink `-2 + unknown error` 当成普通限流的问题：该组合表示当前用户的 `context_token` 已陈旧，Gateway 会只清除这一条上下文并使用同一确定性 client ID 无 token 重试一次。
+- 真正的 `-2` 限流仍保留待发送状态，但 Runner Manager v2 按 5 秒起步、最高 1 分钟的指数退避查询，避免每 2 秒持续冲击微信上游。
+- `-14` 仍按身份会话过期失败关闭；陈旧单用户上下文的降级重试不会放宽 owner、用户、ClawBot 路由或 Runner 权限边界。
+
 ## 0.4.4
 
 - Runner Manager v2 在 start、continue、cancel 成功后持久登记 task 与原微信身份路由；Gateway 重启后会继续通过 Controller 状态接口跟踪，不再只发送首次 `dispatched` 回复。

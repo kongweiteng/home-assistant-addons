@@ -92,7 +92,7 @@ class PackagingTests(unittest.TestCase):
         dockerfile = (ADDON / "Dockerfile").read_text(encoding="utf-8")
         run = (ADDON / "run.sh").read_text(encoding="utf-8")
         main = (ADDON / "weixin_gateway" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('version: "0.4.4"', config_text)
+        self.assertIn('version: "0.4.5"', config_text)
         self.assertIn("notification_bridge_enabled: false", config_text)
         self.assertIn('notification_mqtt_host: ""', config_text)
         self.assertIn('notification_mqtt_username: "str?"', config_text)
@@ -578,6 +578,25 @@ class GatewayOutboundTests(unittest.TestCase):
         self.run_async(exercise())
         self.assertEqual(len(client.sent), 1)
         self.assertEqual(service.poller_state, "session_expired")
+
+    def test_stale_owner_context_retries_notification_once_without_token(self) -> None:
+        class StaleContextClient(RecordingIlinkClient):
+            async def send_text(self, to_user_id, text, context_token, client_id):
+                await super().send_text(to_user_id, text, context_token, client_id)
+                if context_token:
+                    return {"ret": -2, "errmsg": "unknown error"}
+                return {"ret": 0}
+
+        client = StaleContextClient()
+        service = self.service(identity(), client)
+
+        self.run_async(service.send_notification("message-stale-context", "正文"))
+
+        self.assertEqual(
+            [item["context_token"] for item in client.sent],
+            ["fixture-context", None],
+        )
+        self.assertIsNone(self.identity_store.context(service.identity, "fixture-owner"))
 
     def test_controller_reply_and_notification_share_one_outbound_lock(self) -> None:
         client = RecordingIlinkClient(delay=0.02)

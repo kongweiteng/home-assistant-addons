@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.4`。
+当前版本：`0.4.5`。
 
 ## 配置
 
@@ -129,7 +129,7 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 - 图片预取、上传或发送明确失败时，发送“图片发送失败”短期链接；最终 send 请求超时或传输结果未知时记录 `delivery_state_unknown`，不盲目重发图片，改发“状态暂无法确认”链接。链接只允许由私有 `controller_ingress_base_url` 与 Controller 固定 `/downloads/artifacts/<opaque-token>` 拼接。
 - `controller_ingress_base_url` 必须为无 userinfo/query/fragment 的 HTTPS 地址，生产发布前必须在 Add-on options 直接填写真实 Controller Ingress 基址，不得写入 Git、聊天或普通日志。为空时图片失败回退会保持未完成并返回 `artifact_fallback_unconfigured`。
 - suspended/revoked、owner 变化或权限画像不匹配时，摘要、图片和链接全部抑制；session expired 时停止所有出站，不把失败链接当作第二条绕过路径。
-- 任一微信发送或长轮询返回 iLink 会话过期时，Gateway 立即进入 `session_expired`，停止所有微信出站；不会先清除 `context_token` 再尝试第二次发送。Controller 已完成结果保持 `controller_submitted`，等待身份修复后恢复。
+- 长轮询或发送明确返回 `-14` 时，Gateway 立即进入 `session_expired` 并停止该身份出站。发送返回 `-2 + unknown error` 时表示该用户的 `context_token` 已陈旧，不等同于普通限流：Gateway 只清除这一条上下文，使用同一确定性 client ID 无 token 重试一次；仍失败则保留持久待回复，不跨身份 fallback。
 
 ## MQTT 主动通知
 
@@ -181,7 +181,7 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 - v2 start/status/continue/cancel 使用有界 JSON、稳定 request ID、owner principal hash 和严格响应契约。
 - start、continue、cancel 成功后会在 SQLite 中持久保存 task 与原始微信身份路由；Gateway 重启后继续调用 status，并在状态、阶段或安全结果摘要变化时自动回复。
 - 自动回复使用 task 与结果指纹派生的确定性出站 ID。相同结果最多发送一次；`completed`、`failed`、`cancelled`、`expired` 送达后关闭跟踪，`awaiting_confirmation`、`recovery_required` 提示后继续跟踪。
-- Controller 暂时不可用、微信会话过期或发送失败时保留活动跟踪并重试；owner、用户或身份路由变化时发送前门禁会抑制并关闭旧路由。`/work status` 只执行一次查询，不会单独创建新跟踪。
+- Controller 暂时不可用、微信会话过期或发送失败时保留活动跟踪并重试；陈旧上下文按同一 client ID 无 token 降级一次，真正的 iLink 限流按 5 秒起步、最高 1 分钟指数退避。owner、用户或身份路由变化时发送前门禁会抑制并关闭旧路由。`/work status` 只执行一次查询，不会单独创建新跟踪。
 - v2 命令不会同时进入 v1 MQTT；Controller 失败、超时、返回非法 DTO 或没有匹配 Runner 时，Gateway 只回复一次脱敏错误，不回退 v1 或普通聊天。
 - `runner_manager_v2_enabled=false` 时维持原 v1/普通聊天分流；`remote_work_enabled=false` 与 v2 开关相互独立，但正式迁移时必须保证同一精确命令只有一个执行路径。
 - 当前版本只提供本地候选和确定性路由；真实 Relay、Runner、HAOS options 和微信验收属于后续受控发布。
@@ -204,6 +204,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 从 `0.4.3` 回退到 `0.4.2` 前先确认没有活动维护暂停。`0.4.2` 不识别维护租约 API，但长期 Poller desired state、身份、消息、归档请求和 artifact 状态均兼容；回退后发布脚本必须避免调用持久 `/api/poller/stop` 作为临时维护动作。
 
 从 `0.4.4` 回退到 `0.4.3` 前先确认 Runner Manager v2 的 active 跟踪为 0，或明确接受旧版本暂时不再自动查询这些 task。`0.4.3` 会忽略 additive `runner_manager_v2_watches` 表，不会删除记录；恢复 `0.4.4` 后可继续跟踪。回退不会影响 Poller、多身份、普通聊天、通知、附件、Remote Work v1、Controller、Relay 或 Runner。
+
+从 `0.4.5` 回退到 `0.4.4` 不涉及数据库降级；旧版本会继续读取同一 Runner watch，但会重新把陈旧上下文 `-2 + unknown error` 当作普通限流并高频重试。回退前应确认 active 跟踪为 0，或先恢复当前用户的有效上下文，避免重新触发该缺陷。
 
 从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
 

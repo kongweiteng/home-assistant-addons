@@ -25,6 +25,7 @@ from .protocol import (
     TYPING_STATUS_START,
     TYPING_STATUS_STOP,
     extract_message,
+    is_stale_context_response,
 )
 from .remote_work import (
     GatewayRemoteWorkRuntime,
@@ -1993,8 +1994,12 @@ class GatewayService:
             client_id, already_sent = self.store.prepare_chunk(message["controller_job_id"], index)
             if already_sent:
                 continue
-            context = self.identity_store.context(runtime.identity, message["sender_id"])
-            response = await runtime.client.send_text(message["sender_id"], chunk, context, client_id)
+            response = await self._send_text_with_context_fallback_locked(
+                runtime,
+                str(message["sender_id"]),
+                chunk,
+                client_id,
+            )
             ret = response.get("ret", 0)
             errcode = response.get("errcode", 0)
             if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
@@ -2013,9 +2018,25 @@ class GatewayService:
             if index + 1 < len(chunks):
                 await asyncio.sleep(0.5)
 
+    async def _send_text_with_context_fallback_locked(
+        self,
+        runtime: IdentityRuntime,
+        sender_id: str,
+        text: str,
+        client_id: str,
+    ) -> dict[str, Any]:
+        context = self.identity_store.context(runtime.identity, sender_id)
+        response = await runtime.client.send_text(sender_id, text, context, client_id)
+        if context and is_stale_context_response(response):
+            self.identity_store.clear_context(runtime.identity, sender_id)
+            runtime.typing_tickets.pop(sender_id, None)
+            runtime.typing_ticket_fetched_at.pop(sender_id, None)
+            response = await runtime.client.send_text(sender_id, text, None, client_id)
+        return response
+
     async def send_notification(self, message_id: str, text: str) -> None:
         """Send one deterministic notification to the single bound owner."""
-        runtime, owner_id, context = self._notification_owner_delivery()
+        runtime, owner_id, _context = self._notification_owner_delivery()
         if runtime.poller_state == "session_expired":
             raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
         client_id = "codex-weixin-notification-" + hashlib.sha256(message_id.encode("utf-8")).hexdigest()[:32]
@@ -2023,8 +2044,13 @@ class GatewayService:
             async with self._authorization_lock:
                 if runtime.poller_state == "session_expired":
                     raise StoreError("session_expired", "iLink 会话已过期，停止微信出站", status=503)
-                runtime, owner_id, context = self._notification_owner_delivery()
-                response = await runtime.client.send_text(owner_id, text, context, client_id)
+                runtime, owner_id, _context = self._notification_owner_delivery()
+                response = await self._send_text_with_context_fallback_locked(
+                    runtime,
+                    owner_id,
+                    text,
+                    client_id,
+                )
         ret = response.get("ret", 0)
         errcode = response.get("errcode", 0)
         if ret == SESSION_EXPIRED_ERRCODE or errcode == SESSION_EXPIRED_ERRCODE:
@@ -2709,7 +2735,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.4",
+            "version": "0.4.5",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

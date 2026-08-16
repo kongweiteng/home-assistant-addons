@@ -1,5 +1,5 @@
 name: Weixin Gateway
-version: "0.4.4"
+version: "0.4.5"
 slug: weixin_gateway
 description: "承载一人一个 ClawBot、多身份原路回复与安全多人 Codex 接入的微信网关。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/weixin_gateway"

@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.5
+
+- Relay 到 Controller 的内部 aiohttp 客户端固定使用 IPv4，避免 HAOS 容器 DNS 只返回 IPv6 Add-on 地址时把实际 ready 的 IPv4 Controller 误判为 `controller_unavailable`。
+- 固定 `local-codex-controller:8102`、双 token、WSS、安装链接、Runner Registry/lease 所有权和最小权限边界不变。
+
 ## 0.2.4
 
 - `/install/<ticket>` 固定升级到 Runner `0.3.4`，使同一登记仓库的 linked worktree 可以在 `workspace-write` 下访问受限 Git common metadata 并完成本地提交。

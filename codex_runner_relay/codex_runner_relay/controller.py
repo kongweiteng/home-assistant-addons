@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import socket
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -60,7 +61,8 @@ class ControllerClient:
 
     async def start(self) -> None:
         if self._session is None:
-            self._session = aiohttp.ClientSession(trust_env=False)
+            connector = aiohttp.TCPConnector(family=socket.AF_INET)
+            self._session = aiohttp.ClientSession(trust_env=False, connector=connector)
 
     async def close(self) -> None:
         if self._owns_session and self._session is not None:

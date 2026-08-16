@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import socket
 import subprocess
 import unittest
 
@@ -9,7 +10,7 @@ from aiohttp.test_utils import TestServer
 
 from codex_runner_relay import __version__
 from codex_runner_relay.app import ConnectionRate, RelayHub, create_app
-from codex_runner_relay.controller import validate_controller_base_url
+from codex_runner_relay.controller import ControllerClient, validate_controller_base_url
 from codex_runner_relay.protocol import (
     RelayProtocolError,
     validate_event_message,
@@ -28,8 +29,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.4")
-        self.assertIn('version: "0.2.4"', config)
+        self.assertEqual(__version__, "0.2.5")
+        self.assertIn('version: "0.2.5"', config)
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
         self.assertIn("local-codex-controller", run_script)
         self.assertNotIn("http://codex-controller:8102", config + run_script)
@@ -144,6 +145,20 @@ class FakeController:
     async def event(self, event_type: str, document: dict, *, credential: str) -> dict:
         self.events.append((event_type, dict(document), credential))
         return {"accepted": True}
+
+
+class ControllerClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_internal_controller_session_forces_ipv4(self) -> None:
+        client = ControllerClient(
+            "http://local-codex-controller:8102",
+            "T" * 32,
+        )
+        await client.start()
+        try:
+            self.assertIsNotNone(client._session)
+            self.assertEqual(client._session.connector._family, socket.AF_INET)  # type: ignore[union-attr]
+        finally:
+            await client.close()
 
 
 class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):

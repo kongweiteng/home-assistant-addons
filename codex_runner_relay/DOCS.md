@@ -3,6 +3,7 @@
 ## 内部配置
 
 - `controller_base_url`：固定为 `http://local-codex-controller:8102`；旧短主机名、其他端口、HTTPS 和附加路径都会拒绝启动。
+- Relay 到 Controller 的内部客户端固定使用 IPv4；这是为了兼容 HAOS Add-on DNS 可能只向单个容器返回不可用 IPv6 地址、而 Controller 当前只监听 IPv4 的运行环境。
 - `controller_api_token`：调用 Controller 内部 Runner Relay API 的 bearer。
 - `relay_api_token`：Controller 向 Relay 发布 request/control 的 bearer。
 - 其余 options 只控制连接数、消息大小、首帧超时、速率和 Controller 超时。

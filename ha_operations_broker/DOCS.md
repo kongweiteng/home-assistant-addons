@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-版本 `0.5.2` 提供只读预检、Broker 自有 Passkey 授权根、默认关闭的 restart-only 执行器、恢复/备份证据凭据隔离、策略/适配器/基线/证据绑定和持久租约，并兼容 HAOS Add-on 信息接口省略 `installed` 字段的响应。Ingress iframe 内只用于核对提案并引导打开同一会话的顶层安全窗口；Passkey 注册与签名固定在顶层 WebAuthn 上下文中完成。唯一实现的写动作仍是 `restart_addon`；HACS、官方 Integration、页面整理、备份、Recorder、缓存和其他 Add-on 生命周期动作仍未实现。
+版本 `0.5.3` 提供只读预检、Broker 自有 Passkey 授权根、默认关闭的 restart-only 执行器、恢复/备份证据凭据隔离、策略/适配器/基线/证据绑定和持久租约，并兼容 HAOS Add-on 信息接口省略 `installed` 字段的响应。Ingress iframe 内只用于核对提案并引导打开同一会话、带显式顶层上下文标记的安全窗口；Passkey 注册与签名固定在该顶层 WebAuthn 上下文中完成。唯一实现的写动作仍是 `restart_addon`；HACS、官方 Integration、页面整理、备份、Recorder、缓存和其他 Add-on 生命周期动作仍未实现。
 
 源码与本地测试通过不等于已经在正式 HAOS 完成权限、Passkey、重启或恢复验收。
 

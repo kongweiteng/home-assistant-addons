@@ -73,7 +73,7 @@ class ManagerExecutorClient:
                 "Authorization": f"Bearer {self._token}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
-                "User-Agent": "ha-operations-broker/0.5.2",
+                "User-Agent": "ha-operations-broker/0.5.3",
             },
             method="POST",
         )

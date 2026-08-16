@@ -59,8 +59,10 @@ APP_CSS = """
 APP_JS = r"""
 const $ = (id) => document.getElementById(id);
 const prefix = window.location.pathname.endsWith("/") ? window.location.pathname : `${window.location.pathname}/`;
-const approvalId = new URLSearchParams(window.location.search).get("approval_id") || "";
-const passkeyRequiresTopLevel = window.self !== window.top;
+const query = new URLSearchParams(window.location.search);
+const approvalId = query.get("approval_id") || "";
+const ingressContext = /^\/api\/hassio_ingress\/[^/]+\//.test(window.location.pathname);
+const passkeyRequiresTopLevel = ingressContext && query.get("passkey_context") !== "top";
 
 function api(path, options = {}) {
   return fetch(`${prefix}${path}`, {
@@ -137,7 +139,9 @@ function fillList(element, values) {
 function showSecureWindowGate(message) {
   if (!passkeyRequiresTopLevel) return false;
   $("secure-window").classList.remove("hidden");
-  $("open-secure-window").href = window.location.href;
+  const secureWindowUrl = new URL(window.location.href);
+  secureWindowUrl.searchParams.set("passkey_context", "top");
+  $("open-secure-window").href = secureWindowUrl.toString();
   $("enroll").classList.add("hidden");
   $("authorize").disabled = true;
   showStatus(message, "error");

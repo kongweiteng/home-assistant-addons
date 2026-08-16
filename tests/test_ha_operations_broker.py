@@ -137,11 +137,11 @@ class PackagingTests(unittest.TestCase):
         package = (ADDON / "operations_broker" / "__init__.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('version: "0.5.2"', config)
-        self.assertIn('server_version = "HAOperationsBroker/0.5.2"', api)
+        self.assertIn('version: "0.5.3"', config)
+        self.assertIn('server_version = "HAOperationsBroker/0.5.3"', api)
         self.assertNotIn('ha-operations-broker/0.1"', supervisor)
-        self.assertIn('ha-operations-broker/0.5.2"', supervisor)
-        self.assertIn('__version__ = "0.5.2"', package)
+        self.assertIn('ha-operations-broker/0.5.3"', supervisor)
+        self.assertIn('__version__ = "0.5.3"', package)
         self.assertIn("slug: ha_operations_broker", config)
         self.assertIn("hassio_api: true", config)
         self.assertIn("hassio_role: manager", config)
@@ -198,10 +198,11 @@ class PackagingTests(unittest.TestCase):
 
     def test_ingress_ui_requires_a_top_level_passkey_context(self) -> None:
         ui = (ADDON / "operations_broker" / "ui.py").read_text(encoding="utf-8")
-        self.assertIn('const passkeyRequiresTopLevel = window.self !== window.top;', ui)
+        self.assertIn('const ingressContext = /^\\/api\\/hassio_ingress\\/[^/]+\\//', ui)
+        self.assertIn('query.get("passkey_context") !== "top"', ui)
         self.assertIn('id="secure-window"', ui)
         self.assertIn('target="_blank" rel="noopener noreferrer"', ui)
-        self.assertIn('$("open-secure-window").href = window.location.href;', ui)
+        self.assertIn('secureWindowUrl.searchParams.set("passkey_context", "top");', ui)
         self.assertIn('$("enroll").classList.add("hidden");', ui)
         self.assertIn('$("authorize").disabled = true;', ui)
         self.assertIn("navigator.credentials.create", ui)

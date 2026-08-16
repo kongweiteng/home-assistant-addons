@@ -1,5 +1,16 @@
 # 变更日志
 
+## [0.5.3] - 2026-08-16
+
+### 修复
+
+- 不再依赖 `window.top` 判断 HA Ingress iframe；改用固定 Ingress 路径与显式 `passkey_context=top` 标记区分核对页和顶层安全窗口，兼容浏览器隔离脚本世界。
+- 安全窗口链接继续保留原 `approval_id`，并使用 `noopener noreferrer`；上下文标记不参与认证、授权或收据生成，不能替代 Touch ID、安全密钥、HA Ingress 用户身份或 enrollment token。
+
+### 安全
+
+- 执行总开关、动作列表、精确白名单、Supervisor endpoint 与权限声明均未变化。
+
 ## [0.5.2] - 2026-08-16
 
 ### 修复

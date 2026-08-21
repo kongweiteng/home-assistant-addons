@@ -4,7 +4,7 @@
 
 - `controller_base_url`：固定为 `http://local-codex-controller:8102`；旧短主机名、其他端口、HTTPS 和附加路径都会拒绝启动。
 - Relay 到 Controller 的内部客户端固定使用 IPv4；这是为了兼容 HAOS Add-on DNS 可能只向单个容器返回不可用 IPv6 地址、而 Controller 当前只监听 IPv4 的运行环境。
-- Controller 对已经进入不可覆盖终态的同一 assignment 返回 `runner_late_message` 时，Relay 只向 Runner 确认该传输事件已被权威拒绝，避免旧 outbox 队头阻塞 heartbeat。Controller task 仍保持 `recovery_required`，Runner 本地 task/result 与 worktree 证据不删除、不重放；其他错误继续关闭连接。
+- Controller 对已经进入不可覆盖终态的同一 assignment 返回 `runner_late_message` 时，Relay 只向 Runner 确认该传输事件已被权威拒绝，避免旧 outbox 队头阻塞 heartbeat。Controller 对恢复期旧 `desktop_event` 返回 `desktop_event_sequence_stale` 时也回对应 ACK，因为更高 event sequence 已成为权威事实，该旧事件不可能再次被接受；这一新增例外只绑定 `desktop_event`。Controller task 仍保持 `recovery_required`，Runner 本地 task/result 与 worktree 证据不删除、不重放，Desktop 冲突、绑定、隐私、摘要和其他错误继续关闭连接。
 - `controller_api_token`：调用 Controller 内部 Runner Relay API 的 bearer。
 - `relay_api_token`：Controller 向 Relay 发布 request/control 的 bearer。
 - `max_message_bytes` 默认 `524288`，Schema 上限 `1048576`；用于有界 Desktop 快照/事件以及既有 Runner 帧，不允许用它传输原始日志、附件或 App JSONL。

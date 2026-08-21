@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.9
+
+- Controller 已保存更高 Desktop event sequence 并返回 `desktop_event_sequence_stale` 时，Relay 对精确的 `desktop_event` 返回传输 ACK，使恢复期旧 event 可从 Runner outbox 安全删除，不再反复关闭 WSS 连接。
+- 新增终态消费例外只绑定 `desktop_event`；`desktop_event_sequence_stale` 不适用于 snapshot/receipt，既有 `runner_late_message` 行为保持兼容，冲突、绑定、隐私、摘要和其他 Controller 拒绝仍失败关闭。Runner 身份、credential、Desktop 原 Thread、Controller 数据和网络边界不变。
+
 ## 0.2.8
 
 - 新增 `desktop_command` 下行和 `desktop_snapshot`、`desktop_event`、`desktop_receipt` 上行消息类型，继续按已认证 runner_id 与单一 WSS 连接一对一转发；Relay 不解析或保存原始 App Thread/Turn ID。

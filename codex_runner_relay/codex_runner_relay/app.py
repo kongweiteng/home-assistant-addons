@@ -24,6 +24,9 @@ from .protocol import (
 
 
 CONSUMED_EVENT_REJECTIONS = frozenset({"runner_late_message"})
+CONSUMED_EVENT_TYPE_REJECTIONS = frozenset(
+    {("desktop_event", "desktop_event_sequence_stale")}
+)
 
 
 class ConnectionRate:
@@ -128,7 +131,10 @@ class RelayHub:
                     try:
                         await self.controller.event(event_type, document, credential=credential)
                     except ControllerRelayError as exc:
-                        if exc.code not in CONSUMED_EVENT_REJECTIONS:
+                        if (
+                            exc.code not in CONSUMED_EVENT_REJECTIONS
+                            and (event_type, exc.code) not in CONSUMED_EVENT_TYPE_REJECTIONS
+                        ):
                             raise
                     await ws.send_json(
                         {

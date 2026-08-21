@@ -33,8 +33,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.8")
-        self.assertIn('version: "0.2.8"', config)
+        self.assertEqual(__version__, "0.2.9")
+        self.assertIn('version: "0.2.9"', config)
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
         self.assertIn("local-codex-controller", run_script)
         self.assertNotIn("http://codex-controller:8102", config + run_script)
@@ -328,6 +328,50 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
         second_ack = await ws.receive_json(timeout=2)
         self.assertEqual(second_ack["event_type"], "heartbeat")
+        await ws.close()
+
+    async def test_stale_desktop_event_is_transport_acked_without_closing_runner(self) -> None:
+        self.controller.event_error_code = "desktop_event_sequence_stale"
+        ws = await self.enroll()
+        stale = {
+            "message_type": "desktop_event",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "e" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "desktop_event", "document": stale})
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {
+                "type": "ack",
+                "event_type": "desktop_event",
+                "body_digest": stale["body_digest"],
+            },
+        )
+        self.controller.event_error_code = None
+        heartbeat = {
+            "message_type": "heartbeat",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "f" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
+        self.assertEqual((await ws.receive_json(timeout=2))["event_type"], "heartbeat")
+        await ws.close()
+
+    async def test_stale_desktop_event_rejection_is_not_consumed_for_snapshot(self) -> None:
+        self.controller.event_error_code = "desktop_event_sequence_stale"
+        ws = await self.enroll()
+        snapshot = {
+            "message_type": "desktop_snapshot",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "1" * 64,
+        }
+        await ws.send_json(
+            {"type": "event", "event_type": "desktop_snapshot", "document": snapshot}
+        )
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {"type": "error", "code": "desktop_event_sequence_stale"},
+        )
         await ws.close()
 
     async def test_non_terminal_controller_rejection_still_closes_runner(self) -> None:

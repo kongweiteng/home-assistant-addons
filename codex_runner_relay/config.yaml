@@ -1,5 +1,5 @@
 name: Codex Runner Relay
-version: "0.2.8"
+version: "0.2.9"
 slug: codex_runner_relay
 description: "Runner Center v2 的最小权限出站 WSS 传输中继。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_runner_relay"

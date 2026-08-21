@@ -131,6 +131,20 @@ class RelayPublisherTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data), {"document": document})
         self.assertEqual(timeout, 10)
 
+        desktop = {
+            "version": 1,
+            "message_type": "desktop_command",
+            "runner_id": runner_id,
+            "request_id": "desktop-publish-0001",
+        }
+        publisher.publish_desktop_command(runner_id, desktop)
+        desktop_request, _desktop_timeout = opener.requests[-1]
+        self.assertEqual(
+            desktop_request.full_url,
+            f"http://local-codex-runner-relay:8098/internal/v1/runners/{runner_id}/desktop_command",
+        )
+        self.assertEqual(json.loads(desktop_request.data), {"document": desktop})
+
     def test_non_202_and_oversized_documents_are_rejected(self) -> None:
         publisher = RelayPublisher(
             "http://local-codex-runner-relay:8098",

@@ -33,8 +33,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.7")
-        self.assertIn('version: "0.2.7"', config)
+        self.assertEqual(__version__, "0.2.8")
+        self.assertIn('version: "0.2.8"', config)
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
         self.assertIn("local-codex-controller", run_script)
         self.assertNotIn("http://codex-controller:8102", config + run_script)
@@ -88,6 +88,32 @@ class RelayProtocolUnitTests(unittest.TestCase):
                     }
                 },
             )
+        desktop_type, desktop_document = validate_event_message(
+            {
+                "type": "event",
+                "event_type": "desktop_snapshot",
+                "document": {
+                    "message_type": "desktop_snapshot",
+                    "runner_id": RUNNER_ID,
+                },
+            },
+            runner_id=RUNNER_ID,
+        )
+        self.assertEqual(desktop_type, "desktop_snapshot")
+        self.assertEqual(desktop_document["runner_id"], RUNNER_ID)
+        command = {
+            "message_type": "desktop_command",
+            "runner_id": RUNNER_ID,
+            "request_id": "desktop-relay-0001",
+        }
+        self.assertEqual(
+            validate_publish(
+                "desktop_command",
+                RUNNER_ID,
+                {"document": command},
+            ),
+            command,
+        )
 
     def test_rate_limit_is_bounded_per_connection(self) -> None:
         rate = ConnectionRate(2)
@@ -131,13 +157,13 @@ class FakeController:
             "projects": ["renovation-hub"],
             "labels": ["local", "macos"],
             "policy_revision": 2,
-            "asset_url": "https://downloads.example.com/codex-runner-0.3.5-macos-aarch64.tar.gz",
+            "asset_url": "https://downloads.example.com/codex-runner-0.3.6-macos-aarch64.tar.gz",
             "asset_sha256": "a" * 64,
             "asset_size": 123456,
             "installer_url": "https://downloads.example.com/codex-runner-installer-2.sh",
             "installer_sha256": "b" * 64,
             "installer_size": 4567,
-            "runner_version": "0.3.5",
+            "runner_version": "0.3.6",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "self_contained": True,
@@ -204,7 +230,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {
                     "runner_id": RUNNER_ID,
                     "protocol_version": 2,
-                    "agent_version": "0.3.5",
+                    "agent_version": "0.3.6",
                     "labels": ["local", "macos"],
                     "policy_revision": 2,
                 },
@@ -236,6 +262,47 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         ack = await ws.receive_json(timeout=2)
         self.assertEqual(ack["type"], "ack")
         self.assertEqual(self.controller.events, [("heartbeat", heartbeat, CREDENTIAL)])
+        await ws.close()
+
+    async def test_desktop_upstream_and_command_downlink_share_bound_runner_connection(self) -> None:
+        ws = await self.enroll()
+        snapshot = {
+            "message_type": "desktop_snapshot",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "d" * 64,
+        }
+        await ws.send_json(
+            {"type": "event", "event_type": "desktop_snapshot", "document": snapshot}
+        )
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {
+                "type": "ack",
+                "event_type": "desktop_snapshot",
+                "body_digest": snapshot["body_digest"],
+            },
+        )
+        self.assertEqual(
+            self.controller.events[-1],
+            ("desktop_snapshot", snapshot, CREDENTIAL),
+        )
+        command = {
+            "message_type": "desktop_command",
+            "runner_id": RUNNER_ID,
+            "request_id": "desktop-relay-0001",
+        }
+        async with self.session.post(
+            self.server.make_url(
+                f"/internal/v1/runners/{RUNNER_ID}/desktop_command"
+            ),
+            json={"document": command},
+            headers={"Authorization": "Bearer " + "R" * 32},
+        ) as response:
+            self.assertEqual(response.status, 202)
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {"type": "desktop_command", "document": command},
+        )
         await ws.close()
 
     async def test_late_terminal_event_is_transport_acked_without_closing_runner(self) -> None:
@@ -312,7 +379,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "payload": {
                     "runner_id": RUNNER_ID,
                     "protocol_version": 2,
-                    "agent_version": "0.3.5",
+                    "agent_version": "0.3.6",
                     "labels": ["local", "macos"],
                     "policy_revision": 2,
                 },
@@ -352,7 +419,7 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CODEX_RUNNER_ENROLLMENT_TOKEN", body)
         self.assertIn(TOKEN, body)
         self.assertIn("codex-runner-installer-2.sh", body)
-        self.assertIn("codex-runner-0.3.5-macos-aarch64.tar.gz", body)
+        self.assertIn("codex-runner-0.3.6-macos-aarch64.tar.gz", body)
         self.assertIn("--asset-size 123456", body)
         self.assertIn("--projects renovation-hub", body)
         self.assertIn("--labels local,macos", body)

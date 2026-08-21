@@ -14,12 +14,14 @@ from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 
 from .api import create_server
 from .app_server import AppServerClient
+from .desktop_service import DesktopControllerService
+from .desktop_store import DesktopStore
 from .media_input import TurnMediaManager
 from .runner_relay import RelayPublisher, RunnerInstallerCatalog, validate_relay_auth_config
-from .runner_service import RunnerManagerService
+from .runner_service import RunnerManagerService, desktop_runner_authorized
 from .runner_store import RunnerStore
 from .service import ControllerService
-from .store import ControllerStore
+from .store import ControllerStore, StoreError
 from .tool_catalog import ALL_TOOL_NAMES
 from .tool_proxy import ToolProxyServer, ToolRouter
 
@@ -259,6 +261,28 @@ def main() -> None:
         if relay_base_url
         else None
     )
+    desktop_store = DesktopStore(database_path)
+    runner_center_enabled = (
+        os.environ.get("CONTROLLER_RUNNER_CENTER_V2_ENABLED", "true").lower() == "true"
+    )
+
+    def desktop_runner_is_authorized(runner_id: str) -> bool:
+        try:
+            runner = runner_store.runner(runner_id)
+        except StoreError:
+            return False
+        return desktop_runner_authorized(
+            runner,
+            manager_enabled=runner_center_enabled,
+        )
+
+    desktop_controller = DesktopControllerService(
+        desktop_store,
+        publisher=publisher,
+        host_stale_seconds=int(os.environ.get("CONTROLLER_RUNNER_OFFLINE_SECONDS", "90")),
+        runner_authorizer=desktop_runner_is_authorized,
+        runner_status_provider=runner_store.runner,
+    )
     installer_manifest_url = os.environ.get("CONTROLLER_RUNNER_INSTALLER_MANIFEST_URL", "")
     installer_manifest_sha256 = os.environ.get("CONTROLLER_RUNNER_INSTALLER_MANIFEST_SHA256", "")
     relay_public_url = os.environ.get("CONTROLLER_RUNNER_RELAY_PUBLIC_URL", "")
@@ -271,16 +295,17 @@ def main() -> None:
             installer_manifest_sha256,
             relay_public_url,
             timeout_seconds=int(os.environ.get("CONTROLLER_RUNNER_RELAY_TIMEOUT_SECONDS", "10")),
-            pinned_manifest_body=(Path(__file__).with_name("runner_manifest_v035.json").read_bytes()),
+            pinned_manifest_body=(Path(__file__).with_name("runner_manifest_v036.json").read_bytes()),
         )
         if installer_manifest_url
         else None
     )
     runner_manager = RunnerManagerService(
         runner_store,
-        enabled=os.environ.get("CONTROLLER_RUNNER_CENTER_V2_ENABLED", "true").lower() == "true",
+        enabled=runner_center_enabled,
         publisher=publisher,
         installer=installer,
+        desktop_controller=desktop_controller,
     )
     router = ToolRouter(
         ledger_base_url=os.environ.get("CONTROLLER_LEDGER_BASE_URL", ""),
@@ -321,6 +346,7 @@ def main() -> None:
         turn_media=turn_media,
         tool_context=router,
         runner_manager=runner_manager,
+        desktop_controller=desktop_controller,
     )
     service.start()
     server = create_server(

@@ -14,6 +14,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .app_server import AppServerError
+from .desktop_api import get_desktop_api, post_desktop_api
+from .desktop_dashboard import DESKTOP_DASHBOARD_HTML, DESKTOP_DASHBOARD_JS
 from .runner_api import (
     RUNNER_ACTION_RE,
     RUNNER_PATH_RE,
@@ -33,7 +35,8 @@ DOWNLOAD_PATH_RE = re.compile(r"^/downloads/artifacts/([A-Za-z0-9_-]{43})$")
 RECOVERY_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/recovery-resolution$")
 TOOL_PATH_RE = re.compile(r"^/api/tools/([a-z0-9_]{1,96})$")
 RUNNER_RELAY_EVENT_RE = re.compile(
-    r"^/internal/v2/runner-relay/events/(heartbeat|status|result)$"
+    r"^/internal/v2/runner-relay/events/"
+    r"(heartbeat|status|result|desktop_snapshot|desktop_event|desktop_receipt)$"
 )
 
 
@@ -61,13 +64,14 @@ def create_server(
             }
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.5.10"
+        server_version = "CodexController/0.5.11"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
 
         def do_GET(self) -> None:  # noqa: N802
-            path = urlsplit(self.path).path
+            parsed_path = urlsplit(self.path)
+            path = parsed_path.path
             if path == "/healthz":
                 status = service.status()
                 healthy = service.watchdog_healthy(status.get("app_server"))
@@ -79,6 +83,23 @@ def create_server(
             if path in {"", "/", "/index.html"}:
                 self._asset(HTTPStatus.OK, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8"))
                 return
+            if path == "/desktop":
+                self._redirect("desktop/")
+                return
+            if path in {"/desktop/", "/desktop/index.html"}:
+                self._asset(
+                    HTTPStatus.OK,
+                    "text/html; charset=utf-8",
+                    DESKTOP_DASHBOARD_HTML.encode("utf-8"),
+                )
+                return
+            if path == "/desktop/desktop.js":
+                self._asset(
+                    HTTPStatus.OK,
+                    "text/javascript; charset=utf-8",
+                    DESKTOP_DASHBOARD_JS.encode("utf-8"),
+                )
+                return
             if path == "/app.js":
                 self._asset(HTTPStatus.OK, "text/javascript; charset=utf-8", DASHBOARD_JS.encode("utf-8"))
                 return
@@ -87,6 +108,18 @@ def create_server(
                 return
             if path == "/api/tools":
                 self._json(HTTPStatus.OK, {"version": 1, "result": service.tool_status()})
+                return
+            if path.startswith("/api/desktop/v1/"):
+                if service.desktop_controller is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                    return
+                self._call(
+                    lambda: get_desktop_api(
+                        service.desktop_controller,
+                        path,
+                        parsed_path.query,
+                    )
+                )
                 return
             if path in {"/api/runners", "/api/runner-tasks"} or RUNNER_PATH_RE.fullmatch(path):
                 if service.runner_manager is None:
@@ -215,12 +248,32 @@ def create_server(
                             payload, credential=credential
                         )
                     )
-                else:
+                elif event_type == "result":
                     self._call(
                         lambda: service.runner_manager.receive_result(
                             payload, credential=credential
                         )
                     )
+                else:
+                    self._call(
+                        lambda: service.runner_manager.receive_desktop(
+                            event_type,
+                            payload,
+                            credential=credential,
+                        )
+                    )
+                return
+            if path.startswith("/api/desktop/v1/"):
+                payload = self._read_json()
+                if payload is None:
+                    return
+                if service.desktop_controller is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                    return
+                self._call(
+                    lambda: post_desktop_api(service.desktop_controller, path, payload),
+                    status=HTTPStatus.ACCEPTED,
+                )
                 return
             if path == "/api/runner-enrollments" or RUNNER_ACTION_RE.fullmatch(path):
                 payload = self._read_json()
@@ -386,6 +439,12 @@ def create_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _redirect(self, location: str) -> None:
+            self.send_response(HTTPStatus.PERMANENT_REDIRECT)
+            self.send_header("Location", location)
+            self._headers("text/plain; charset=utf-8", 0)
+            self.end_headers()
+
         def _artifact(self, callback: Any) -> None:
             try:
                 metadata, body = callback()
@@ -420,9 +479,10 @@ def create_server(
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Codex 控制器</title><style>
-:root{color-scheme:dark;--bg:#0b1220;--card:#121c2e;--line:#263751;--text:#edf4ff;--muted:#91a4bd;--blue:#4f9cff;--green:#42d392;--amber:#f1b84b;--red:#ef6b73}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,sans-serif}main{max-width:1240px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}.metric{font-size:24px;font-weight:720;display:block;margin-top:8px}.muted{color:var(--muted)}code{color:var(--green);overflow-wrap:anywhere}button,select,input{border:1px solid #375174;border-radius:9px;padding:9px 12px;background:#17253a;color:var(--text)}input{min-width:160px}button{cursor:pointer;background:#2374e1;border-color:#2374e1}button.secondary{background:#263751;border-color:#375174}button.danger{background:#9d3035;border-color:#9d3035}button.toggle{min-width:76px;background:#263751;border-color:#375174}button.toggle.on{background:#176c50;border-color:#2a9d75}button:disabled{opacity:.5;cursor:not-allowed}a{color:#7eb6ff}.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}.notice{border-left:4px solid var(--blue);padding:12px 14px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:980px;background:var(--card)}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#b8c8dc;background:#101a2a;position:sticky;top:0}.tool-name{font-weight:700}.technical{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);margin-top:4px}.badges,.runner-actions,.installation-actions,.installation-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.runner-actions button{font-size:12px;padding:6px 8px}.badge{font-size:12px;border:1px solid #3a4c65;border-radius:999px;padding:3px 7px;color:#c7d4e5}.badge.good{border-color:#28775d;color:#69deb3}.badge.warn{border-color:#8c6723;color:#f6cb72}.badge.bad{border-color:#8f3d44;color:#ff969c}.intent{max-width:310px;white-space:normal}.error{color:#ff969c}.success{color:#69deb3}.hidden{display:none}.secret-box{border-color:#8c6723;background:#211b10}.secret-box.expired{border-color:#8f3d44}.install-command{margin:14px 0;padding:14px;border:1px solid #5d4b24;border-radius:10px;background:#0d1420;color:var(--green);white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.installation-meta{color:var(--muted);margin-top:10px}.installation-meta strong{color:var(--text)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}.form-grid label{display:grid;gap:5px;color:var(--muted)}@media(max-width:700px){main{padding:14px}h1{font-size:25px}.runner-actions{min-width:230px}.install-command{font-size:12px}}
+:root{color-scheme:dark;--bg:#0b1220;--card:#121c2e;--line:#263751;--text:#edf4ff;--muted:#91a4bd;--blue:#4f9cff;--green:#42d392;--amber:#f1b84b;--red:#ef6b73}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,sans-serif}main{max-width:1240px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px}.metric{font-size:24px;font-weight:720;display:block;margin-top:8px}.muted{color:var(--muted)}code{color:var(--green);overflow-wrap:anywhere}button,select,input{border:1px solid #375174;border-radius:9px;padding:9px 12px;background:#17253a;color:var(--text)}input{min-width:160px}button{cursor:pointer;background:#2374e1;border-color:#2374e1}button.secondary{background:#263751;border-color:#375174}button.danger{background:#9d3035;border-color:#9d3035}button.toggle{min-width:76px;background:#263751;border-color:#375174}button.toggle.on{background:#176c50;border-color:#2a9d75}button:disabled{opacity:.5;cursor:not-allowed}a{color:#7eb6ff}.button-link{display:inline-block;margin:8px 0 4px;border:1px solid #375174;border-radius:9px;padding:8px 11px;background:#17253a;text-decoration:none}.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}.notice{border-left:4px solid var(--blue);padding:12px 14px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:980px;background:var(--card)}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#b8c8dc;background:#101a2a;position:sticky;top:0}.tool-name{font-weight:700}.technical{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);margin-top:4px}.badges,.runner-actions,.installation-actions,.installation-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.runner-actions button{font-size:12px;padding:6px 8px}.badge{font-size:12px;border:1px solid #3a4c65;border-radius:999px;padding:3px 7px;color:#c7d4e5}.badge.good{border-color:#28775d;color:#69deb3}.badge.warn{border-color:#8c6723;color:#f6cb72}.badge.bad{border-color:#8f3d44;color:#ff969c}.intent{max-width:310px;white-space:normal}.error{color:#ff969c}.success{color:#69deb3}.hidden{display:none}.secret-box{border-color:#8c6723;background:#211b10}.secret-box.expired{border-color:#8f3d44}.install-command{margin:14px 0;padding:14px;border:1px solid #5d4b24;border-radius:10px;background:#0d1420;color:var(--green);white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.installation-meta{color:var(--muted);margin-top:10px}.installation-meta strong{color:var(--text)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}.form-grid label{display:grid;gap:5px;color:var(--muted)}@media(max-width:700px){main{padding:14px}h1{font-size:25px}.runner-actions{min-width:230px}.install-command{font-size:12px}}
 </style></head><body><main>
 <h1>Codex 控制器</h1><p class="muted">官方 app-server · 多 Thread · 全局单活动 Turn · MCP 工具服务端门禁</p>
+<a class="button-link" href="desktop/">打开桌面原任务工作台</a>
 <div class="grid"><div class="card">服务<span class="metric" id="ready">加载中</span></div><div class="card">认证<span class="metric" id="auth">加载中</span></div><div class="card">排队<span class="metric" id="queued">-</span></div><div class="card">实际发布工具<span class="metric" id="published">-</span></div><div class="card">当前 Thread<span class="metric" id="threadShort">无活动</span></div></div>
 <h2>正式认证</h2><p id="authHelp">认证模式由 Add-on options 显式选择，禁止自动降级或混用。</p>
 <button id="login">开始设备码登录</button><button id="cancel">取消登录</button><button id="retryApiKey">重试 API Key 登录</button><button class="danger" id="logout">退出登录</button>

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
+from .desktop_service import DesktopControllerService
 from .runner_relay import RelayPublishError, RUNNER_VERSION, RunnerInstallerCatalog
 from .runner_store import RunnerStore
 from .store import StoreError
@@ -19,6 +20,23 @@ class RunnerPublisher(Protocol):
     def publish_control(self, runner_id: str, document: dict[str, Any]) -> None:
         ...
 
+    def publish_desktop_command(self, runner_id: str, document: dict[str, Any]) -> None:
+        ...
+
+
+def desktop_runner_authorized(
+    runner: Mapping[str, Any],
+    *,
+    manager_enabled: bool = True,
+) -> bool:
+    return bool(
+        manager_enabled
+        and runner.get("admin_state") == "enabled"
+        and runner.get("os") == "macos"
+        and not runner.get("archived")
+        and "desktop_takeover_v1" in runner.get("capabilities", [])
+    )
+
 
 class RunnerManagerService:
     def __init__(
@@ -28,11 +46,13 @@ class RunnerManagerService:
         enabled: bool = True,
         publisher: RunnerPublisher | None = None,
         installer: RunnerInstallerCatalog | None = None,
+        desktop_controller: DesktopControllerService | None = None,
     ) -> None:
         self.store = store
         self.enabled = bool(enabled)
         self.publisher = publisher
         self.installer = installer
+        self.desktop_controller = desktop_controller
         self.last_error: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -219,6 +239,46 @@ class RunnerManagerService:
         self.dispatch_waiting()
         return result
 
+    def receive_desktop(
+        self,
+        event_type: str,
+        payload: Mapping[str, Any],
+        *,
+        credential: str,
+    ) -> dict[str, Any]:
+        self._require_enabled()
+        if self.desktop_controller is None:
+            raise StoreError(
+                "desktop_controller_disabled",
+                "Desktop Controller 尚未启用",
+                status=409,
+            )
+        runner_id = payload.get("runner_id")
+        self.store.verify_credential(runner_id, credential)
+        runner = self.store.runner(str(runner_id))
+        if runner.get("os") != "macos":
+            raise StoreError(
+                "desktop_runner_platform_required",
+                "只有已登记的 macOS Runner 可以上报 Desktop read model",
+                status=403,
+            )
+        if "desktop_takeover_v1" not in runner.get("capabilities", []):
+            raise StoreError(
+                "desktop_runner_capability_required",
+                "Runner 未声明 Desktop takeover capability",
+                status=403,
+            )
+        if event_type == "desktop_snapshot":
+            snapshot = payload.get("snapshot")
+            project_alias = snapshot.get("project_alias") if isinstance(snapshot, Mapping) else None
+            if project_alias not in runner.get("allowed_projects", []):
+                raise StoreError(
+                    "desktop_project_not_allowed",
+                    "Desktop snapshot 项目不在 Runner 白名单",
+                    status=403,
+                )
+        return self.desktop_controller.receive(event_type, payload)
+
     def work_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Handle the exact Gateway v2 command without app-server interpretation."""
         self._require_enabled()
@@ -340,4 +400,4 @@ class RunnerManagerService:
         return result
 
 
-__all__ = ["RunnerManagerService", "RunnerPublisher"]
+__all__ = ["RunnerManagerService", "RunnerPublisher", "desktop_runner_authorized"]

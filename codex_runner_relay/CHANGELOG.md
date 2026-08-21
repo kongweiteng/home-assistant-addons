@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.2.8
+
+- 新增 `desktop_command` 下行和 `desktop_snapshot`、`desktop_event`、`desktop_receipt` 上行消息类型，继续按已认证 runner_id 与单一 WSS 连接一对一转发；Relay 不解析或保存原始 App Thread/Turn ID。
+- 默认消息上限提高到 `512 KiB`、每连接速率提高到每分钟 `1200` 条，Schema 上限分别为 `1 MiB` 和 `10000`；Runner 端净化、截断、outbox 背压以及 Controller digest/revision/receipt 校验仍是硬门禁。
+- `/install/<ticket>` 固定升级到 Runner `0.3.6`，与 Controller `0.5.11` 的内置 manifest 和四平台自包含制品保持一致。Registry、lease、ticket/enrollment 不落盘、IPv4 Controller 客户端和最小权限网络边界不变。
+
 ## 0.2.7
 
 - `/install/<ticket>` 固定升级到 Runner `0.3.5`，与 Controller `0.5.8` 的内置 manifest 和四平台自包含制品保持一致。

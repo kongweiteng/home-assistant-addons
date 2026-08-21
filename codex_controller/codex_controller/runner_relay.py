@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from .store import StoreError
 
 
-RUNNER_VERSION = "0.3.5"
+RUNNER_VERSION = "0.3.6"
 CODEX_VERSION = "0.146.0"
 PYTHON_VERSION = "3.11.13"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -159,13 +159,21 @@ class RelayPublisher:
     def publish_control(self, runner_id: str, document: dict[str, Any]) -> None:
         self._publish(runner_id, "control", document)
 
+    def publish_desktop_command(self, runner_id: str, document: dict[str, Any]) -> None:
+        self._publish(runner_id, "desktop_command", document)
+
     def _publish(self, runner_id: str, kind: str, document: dict[str, Any]) -> None:
-        if not RUNNER_ID_RE.fullmatch(runner_id) or kind not in {"request", "control"}:
+        if not RUNNER_ID_RE.fullmatch(runner_id) or kind not in {
+            "request",
+            "control",
+            "desktop_command",
+        }:
             raise RuntimeError("Runner Relay publish target 无效")
         body = json.dumps(
             {"document": document}, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
-        if len(body) > 64 * 1024:
+        maximum = 512 * 1024 if kind == "desktop_command" else 64 * 1024
+        if len(body) > maximum:
             raise RuntimeError("Runner Relay publish document 过大")
         request = Request(
             f"{self.base_url}/internal/v1/runners/{runner_id}/{kind}",
@@ -174,7 +182,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.5.10",
+                "User-Agent": "codex-controller/0.5.11",
             },
             method="POST",
         )
@@ -274,7 +282,7 @@ class RunnerInstallerCatalog:
             return manifest
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.10"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.11"},
             method="GET",
         )
         try:

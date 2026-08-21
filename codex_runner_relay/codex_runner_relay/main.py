@@ -20,9 +20,9 @@ def main() -> None:
         controller,
         api_token=os.environ["RELAY_API_TOKEN"],
         max_connections=int(os.environ.get("RELAY_MAX_CONNECTIONS", "64")),
-        max_message_bytes=int(os.environ.get("RELAY_MAX_MESSAGE_BYTES", "32768")),
+        max_message_bytes=int(os.environ.get("RELAY_MAX_MESSAGE_BYTES", "524288")),
         first_frame_timeout_seconds=int(os.environ.get("RELAY_FIRST_FRAME_TIMEOUT_SECONDS", "10")),
-        messages_per_minute=int(os.environ.get("RELAY_MESSAGES_PER_MINUTE", "120")),
+        messages_per_minute=int(os.environ.get("RELAY_MESSAGES_PER_MINUTE", "1200")),
     )
     web.run_app(create_app(hub), host="0.0.0.0", port=8098, access_log=None)
 

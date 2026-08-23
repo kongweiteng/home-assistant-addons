@@ -54,6 +54,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.5.7` 新增管理员 CSRF/revision/request ID 保护的 Runner recovery 确认失败操作。它只将已核对的 `recovery_required` 任务记为 `failed`、释放 lease 并让 Runner 回到 idle；任务、审计、worktree 和 Session 全部保留，不删除、不重放。
 - `0.5.9` 固定 Runner `0.3.5`，并让有效 active-task `busy` heartbeat 原子续期任务和 active lease。已运行任务只有在 Runner offline 且 lease 过期后才进入 `recovery_required`；默认 lease 为 600 秒，保持原 assignment/epoch、不自动转移，既有迟到结果和人工恢复边界不变。
 - `0.5.10` 将 `awaiting_confirmation` 明确视为已经接收结果的等待状态，不再参与离线 sweep；真正 recovery 会保持 task/Runner 关联。旧版本形成的孤立 recovery 仅在 task 仍属于该 Runner、Runner idle 且没有其他活动任务时允许审计式确认失败。
+- `0.5.12` 新增模型外的装修进度确定性编排：验证 Gateway 采集上下文，按最多 16 项分批登记并逐项流送，补做 Hub replay/附件 ACK，只有四方计数与失败状态完全一致时才确认完成；普通连续单图按首项/每 5 项节流回执。
 - 页面只在 HTTPS manifest、固定 SHA-256/文件大小和公开 WSS URL 全部校验成功后允许创建 Runner；创建结果同时提供短期一次性 HTTPS 安装链接和可复制终端命令，不再返回分散的 `runner_id + enrollment token`。链接 15 分钟后自动失效，支持复制、打开、撤销和重新生成；过期、领取或撤销后，页面立即清除内存中的链接与命令。
 - Relay 通过受限 `/install/<ticket>` 返回 `no-store/no-referrer/nosniff` 的摘要固定 shell，并使用受认证的 Controller 非消费式 bootstrap 检查；真正 enrollment 仍只在 Runner 首次 WSS 注册时单次消费。Relay 不保存 ticket，不把错误 ticket 回显到响应。
 - Relay 内部 URL 和两个最小权限 token 未配置时继续显示 `relay_configured=false`，等待任务不会被伪发布；`runner_relay_api_token` 只用于 Controller -> Relay 发布，`runner_relay_controller_api_token` 只用于 Relay -> Controller 回调，三项必须同时配置且 token 不得相同，否则拒绝启动。installer 未配置或摘要不匹配时仅关闭“生成安装命令”，既有 Runner Registry、列表和管理操作仍可使用。需要整体降级时可显式设置 `runner_center_v2_enabled=false`，普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。

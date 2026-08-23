@@ -1,5 +1,5 @@
 name: Renovation Hub
-version: "0.2.8"
+version: "0.2.10"
 slug: renovation_hub
 description: "独立、可审计的装修项目、账目、阶段、时间线与媒体档案。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/renovation_hub"

@@ -25,6 +25,7 @@ ATTACHMENT_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})$"
 ATTACHMENT_PREVIEW_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/preview$")
 ATTACHMENT_STREAM_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/stream$")
 ATTACHMENT_ACK_RE = re.compile(r"^/internal/v1/attachments/([A-Za-z0-9_-]{32,128})/ack$")
+PROGRESS_CAPTURE_COMPLETE_RE = re.compile(r"^/internal/v1/progress-captures/(PCS-[A-Z2-7]{26})/complete$")
 USER_RE = re.compile(r"^/api/users/(WX-[A-Z2-7]{10})$")
 USER_ACTION_RE = re.compile(r"^/api/users/(WX-[A-Z2-7]{10})/(suspend|resume|revoke)$")
 INVITATION_CANCEL_RE = re.compile(r"^/api/users/invitations/(IV-[A-Z2-7]{10})/cancel$")
@@ -51,7 +52,7 @@ def create_server(
         ).decode("ascii").rstrip("=")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "WeixinGateway/0.4.5"
+        server_version = "WeixinGateway/0.4.7"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -143,6 +144,22 @@ def create_server(
                     lambda: service.store.acknowledge_attachment(
                         unquote(ack_match.group(1)),
                         str(payload.get("sha256") or ""),
+                    )
+                )
+                return
+            capture_complete = PROGRESS_CAPTURE_COMPLETE_RE.fullmatch(path)
+            if capture_complete:
+                if not self._authorized():
+                    return
+                payload = self._read_json()
+                if payload is None:
+                    return
+                self._call(
+                    lambda: service.store.complete_progress_capture(
+                        capture_complete.group(1),
+                        received_count=payload.get("received_count"),
+                        stored_count=payload.get("stored_count"),
+                        linked_count=payload.get("linked_count"),
                     )
                 )
                 return

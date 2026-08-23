@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
+from .progress_capture import ProgressCaptureCoordinator
 from .runner_service import RunnerManagerService
 from .store import ControllerStore, StoreError
 from .tool_proxy import ToolProxyError
@@ -386,6 +387,7 @@ class ControllerService:
                 "mcp_tool_policy_v1",
                 "job_artifacts_v1",
                 "runner_manager_v2",
+                "progress_capture_v1",
             ],
         }
 
@@ -477,7 +479,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.10",
+            "version": "0.5.12",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -635,6 +637,20 @@ class ControllerService:
                     capability_profile,
                     media_archive_authorized=media_archive_authorized,
                 )
+            if ProgressCaptureCoordinator.recognizes(payload):
+                if capability_profile not in {"owner", "owner_legacy"} or self.tool_context is None:
+                    raise ToolProxyError(
+                        "tool_not_allowed_for_profile",
+                        "当前微信成员不能创建装修进度归档",
+                    )
+                outcome = ProgressCaptureCoordinator(self.tool_context).handle(payload)
+                self.store.complete_direct_result(
+                    job["job_id"],
+                    outcome.text,
+                    item_type=outcome.item_type,
+                    suppress_reply=outcome.suppress_reply,
+                )
+                return
             direct_memo = direct_memo_create_arguments(payload)
             if (
                 direct_memo is not None

@@ -1,6 +1,17 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.10`。
+当前版本：`0.5.12`。
+
+## 装修进度确定性编排
+
+Gateway 提交 `progress_capture_context@1` 后，Controller 不创建 app-server Turn，也不让模型决定附件数量或媒体工具调用。它先验证 session/scope/message/attachment 摘要与 256 项边界，再调用 Hub 固定内部 API：
+
+1. 建立或恢复 Hub 草稿会话；多个项目无法唯一确定时只返回补充引导。
+2. 按最多 16 项分批预登记，并逐项从 Gateway 非消费流读取原文到 Hub。
+3. Hub 写入后 ACK Gateway 附件；若 Hub 已存但 ACK 待确认，使用同一幂等键走 replay 补 ACK。
+4. “记录完成”前先重试 Hub 处理失败项，再核对 received/registered/stored/linked、failed/pending 和本轮 ACK 结果；完全一致后才调用 Gateway 完成接口。
+
+普通连续单图只有首项和累计 5 的倍数主动回执；失败、状态和控制动作始终回执。`reply_suppressed=true` 只抑制微信文字，不跳过消息完成、输入状态清理、附件保存或审计。
 
 ## 通用微信会话
 
@@ -175,6 +186,8 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 2. 停止 Controller，保留 `/data/controller.sqlite3` 与 `/data/codex-home` 冷备份。
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
+
+从 `0.5.12` 回退到 `0.5.10` 前先停止 Gateway Poller、关闭 intake，并确认没有 active/paused/finalizing 的装修进度会话、queued/running/recovery 作业或待补附件 ACK。旧 Controller 会忽略 `progress_capture_context@1` 和 `reply_suppressed`，因此必须与 Gateway/Hub 成组回退；保留 Controller SQLite、Gateway spool 与 Hub 草稿，恢复后再收口。
 
 从 `0.5.10` 回退到 `0.5.9` 会重新引入 `awaiting_confirmation` 被离线 sweep 误判为 recovery、以及孤立 recovery 无法审计收口的问题；回退前先确认没有等待确认或 recovery 任务。继续从 `0.5.9` 回退到 `0.5.8` 会失去 heartbeat 原子续租和“offline 且 lease 过期后才恢复”的保护，并把新安装默认 lease 恢复为 60 秒；回退前先停止新增 `/work`，等待活动任务结束并确认 Runner/Relay outbox 已排空。继续从 `0.5.8` 回退到 `0.5.7` 会恢复 Runner `0.3.4` manifest，并失去进程内临时认证重连、慢心跳 ACK 保留和长任务稳定心跳修复；回退前先确认没有活动长任务，且 Runner/Relay outbox 已排空。从 `0.5.7` 回退到 `0.5.6` 会失去旧 Schema result 的安全 late ACK 与 Runner recovery 确认失败 API。回退前先确认 Relay outbox 无积压，且没有待核对的 `recovery_required` 任务。继续从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续从 `0.5.5` 回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续从 `0.5.4` 回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。从 `0.5.1` 回退到 `0.4.2` 前还要撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
 

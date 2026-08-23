@@ -12,6 +12,8 @@ from .ledger import (
     LedgerStore,
     _idempotency_key,
     _positive_cents,
+    _classification_code,
+    CLASSIFICATION_FIELDS,
     _text,
     _validate_date,
     canonical_json,
@@ -22,14 +24,14 @@ from .ledger import (
 )
 
 
-HUB_SCHEMA_VERSION = 1
+HUB_SCHEMA_VERSION = 2
 PROJECT_STATUSES = {"active", "completed", "archived"}
 STAGE_STATUSES = {"planned", "active", "completed", "archived"}
 AREA_STATUSES = {"active", "archived"}
 EVENT_TYPES = {"progress", "note", "decision", "inspection", "milestone"}
 EVENT_STATUSES = {"active", "voided"}
 MUTATION_TARGET_TYPES = {"project", "stage", "area", "event", "transaction"}
-MUTATION_MAX_TARGETS = 100
+MUTATION_MAX_TARGETS = 1000
 
 
 def _choice(value: Any, field: str, allowed: set[str], *, default: str | None = None) -> str:
@@ -149,6 +151,38 @@ class RenovationHubStore(LedgerStore):
                     version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS payment_plans (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(id),
+                    name TEXT NOT NULL,
+                    total_amount_cents INTEGER NOT NULL CHECK(total_amount_cents > 0),
+                    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(project_id,name)
+                );
+                CREATE TABLE IF NOT EXISTS payment_plan_nodes (
+                    id TEXT PRIMARY KEY,
+                    payment_plan_id TEXT NOT NULL REFERENCES payment_plans(id),
+                    name TEXT NOT NULL,
+                    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    due_on TEXT,
+                    position INTEGER NOT NULL DEFAULT 0 CHECK(position >= 0),
+                    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(payment_plan_id,name)
+                );
+                CREATE TABLE IF NOT EXISTS payment_plan_allocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payment_plan_node_id TEXT NOT NULL REFERENCES payment_plan_nodes(id),
+                    transaction_id TEXT NOT NULL REFERENCES transactions(id),
+                    amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(payment_plan_node_id,transaction_id)
+                );
+                CREATE INDEX IF NOT EXISTS payment_plan_allocations_transaction_idx
+                    ON payment_plan_allocations(transaction_id);
                 """
             )
             connection.execute(
@@ -156,8 +190,10 @@ class RenovationHubStore(LedgerStore):
                 (str(HUB_SCHEMA_VERSION),),
             )
         from .media import initialize_media_schema
+        from .progress_capture import initialize_progress_capture_schema
 
         initialize_media_schema(self)
+        initialize_progress_capture_schema(self)
 
     def status(self) -> dict[str, Any]:
         result = super().status()
@@ -170,6 +206,9 @@ class RenovationHubStore(LedgerStore):
                     "areas": connection.execute("SELECT count(*) FROM areas WHERE status!='archived'").fetchone()[0],
                     "events": connection.execute("SELECT count(*) FROM events WHERE status='active'").fetchone()[0],
                     "media": connection.execute("SELECT count(*) FROM media_assets WHERE processing_status='ready'").fetchone()[0],
+                    "progress_captures": connection.execute(
+                        "SELECT count(*) FROM progress_capture_sessions WHERE state IN ('active','paused','finalizing')"
+                    ).fetchone()[0],
                 }
             )
         return result
@@ -214,12 +253,16 @@ class RenovationHubStore(LedgerStore):
         project_id = _text(payload.get("project_id"), "project_id", 64)
         stage_id = _text(payload.get("stage_id"), "stage_id", 64) or None
         area_id = _text(payload.get("area_id"), "area_id", 64) or None
-        if original_payment_id and not project_id:
+        if original_payment_id:
             inherited = connection.execute(
                 "SELECT project_id,stage_id,area_id FROM transaction_context WHERE transaction_id=?",
                 (original_payment_id,),
             ).fetchone()
             if inherited:
+                requested = (project_id or None, stage_id, area_id)
+                expected = (inherited["project_id"], inherited["stage_id"], inherited["area_id"])
+                if any(value is not None for value in requested) and requested != expected:
+                    raise LedgerError("refund_context_mismatch", "退款必须继承原付款的项目上下文", status=409)
                 project_id = inherited["project_id"]
                 stage_id = inherited["stage_id"]
                 area_id = inherited["area_id"]
@@ -343,11 +386,19 @@ class RenovationHubStore(LedgerStore):
         transaction_id: str,
         payload: dict[str, Any],
     ) -> None:
+        changes = payload.get("changes") or {}
+        context_fields = {"project_id", "stage_id", "area_id"}
+        if context_fields & set(changes) and "version" not in payload:
+            raise LedgerError("version_required", "修改项目上下文必须提供 version", status=409)
         if "version" not in payload:
             return
         expected = _version(payload.get("version"))
         row = connection.execute("SELECT version FROM transaction_context WHERE transaction_id=?", (transaction_id,)).fetchone()
-        if row is None or row["version"] != expected:
+        if row is None:
+            if expected == 1:
+                return
+            raise LedgerError("version_conflict", "账目已被其他请求修改", status=409)
+        if row["version"] != expected:
             raise LedgerError("version_conflict", "账目已被其他请求修改", status=409)
 
     def _after_transaction_update(
@@ -356,7 +407,55 @@ class RenovationHubStore(LedgerStore):
         transaction_id: str,
         payload: dict[str, Any],
     ) -> None:
-        if "version" not in payload:
+        changes = payload.get("changes") or {}
+        context_fields = {"project_id", "stage_id", "area_id"}
+        context_row = connection.execute(
+            "SELECT project_id,stage_id,area_id,version,updated_at FROM transaction_context WHERE transaction_id=?",
+            (transaction_id,),
+        ).fetchone()
+        if context_fields & set(changes):
+            expected = _version(payload.get("version"))
+            current = dict(context_row) if context_row else {}
+            project_changed = "project_id" in changes and (changes.get("project_id") or None) != current.get("project_id")
+            project_id = changes.get("project_id", current.get("project_id"))
+            project_id = None if project_id in {None, ""} else _text(project_id, "project_id", 64, required=True)
+            stage_id = changes.get("stage_id", None if project_changed else current.get("stage_id"))
+            area_id = changes.get("area_id", None if project_changed else current.get("area_id"))
+            stage_id = _text(stage_id, "stage_id", 64) or None
+            area_id = _text(area_id, "area_id", 64) or None
+            if project_id is None and (stage_id or area_id):
+                raise LedgerError("invalid_input", "没有项目归属时不能保留阶段或空间")
+            if project_id is not None:
+                self._validate_context_refs(connection, project_id, stage_id, area_id)
+            if context_row is None:
+                if expected != 1:
+                    raise LedgerError("version_conflict", "账目已被其他请求修改", status=409)
+                if project_id is not None:
+                    connection.execute(
+                        "INSERT INTO transaction_context(transaction_id,project_id,stage_id,area_id,version,updated_at) VALUES (?,?,?,?,1,?)",
+                        (transaction_id, project_id, stage_id, area_id, utc_now()),
+                    )
+            elif project_id is None:
+                connection.execute("DELETE FROM transaction_context WHERE transaction_id=?", (transaction_id,))
+            else:
+                cursor = connection.execute(
+                    "UPDATE transaction_context SET project_id=?,stage_id=?,area_id=?,version=version+1,updated_at=? WHERE transaction_id=? AND version=?",
+                    (project_id, stage_id, area_id, utc_now(), transaction_id, expected),
+                )
+                if cursor.rowcount != 1:
+                    raise LedgerError("version_conflict", "账目已被其他请求修改", status=409)
+            self._cascade_transaction_context(
+                connection,
+                transaction_id,
+                project_id,
+                stage_id,
+                area_id,
+                actor_hash=str(payload.get("_actor_hash") or "system"),
+                idempotency_key=str(payload.get("_idempotency_key") or "system"),
+                reason=str(payload.get("reason") or ""),
+            )
+            return
+        if "version" not in payload or context_row is None:
             return
         expected = _version(payload.get("version"))
         cursor = connection.execute(
@@ -365,6 +464,69 @@ class RenovationHubStore(LedgerStore):
         )
         if cursor.rowcount != 1:
             raise LedgerError("version_conflict", "账目已被其他请求修改", status=409)
+
+    def _clean_correction_extensions(self, changes: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for field in ("project_id", "stage_id", "area_id"):
+            if field in changes:
+                value = changes[field]
+                result[field] = None if value in {None, ""} else _text(value, field, 64, required=True)
+        return result
+
+    def _correction_extension_fields(self) -> set[str]:
+        return {"project_id", "stage_id", "area_id"}
+
+    def _cascade_transaction_context(
+        self,
+        connection: sqlite3.Connection,
+        payment_id: str,
+        project_id: str | None,
+        stage_id: str | None,
+        area_id: str | None,
+        *,
+        actor_hash: str,
+        idempotency_key: str,
+        reason: str,
+    ) -> None:
+        refund_rows = connection.execute(
+            "SELECT id FROM transactions WHERE original_payment_id=? ORDER BY id",
+            (payment_id,),
+        ).fetchall()
+        target = None if project_id is None else {
+            "project_id": project_id,
+            "stage_id": stage_id,
+            "area_id": area_id,
+        }
+        for refund in refund_rows:
+            refund_id = refund["id"]
+            current = connection.execute(
+                "SELECT project_id,stage_id,area_id,version,updated_at FROM transaction_context WHERE transaction_id=?",
+                (refund_id,),
+            ).fetchone()
+            before = dict(current) if current else None
+            if target is None:
+                connection.execute("DELETE FROM transaction_context WHERE transaction_id=?", (refund_id,))
+            elif current is None:
+                connection.execute(
+                    "INSERT INTO transaction_context(transaction_id,project_id,stage_id,area_id,version,updated_at) VALUES (?,?,?,?,1,?)",
+                    (refund_id, project_id, stage_id, area_id, utc_now()),
+                )
+            else:
+                connection.execute(
+                    "UPDATE transaction_context SET project_id=?,stage_id=?,area_id=?,version=version+1,updated_at=? WHERE transaction_id=?",
+                    (project_id, stage_id, area_id, utc_now(), refund_id),
+                )
+            self._domain_audit(
+                connection,
+                action="cascade_transaction_context",
+                target_type="transaction",
+                target_id=refund_id,
+                actor_hash=actor_hash,
+                idempotency_key=idempotency_key,
+                before=before,
+                after=target,
+                reason=reason,
+            )
 
     def _row_json(self, connection: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         result = super()._row_json(connection, row)
@@ -597,14 +759,26 @@ class RenovationHubStore(LedgerStore):
 
         mode = _choice(payload.get("mode", "preview"), "mode", {"preview", "apply"})
         target_type = _choice(payload.get("target_type"), "target_type", MUTATION_TARGET_TYPES)
-        target_ids = self._mutation_target_ids(payload.get("target_ids"))
+        selector = self._clean_mutation_selector(target_type, payload.get("selector")) if payload.get("selector") is not None else None
+        if selector is not None and payload.get("target_ids") is not None:
+            raise LedgerError("invalid_input", "target_ids 与 selector 不能同时使用")
+        if selector is not None:
+            with self._connect() as connection:
+                target_ids = self._mutation_selector_ids(connection, selector)
+            if not target_ids and mode == "apply":
+                raise LedgerError("no_matching_transactions", "批量条件没有匹配的有效付款", status=404)
+        else:
+            target_ids = self._mutation_target_ids(payload.get("target_ids"))
         reason = _text(payload.get("reason"), "reason", 500, required=True)
         patch = self._clean_mutation_patch(target_type, payload.get("patch"))
 
         if mode == "preview":
             with self._connect() as connection:
                 prepared = self._prepare_mutation(connection, target_type, target_ids, patch)
-            return self._mutation_preview_result(target_type, target_ids, patch, reason, prepared)
+            result = self._mutation_preview_result(target_type, target_ids, patch, reason, prepared)
+            if selector is not None:
+                result["selector"] = selector
+            return result
 
         if payload.get("confirmed") is not True:
             raise LedgerError("confirmation_required", "应用变更前必须明确确认预览内容", status=409)
@@ -612,7 +786,14 @@ class RenovationHubStore(LedgerStore):
         key = _idempotency_key(payload.get("idempotency_key"))
 
         def operation(connection: sqlite3.Connection) -> dict[str, Any]:
-            prepared = self._prepare_mutation(connection, target_type, target_ids, patch)
+            effective_target_ids = (
+                self._mutation_selector_ids(connection, selector)
+                if selector is not None
+                else target_ids
+            )
+            if not effective_target_ids:
+                raise LedgerError("no_matching_transactions", "批量条件没有匹配的有效付款", status=404)
+            prepared = self._prepare_mutation(connection, target_type, effective_target_ids, patch)
             if prepared["preview_digest"] != preview_digest:
                 raise LedgerError("preview_stale", "预览对应的数据已变化，请重新生成预览", status=409)
             results = self._apply_mutation(
@@ -627,7 +808,8 @@ class RenovationHubStore(LedgerStore):
             return {
                 "mode": "apply",
                 "target_type": target_type,
-                "target_ids": target_ids,
+                "target_ids": effective_target_ids,
+                "selector": selector,
                 "count": len(results),
                 "items": results,
                 "preview_digest": preview_digest,
@@ -639,13 +821,14 @@ class RenovationHubStore(LedgerStore):
                 "tool": "renovation_mutate",
                 "target_type": target_type,
                 "target_ids": target_ids,
+                "selector": selector,
                 "patch": patch,
                 "reason": reason,
                 "preview_digest": preview_digest,
             },
             operation=operation,
         )
-        return {**result, "idempotent_replay": replayed}
+        return {**result, "selector": selector, "idempotent_replay": replayed}
 
     @staticmethod
     def _mutation_target_ids(value: Any) -> list[str]:
@@ -655,6 +838,90 @@ class RenovationHubStore(LedgerStore):
         if len(set(result)) != len(result):
             raise LedgerError("invalid_input", "target_ids 不能重复")
         return result
+
+    @classmethod
+    def _clean_mutation_selector(cls, target_type: str, value: Any) -> dict[str, Any]:
+        if target_type != "transaction":
+            raise LedgerError("invalid_input", "selector 仅支持 transaction 批量修改")
+        if not isinstance(value, dict) or not value:
+            raise LedgerError("invalid_input", "selector 必须是非空对象")
+        allowed = {
+            "transaction_ids",
+            "project_id",
+            "stage_id",
+            "area_id",
+            "start",
+            "end",
+            "main_category",
+            "legacy_main_category",
+            "category",
+            "subcategory",
+            "expense_type",
+            "status",
+        }
+        unknown = sorted(set(value) - allowed)
+        if unknown:
+            raise LedgerError("invalid_input", f"selector 不支持字段：{', '.join(unknown)}")
+        result: dict[str, Any] = {}
+        if "transaction_ids" in value:
+            result["transaction_ids"] = cls._mutation_target_ids(value["transaction_ids"])
+        for field in ("project_id", "stage_id", "area_id"):
+            if field in value:
+                result[field] = cls._optional_id(value[field], field)
+        for field in ("start", "end"):
+            if field in value:
+                result[field] = _validate_date(value[field], field)
+        category = value.get("main_category", value.get("legacy_main_category"))
+        if category is not None:
+            result["main_category"] = _text(category, "main_category", 80, required=True)
+        for field in CLASSIFICATION_FIELDS:
+            if field in value:
+                result[field] = _classification_code(value[field], field)
+        if "status" in value:
+            result["status"] = _choice(value["status"], "status", {"active"})
+        if not result:
+            raise LedgerError("invalid_input", "selector 至少需要一个筛选条件")
+        if result.get("start") and result.get("end") and result["start"] > result["end"]:
+            raise LedgerError("invalid_date_range", "start 不能晚于 end")
+        return result
+
+    @staticmethod
+    def _mutation_selector_ids(connection: sqlite3.Connection, selector: dict[str, Any]) -> list[str]:
+        clauses = ["t.type='payment'", "t.status='active'"]
+        values: list[Any] = []
+        if selector.get("transaction_ids"):
+            ids = selector["transaction_ids"]
+            placeholders = ",".join("?" for _ in ids)
+            clauses.append(f"t.id IN ({placeholders})")
+            values.extend(ids)
+        if selector.get("project_id"):
+            clauses.append("c.project_id=?")
+            values.append(selector["project_id"])
+        if selector.get("stage_id"):
+            clauses.append("c.stage_id=?")
+            values.append(selector["stage_id"])
+        if selector.get("area_id"):
+            clauses.append("c.area_id=?")
+            values.append(selector["area_id"])
+        if selector.get("start"):
+            clauses.append("t.occurred_on>=?")
+            values.append(selector["start"])
+        if selector.get("end"):
+            clauses.append("t.occurred_on<=?")
+            values.append(selector["end"])
+        if selector.get("main_category"):
+            clauses.append("t.main_category=?")
+            values.append(selector["main_category"])
+        for field in CLASSIFICATION_FIELDS:
+            if selector.get(field):
+                clauses.append(f"t.{field}=?")
+                values.append(selector[field])
+        sql = f"SELECT t.id FROM transactions t LEFT JOIN transaction_context c ON c.transaction_id=t.id WHERE {' AND '.join(clauses)} ORDER BY t.occurred_on,t.id LIMIT ?"
+        values.append(MUTATION_MAX_TARGETS + 1)
+        rows = connection.execute(sql, values).fetchall()
+        if len(rows) > MUTATION_MAX_TARGETS:
+            raise LedgerError("mutation_limit_exceeded", f"匹配流水超过 {MUTATION_MAX_TARGETS} 条，请缩小筛选范围", status=413)
+        return [row["id"] for row in rows]
 
     @staticmethod
     def _optional_id(value: Any, field: str) -> str | None:
@@ -671,7 +938,7 @@ class RenovationHubStore(LedgerStore):
             "stage": {"name", "position", "status", "color", "planned_start", "planned_end", "actual_start", "actual_end"},
             "area": {"name", "position", "status"},
             "event": {"project_id", "stage_id", "area_id", "event_type", "title", "description", "occurred_at", "status"},
-            "transaction": {"amount_cents", "occurred_on", "main_category", "merchant", "note", "is_deposit", "tags", "grouped_tags", "project_id", "stage_id", "area_id"},
+            "transaction": {"amount_cents", "occurred_on", "main_category", "category", "subcategory", "expense_type", "merchant", "note", "is_deposit", "tags", "grouped_tags", "project_id", "stage_id", "area_id"},
         }[target_type]
         unknown = sorted(set(value) - allowed)
         if unknown:
@@ -716,6 +983,8 @@ class RenovationHubStore(LedgerStore):
                 clean[field] = normalize_tags(raw)
             elif field == "grouped_tags":
                 clean[field] = normalize_grouped_tags(raw)[1]
+            elif field in CLASSIFICATION_FIELDS:
+                clean[field] = _classification_code(raw, field)
             elif field in {"name", "timezone", "color", "main_category", "merchant", "note", "title", "description"}:
                 maximum = {
                     "name": 120 if target_type == "project" else 100,
@@ -773,9 +1042,10 @@ class RenovationHubStore(LedgerStore):
         context_fields = {"project_id", "stage_id", "area_id"}
         if context_fields & set(patch):
             current = before.get("context") or {}
+            project_changed = "project_id" in patch and patch.get("project_id") != current.get("project_id")
             project_id = patch.get("project_id", current.get("project_id"))
-            stage_id = patch.get("stage_id", current.get("stage_id"))
-            area_id = patch.get("area_id", current.get("area_id"))
+            stage_id = patch.get("stage_id", None if project_changed else current.get("stage_id"))
+            area_id = patch.get("area_id", None if project_changed else current.get("area_id"))
             if project_id is None and (stage_id or area_id):
                 raise LedgerError("invalid_input", "没有项目归属时不能保留阶段或空间")
             after["context"] = (
@@ -829,6 +1099,11 @@ class RenovationHubStore(LedgerStore):
                     context.get("stage_id"),
                     context.get("area_id"),
                 )
+            classification = {
+                field: str(after.get(field) or before.get(field) or "")
+                for field in CLASSIFICATION_FIELDS
+            }
+            self._validate_classification(connection, **classification)
             if "amount_cents" in patch:
                 refunded = connection.execute(
                     "SELECT coalesce(sum(amount_cents),0) FROM transactions WHERE type='refund' AND status='active' AND original_payment_id=?",
@@ -977,6 +1252,17 @@ class RenovationHubStore(LedgerStore):
                                 utc_now(),
                             ),
                         )
+                    if context_patch:
+                        self._cascade_transaction_context(
+                            connection,
+                            object_id,
+                            candidate_context["project_id"] if candidate_context else None,
+                            candidate_context.get("stage_id") if candidate_context else None,
+                            candidate_context.get("area_id") if candidate_context else None,
+                            actor_hash=actor_hash,
+                            idempotency_key=idempotency_key,
+                            reason=reason,
+                        )
                 updated = connection.execute("SELECT * FROM transactions WHERE id=?", (object_id,)).fetchone()
                 after = self._row_json(connection, updated)
                 self._audit(
@@ -1104,6 +1390,204 @@ class RenovationHubStore(LedgerStore):
         with self._connect() as connection:
             self._validate_context_refs(connection, project_id, None, None)
             return [dict(row) for row in connection.execute("SELECT * FROM areas WHERE project_id=? ORDER BY position,name", (project_id,))]
+
+    @staticmethod
+    def _payment_plan_nodes(value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list) or len(value) > 32:
+            raise LedgerError("invalid_input", "payment_nodes 必须是最多 32 个节点")
+        result: list[dict[str, Any]] = []
+        names: set[str] = set()
+        for index, raw in enumerate(value):
+            if not isinstance(raw, dict):
+                raise LedgerError("invalid_input", "payment_nodes 条目必须是对象")
+            name = _text(raw.get("name"), "payment_node.name", 120, required=True)
+            if name.casefold() in names:
+                raise LedgerError("invalid_input", "付款节点名称不能重复")
+            names.add(name.casefold())
+            result.append(
+                {
+                    "name": name,
+                    "amount_cents": _positive_cents(raw.get("amount_cents")),
+                    "due_on": None if raw.get("due_on") in {None, ""} else _validate_date(raw["due_on"], "due_on"),
+                    "position": _position(raw.get("position", index)),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _payment_plan_document(connection: sqlite3.Connection, plan_id: str) -> dict[str, Any]:
+        plan_row = connection.execute("SELECT * FROM payment_plans WHERE id=?", (plan_id,)).fetchone()
+        if plan_row is None:
+            raise LedgerError("payment_plan_not_found", "付款计划不存在", status=404)
+        nodes = [dict(row) for row in connection.execute(
+            "SELECT * FROM payment_plan_nodes WHERE payment_plan_id=? ORDER BY position,name,id",
+            (plan_id,),
+        )]
+        for node in nodes:
+            node["paid_amount_cents"] = 0
+
+        allocation_rows = connection.execute(
+            """
+            SELECT a.id,a.payment_plan_node_id,a.transaction_id,a.amount_cents,
+                   t.amount_cents AS payment_amount_cents,t.status,
+                   COALESCE((SELECT SUM(r.amount_cents) FROM transactions r
+                             WHERE r.type='refund' AND r.status='active'
+                               AND r.original_payment_id=t.id),0) AS refunded_amount_cents
+            FROM payment_plan_allocations a
+            JOIN payment_plan_nodes n ON n.id=a.payment_plan_node_id
+            JOIN transactions t ON t.id=a.transaction_id AND t.type='payment'
+            WHERE n.payment_plan_id=?
+            ORDER BY a.transaction_id,a.id
+            """,
+            (plan_id,),
+        ).fetchall()
+        node_by_id = {node["id"]: node for node in nodes}
+        remaining_by_payment: dict[str, int] = {}
+        for row in allocation_rows:
+            payment_id = str(row["transaction_id"])
+            if payment_id not in remaining_by_payment:
+                remaining_by_payment[payment_id] = max(
+                    0,
+                    int(row["payment_amount_cents"])
+                    - int(row["refunded_amount_cents"])
+                    if row["status"] == "active"
+                    else 0,
+                )
+            contribution = min(int(row["amount_cents"]), remaining_by_payment[payment_id])
+            remaining_by_payment[payment_id] -= contribution
+            node_by_id[str(row["payment_plan_node_id"])] ["paid_amount_cents"] += contribution
+
+        paid_amount = 0
+        for node in nodes:
+            paid = int(node["paid_amount_cents"])
+            total = int(node["amount_cents"])
+            node["remaining_amount_cents"] = max(0, total - paid)
+            node["payment_status"] = "paid" if node["remaining_amount_cents"] == 0 else "partial" if paid else "pending"
+            paid_amount += paid
+        total_amount = int(plan_row["total_amount_cents"])
+        remaining_amount = max(0, total_amount - paid_amount)
+        result = dict(plan_row)
+        result.update(
+            {
+                "total_amount_cents": total_amount,
+                "paid_amount_cents": paid_amount,
+                "remaining_amount_cents": remaining_amount,
+                "payment_status": "paid" if remaining_amount == 0 else "partial" if paid_amount else "pending",
+                "payment_nodes": nodes,
+            }
+        )
+        return result
+
+    def create_payment_plan(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
+        key = _idempotency_key(payload.get("idempotency_key"))
+        clean = {
+            "project_id": _text(payload.get("project_id"), "project_id", 64, required=True),
+            "name": _text(payload.get("name"), "name", 120, required=True),
+            "total_amount_cents": _positive_cents(payload.get("total_amount_cents")),
+            "payment_nodes": self._payment_plan_nodes(payload.get("payment_nodes")),
+        }
+        if sum(item["amount_cents"] for item in clean["payment_nodes"]) > clean["total_amount_cents"]:
+            raise LedgerError("payment_plan_nodes_exceed_total", "付款节点合计不能超过计划总额", status=409)
+
+        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            self._validate_context_refs(connection, clean["project_id"], None, None)
+            plan_id = str(uuid.uuid4())
+            now = utc_now()
+            try:
+                connection.execute(
+                    "INSERT INTO payment_plans(id,project_id,name,total_amount_cents,version,created_at,updated_at) VALUES (?,?,?,?,1,?,?)",
+                    (plan_id, clean["project_id"], clean["name"], clean["total_amount_cents"], now, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LedgerError("payment_plan_conflict", "同一项目下付款计划名称不能重复", status=409) from exc
+            for node in clean["payment_nodes"]:
+                node_id = str(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO payment_plan_nodes(id,payment_plan_id,name,amount_cents,due_on,position,version,created_at,updated_at) VALUES (?,?,?,?,?,?,1,?,?)",
+                    (node_id, plan_id, node["name"], node["amount_cents"], node["due_on"], node["position"], now, now),
+                )
+            result = self._payment_plan_document(connection, plan_id)
+            self._domain_audit(connection, action="create_payment_plan", target_type="payment_plan", target_id=plan_id, actor_hash=actor_hash, idempotency_key=key, before=None, after=result)
+            return result
+
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={"tool": "payment_plan.create", **clean},
+            operation=operation,
+        )
+        return {"payment_plan": result, "idempotent_replay": replayed}
+
+    def show_payment_plan(self, plan_id: str) -> dict[str, Any]:
+        plan_id = _text(plan_id, "payment_plan_id", 64, required=True)
+        with self._connect() as connection:
+            return self._payment_plan_document(connection, plan_id)
+
+    def list_payment_plans(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        filters = filters or {}
+        project_id = filters.get("project_id")
+        if project_id:
+            project_id = _text(project_id, "project_id", 64, required=True)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM payment_plans" + (" WHERE project_id=?" if project_id else "") + " ORDER BY created_at,id",
+                (project_id,) if project_id else (),
+            ).fetchall()
+            items = [self._payment_plan_document(connection, row["id"]) for row in rows]
+        return items
+
+    def allocate_payment_plan(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
+        key = _idempotency_key(payload.get("idempotency_key"))
+        plan_id = _text(payload.get("payment_plan_id"), "payment_plan_id", 64, required=True)
+        node_id = _text(payload.get("payment_node_id"), "payment_node_id", 64, required=True)
+        transaction_id = _text(payload.get("transaction_id"), "transaction_id", 64, required=True)
+        amount_cents = _positive_cents(payload.get("amount_cents"))
+        reason = _text(payload.get("reason"), "reason", 500, required=True)
+
+        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            plan = connection.execute("SELECT * FROM payment_plans WHERE id=?", (plan_id,)).fetchone()
+            node = connection.execute("SELECT * FROM payment_plan_nodes WHERE id=? AND payment_plan_id=?", (node_id, plan_id)).fetchone()
+            payment = connection.execute("SELECT * FROM transactions WHERE id=? AND type='payment' AND status='active'", (transaction_id,)).fetchone()
+            if plan is None:
+                raise LedgerError("payment_plan_not_found", "付款计划不存在", status=404)
+            if node is None:
+                raise LedgerError("payment_node_not_found", "付款节点不存在或不属于该计划", status=404)
+            if payment is None:
+                raise LedgerError("payment_not_found", "待关联付款不存在或已撤销", status=404)
+            context = connection.execute("SELECT project_id FROM transaction_context WHERE transaction_id=?", (transaction_id,)).fetchone()
+            if context is None or context["project_id"] != plan["project_id"]:
+                raise LedgerError("payment_plan_project_mismatch", "付款必须先归属于付款计划所属项目", status=409)
+            allocated_payment = connection.execute(
+                "SELECT COALESCE(SUM(amount_cents),0) FROM payment_plan_allocations WHERE transaction_id=?",
+                (transaction_id,),
+            ).fetchone()[0]
+            if int(allocated_payment) + amount_cents > int(payment["amount_cents"]):
+                raise LedgerError("payment_allocation_exceeds_payment", "付款计划分配不能超过原付款金额", status=409)
+            allocated_node = connection.execute(
+                "SELECT COALESCE(SUM(amount_cents),0) FROM payment_plan_allocations WHERE payment_plan_node_id=?",
+                (node_id,),
+            ).fetchone()[0]
+            if int(allocated_node) + amount_cents > int(node["amount_cents"]):
+                raise LedgerError("payment_allocation_exceeds_node", "付款计划分配不能超过节点金额", status=409)
+            now = utc_now()
+            try:
+                connection.execute(
+                    "INSERT INTO payment_plan_allocations(payment_plan_node_id,transaction_id,amount_cents,created_at) VALUES (?,?,?,?)",
+                    (node_id, transaction_id, amount_cents, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise LedgerError("payment_allocation_conflict", "同一付款不能重复分配到同一节点", status=409) from exc
+            result = self._payment_plan_document(connection, plan_id)
+            self._domain_audit(connection, action="allocate_payment_plan", target_type="payment_plan", target_id=plan_id, actor_hash=actor_hash, idempotency_key=key, before=None, after={"payment_plan": result, "transaction_id": transaction_id, "payment_node_id": node_id, "amount_cents": amount_cents}, reason=reason)
+            return result
+
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={"tool": "payment_plan.allocate", "payment_plan_id": plan_id, "payment_node_id": node_id, "transaction_id": transaction_id, "amount_cents": amount_cents, "reason": reason},
+            operation=operation,
+        )
+        return {"payment_plan": result, "idempotent_replay": replayed}
 
     def timeline(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         filters = filters or {}

@@ -43,7 +43,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.8` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.10` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
@@ -103,6 +103,18 @@ Legacy 附件只在 writer、幂等键和目标流水验证通过后写入内容
 
 媒体内容通过 `GET /api/v1/media/{id}/content` 读取；aiohttp 文件响应支持 Range。预览通过 `GET /api/v1/media/{id}/preview` 读取。
 
+## 微信装修进度连续采集
+
+Controller 使用受认证的 `POST /internal/v1/progress-captures/action` 管理采集草稿。Hub 新增的 `progress_capture_sessions`、`progress_capture_items` 和 `progress_capture_notes` 只记录采集过程；最终事实仍是 `events`、`media_assets` 与 `media_links`。
+
+- `start` 根据明确文字、上海日期和当前有效项目推断项目、阶段、空间与标题；项目无法唯一确定时保留 Gateway 附件并返回可纠正错误，不猜测。
+- `register_items` 单批最多 16 项、单会话最多 256 项。每项绑定来源消息摘要、附件引用摘要、正文 SHA-256、类型、大小和稳定序号。
+- 媒体仍走 `/internal/v1/media/ingest` 原始二进制流；采集元数据必须同时匹配 session、item、project、event 和 source ref，成功后原子回写 item 状态。
+- 图片/视频处理失败时原件已经内容寻址保存，item 标记 `failed` 并阻断完成；`retry_failed` 只重新处理原件，不生成重复媒体。
+- `finalize` 只有在 `received = registered = stored = linked` 且 `failed = pending = 0` 时完成，并把最终数量写入事件说明。取消只把草稿事件标记为 `voided`，已经安全保存的原件继续保留。
+
+从 `0.2.10` 回退到 `0.2.9` 前，先关闭 Gateway Poller 与 Controller intake，并确认没有 active、paused 或 finalizing 采集。旧 Hub 会忽略 additive 采集表，但不能继续处理新上下文；不要删除表、媒体原件或事件，恢复 `0.2.10` 后再完成、取消或人工核对。
+
 ## 内部 API 与 Codex 工具
 
 所有内部请求使用：
@@ -118,7 +130,11 @@ Content-Type: application/json
 X-Cutover-Token: <独立 cutover token>
 ```
 
-`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、catalog revision/digest 和当前 31 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。`renovation_mutate` 要求明确对象 ID、预览摘要和确认后才应用批量变更。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
+`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、`catalog_revision=3`、digest 和当前 37 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。`renovation_mutate` 要求明确对象 ID、预览摘要和确认后才应用批量变更。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
+
+`ledger_correct_payment` 与 `renovation_mutate` 可为历史账单补充 `project_id`、`stage_id`、`area_id`；批量修改必须先提交筛选条件和预览摘要，再以相同摘要应用，并写入审计。`category`、`subcategory`、`expense_type` 是独立字段，catalog 只负责稳定 code、展示名和有效性，不把标签推断为分类事实。付款计划的 `total_amount`、`paid_amount` 和 `remaining_amount` 从关联 Ledger 流水计算，付款节点只保存计划配置与状态。
+
+`ledger_export` 是文件制品工具：Hub 只返回文件名、MIME、大小、摘要和受控下载引用，绝不返回内部文件路径。Controller 下载后校验 `application/zip`、ZIP 签名、长度和 SHA-256，并持久化为 `file` artifact；Gateway 完成摘要发送后调用微信原生文件消息。发送状态未知时不生成新的发送键，只保留 `delivery_state_unknown` 和一次短期回退链接。
 
 `ledger_add_payment` 在 manifest 中只发布 canonical v2 输入：必填 `amount_cents`、`occurred_on`、`grouped_tags`，其中 `grouped_tags` 仅允许“主题、空间、专业、性质、渠道、品牌、生态、阶段、状态”九个固定维度。`amount/date/category/description/main_category/tags/ledger_format_version` 等 legacy 或猜测字段不会暴露，并在业务 dispatch 进入账本事务前返回确定性校验错误。页面和迁移等内部调用仍可使用 `LedgerStore.add_payment` 的 v1 兼容路径。
 

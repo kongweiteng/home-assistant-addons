@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.5`。
+当前版本：`0.4.7`。
 
 ## 配置
 
@@ -131,6 +131,18 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 - suspended/revoked、owner 变化或权限画像不匹配时，摘要、图片和链接全部抑制；session expired 时停止所有出站，不把失败链接当作第二条绕过路径。
 - 长轮询或发送明确返回 `-14` 时，Gateway 立即进入 `session_expired` 并停止该身份出站。发送返回 `-2 + unknown error` 时表示该用户的 `context_token` 已陈旧，不等同于普通限流：Gateway 只清除这一条上下文，使用同一确定性 client ID 无 token 重试一次；仍失败则保留持久待回复，不跨身份 fallback。
 
+## 装修进度采集会话
+
+`0.4.7` 在旧的单批媒体归档之外增加持久的连续采集会话。会话按 identity + principal + conversation 三重作用域隔离，最多登记 256 项；进程重启后继续使用原 session 和附件映射，不要求用户把图片、视频和文字放在同一条消息中。
+
+- 明确发送“开始记录装修进度”或“接下来的图片视频保存为施工记录”会直接开始；只有弱装修信号时询问一次，确认前普通附件不写入装修档案。
+- 会话 active 后，后续图片和视频逐项进入清单，文字可以更新标题、追加整体说明或使用“第 2 张：吊顶龙骨焊接”补充单项说明。单条微信消息仍最多 16 个附件，超过 16 项由 Controller 内部分批处理。
+- “暂停记录”只暂停新增媒体归档，普通对话仍可继续；“继续记录”“记录状态”“取消记录”“记录完成”均由 Gateway 在模型外确定性识别。暂停期间发送的媒体不会悄悄补入会话。
+- 为避免刷屏，首项、每累计 5 项、失败、状态查询和控制动作才主动回复；未回复不表示漏收，状态命令可随时查看 Gateway received 与 Hub stored 数量。
+- 先发送普通图片，再明确说“刚才两张图片归档为厨房装修进度”时，Gateway 精确复用既有 `media_archive_context@1` 批次并升级为新会话；数量不匹配、指代不清或附件已被占用时不猜测。
+- “记录完成”先把会话置为 finalizing。只有 Controller 证明 Gateway received、Hub registered/stored、事件 linked 数量完全相等，且 failed/pending 为 0、所有附件 ACK 已确认后，Gateway 才接受完成回执；否则保留会话和附件供重试。
+- Gateway 只保存微信侧关联、脱敏摘要和私有附件 spool；媒体原件、采集 item、说明、事件关联与最终审计由 Renovation Hub 持久保存。单独附件永远不构成保存授权。
+
 ## MQTT 主动通知
 
 主动通知不经过 Codex Controller，也不调用任何模型。请求字段保持现有 v1 契约：`version=1`、稳定 `message_id`、带时区 `created_at`、`info|warning|critical`、标题、正文、稳定 `source`/`dedupe_key`、`ttl=30..86400` 和 `audience=owner`。
@@ -206,6 +218,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 从 `0.4.4` 回退到 `0.4.3` 前先确认 Runner Manager v2 的 active 跟踪为 0，或明确接受旧版本暂时不再自动查询这些 task。`0.4.3` 会忽略 additive `runner_manager_v2_watches` 表，不会删除记录；恢复 `0.4.4` 后可继续跟踪。回退不会影响 Poller、多身份、普通聊天、通知、附件、Remote Work v1、Controller、Relay 或 Runner。
 
 从 `0.4.5` 回退到 `0.4.4` 不涉及数据库降级；旧版本会继续读取同一 Runner watch，但会重新把陈旧上下文 `-2 + unknown error` 当作普通限流并高频重试。回退前应确认 active 跟踪为 0，或先恢复当前用户的有效上下文，避免重新触发该缺陷。
+
+从 `0.4.7` 回退到 `0.4.5` 前先停止全部 Poller、关闭 Controller intake，并确认没有 active、paused、confirmation_required 或 finalizing 的装修进度会话，也没有待补附件 ACK。`0.4.5` 会忽略 additive 采集会话、item 和附件映射表，但不能继续消费 `progress_capture_context@1`；必须与 Controller `0.5.10`、Hub `0.2.9` 成组回退。保留 Gateway SQLite、附件 spool 和 Hub 草稿，恢复 `0.4.7` 后再完成、取消或人工核对，不得删除未完成媒体。
 
 从 `0.4.0` 回退到 `0.3.3` 前先关闭 `runner_manager_v2_enabled`，确认没有尚未回传的 v2 `/work` 回复。v2 路由不新增 Gateway Runner 凭据或服务器数据；旧版本会忽略新开关，普通聊天、Poller、通知、媒体和 Remote Work v1 数据保持兼容。
 

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.12
+
+- 新增 `progress_capture_v1` 确定性作业路径；装修进度开始、登记、说明、暂停、恢复、取消、状态和完成不再依赖模型选择媒体工具。
+- Controller 按 16 项批次登记、逐项流送并复用稳定幂等键；Hub 已存但 Gateway ACK 未确认时会走 replay 补 ACK，明确 pending 时阻断最终完成。
+- 新增低噪声回复抑制字段；Gateway 只在开始、首项、每 5 项、失败、状态和控制动作回执，普通连续单图不刷屏。
+
 ## 0.5.10
 
 - 修复已经收到 `awaiting_confirmation` 结构化结果并释放 lease 的任务仍被离线 sweep 误判为 `recovery_required` 的问题。等待确认现在保持可继续/可取消状态，不会因 Runner 后续离线而伪造未知执行结果。

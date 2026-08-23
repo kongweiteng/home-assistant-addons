@@ -84,11 +84,44 @@ export interface Transaction {
   status: "active" | "voided";
   tags: string[];
   grouped_tags?: Record<string, string[]>;
+  category?: string;
+  subcategory?: string;
+  expense_type?: string;
   ledger_format_version?: number;
   context: TransactionContext | null;
   version: number;
   created_at: string;
   updated_at: string;
+}
+
+export interface ClassificationCatalogItem {
+  code: string;
+  kind: "category" | "subcategory" | "expense_type";
+  parent_code: string | null;
+  label: string;
+  active: boolean;
+  position: number;
+}
+
+export interface PaymentPlanNode {
+  id: string;
+  name: string;
+  amount_cents: number;
+  due_on: string | null;
+  paid_amount_cents: number;
+  remaining_amount_cents: number;
+  payment_status: "pending" | "partial" | "paid";
+}
+
+export interface PaymentPlan {
+  id: string;
+  project_id: string;
+  name: string;
+  total_amount_cents: number;
+  paid_amount_cents: number;
+  remaining_amount_cents: number;
+  payment_status: "pending" | "partial" | "paid";
+  payment_nodes: PaymentPlanNode[];
 }
 
 export interface LedgerSummary {
@@ -149,6 +182,8 @@ export interface HubData {
   transactions: Transaction[];
   summary: LedgerSummary | null;
   media: MediaAsset[];
+  catalog: ClassificationCatalogItem[];
+  paymentPlans: PaymentPlan[];
 }
 
 export interface ApiEnvelope<T> {

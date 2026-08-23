@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.2.10
+
+- 新增持久 `progress_capture_sessions/items/notes` 采集草稿，以同一事件为边界连续接收跨消息图片、视频和说明，支持暂停、恢复、取消、序号说明、重启恢复和 256 项会话上限。
+- 媒体先预登记再流式写入；图片/视频原件内容寻址保存，处理失败保留原件并阻断完成，可在不替换原件的情况下重试处理。
+- 完成事务严格核对 Gateway received、Hub registered/stored 和事件 linked 数量；pending、failed、缺失关联或附件 ACK 未确认时均不会返回完成。
+
+## 0.2.9
+
+- 补齐历史账单项目、阶段、空间归属编辑与批量修改能力；预览摘要、确认、乐观版本、单 writer、幂等和审计保持在同一 Ledger 边界内。
+- 增加独立 `category`、`subcategory`、`expense_type` 字段和稳定 catalog，并增加付款计划及订金/尾款节点管理。
+- `ledger_export` 统一输出受控 ZIP artifact DTO；不再向模型或下游暴露 Hub 内部文件路径，Controller/Gateway 负责校验和微信原生文件投递。
+- 本版本只完成本地源码、合成测试和候选构建；不部署、不重启、不修改正式账本。
+
 ## 0.2.8
 
 - 新增 `renovation_mutate` 统一业务工具，支持项目、阶段、空间、时间线和付款的声明字段修改。

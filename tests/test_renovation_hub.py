@@ -121,8 +121,8 @@ class RenovationHubDomainTests(unittest.TestCase):
         self.assertEqual(dashboard["counts"]["areas"], 1)
         self.assertEqual(dashboard["budget_remaining_cents"], 1_000_000)
         status = self.store.status()
-        self.assertEqual(status["version"], "0.2.8")
-        self.assertEqual(status["hub_schema_version"], 1)
+        self.assertEqual(status["version"], "0.2.10")
+        self.assertEqual(status["hub_schema_version"], 2)
         self.assertGreaterEqual(status["counts"]["audit_events"], 2)
 
     def test_existing_ledger_database_is_extended_without_losing_transactions(self) -> None:
@@ -207,6 +207,275 @@ class RenovationHubDomainTests(unittest.TestCase):
             set(target_ids),
         )
 
+    def test_existing_payment_patch_assigns_context_and_cascades_to_refunds(self) -> None:
+        stage = self.store.create_stage(
+            {
+                "idempotency_key": key("context-stage"),
+                "project_id": self.project["id"],
+                "name": "水电阶段",
+            }
+        )["stage"]
+        area = self.store.create_area(
+            {
+                "idempotency_key": key("context-area"),
+                "project_id": self.project["id"],
+                "name": "露台",
+            }
+        )["area"]
+        payment = self.store.add_payment(
+            {
+                "idempotency_key": key("context-payment"),
+                "amount_cents": 12_000,
+                "occurred_on": "2026-08-08",
+                "main_category": "主材",
+            }
+        )["transaction"]
+        refund = self.store.add_refund(
+            {
+                "idempotency_key": key("context-refund"),
+                "original_payment_id": payment["id"],
+                "amount_cents": 1_000,
+                "occurred_on": "2026-08-09",
+            }
+        )["transaction"]
+        updated = self.store.correct_payment(
+            {
+                "idempotency_key": key("context-correct"),
+                "payment_id": payment["id"],
+                "version": 1,
+                "changes": {
+                    "project_id": self.project["id"],
+                    "stage_id": stage["id"],
+                    "area_id": area["id"],
+                },
+                "reason": "补充历史项目归属",
+            },
+            actor_hash="sha256:fixture",
+        )["transaction"]
+        self.assertEqual(updated["context"]["project_id"], self.project["id"])
+        self.assertEqual(updated["context"]["stage_id"], stage["id"])
+        self.assertEqual(self.store.show(refund["id"])["context"]["project_id"], self.project["id"])
+        self.assertEqual(len(self.store.query({"project_id": self.project["id"]})), 2)
+        with self.store._connect() as connection:
+            actions = [
+                row["action"]
+                for row in connection.execute(
+                    "SELECT action FROM audit_log WHERE target_id=? ORDER BY id",
+                    (refund["id"],),
+                )
+            ]
+        self.assertIn("cascade_transaction_context", actions)
+
+    def test_existing_payment_context_patch_rejects_missing_version(self) -> None:
+        payment = self.store.add_payment(
+            {
+                "idempotency_key": key("context-version-payment"),
+                "amount_cents": 1_000,
+                "occurred_on": "2026-08-08",
+                "main_category": "主材",
+            }
+        )["transaction"]
+        with self.assertRaises(LedgerError) as context:
+            self.store.correct_payment(
+                {
+                    "idempotency_key": key("context-version-missing"),
+                    "payment_id": payment["id"],
+                    "changes": {"project_id": self.project["id"]},
+                    "reason": "缺少版本",
+                }
+            )
+        self.assertEqual(context.exception.code, "version_required")
+
+    def test_selector_bulk_update_matches_date_and_legacy_category(self) -> None:
+        selected = self.store.add_payment(
+            {
+                "idempotency_key": key("selector-selected"),
+                "amount_cents": 2_000,
+                "occurred_on": "2026-08-10",
+                "main_category": "门窗",
+            }
+        )["transaction"]
+        self.store.add_payment(
+            {
+                "idempotency_key": key("selector-other-category"),
+                "amount_cents": 3_000,
+                "occurred_on": "2026-08-10",
+                "main_category": "水电",
+            }
+        )
+        preview = self.store.mutate(
+            {
+                "mode": "preview",
+                "target_type": "transaction",
+                "selector": {
+                    "start": "2026-08-01",
+                    "end": "2026-08-31",
+                    "legacy_main_category": "门窗",
+                },
+                "patch": {"project_id": self.project["id"]},
+                "reason": "按旧分类补充项目归属",
+            }
+        )
+        self.assertEqual(preview["count"], 1)
+        self.assertEqual(preview["selector"]["main_category"], "门窗")
+        applied = self.store.mutate(
+            {
+                "mode": "apply",
+                "target_type": "transaction",
+                "selector": preview["selector"],
+                "patch": {"project_id": self.project["id"]},
+                "reason": "按旧分类补充项目归属",
+                "preview_digest": preview["preview_digest"],
+                "confirmed": True,
+                "idempotency_key": key("selector-apply"),
+            }
+        )
+        self.assertEqual(applied["target_ids"], [selected["id"]])
+        self.assertEqual(self.store.show(selected["id"])["context"]["project_id"], self.project["id"])
+
+    def test_selector_apply_rejects_changed_match_set(self) -> None:
+        self.store.add_payment(
+            {
+                "idempotency_key": key("selector-stale-one"),
+                "amount_cents": 1_000,
+                "occurred_on": "2026-08-11",
+                "main_category": "凉亭",
+            }
+        )
+        preview = self.store.mutate(
+            {
+                "mode": "preview",
+                "target_type": "transaction",
+                "selector": {"legacy_main_category": "凉亭"},
+                "patch": {"project_id": self.project["id"]},
+                "reason": "预览批量归属",
+            }
+        )
+        self.store.add_payment(
+            {
+                "idempotency_key": key("selector-stale-two"),
+                "amount_cents": 1_100,
+                "occurred_on": "2026-08-11",
+                "main_category": "凉亭",
+            }
+        )
+        with self.assertRaises(LedgerError) as context:
+            self.store.mutate(
+                {
+                    "mode": "apply",
+                    "target_type": "transaction",
+                    "selector": preview["selector"],
+                    "patch": {"project_id": self.project["id"]},
+                    "reason": "预览批量归属",
+                    "preview_digest": preview["preview_digest"],
+                    "confirmed": True,
+                    "idempotency_key": key("selector-stale-apply"),
+                }
+            )
+        self.assertEqual(context.exception.code, "preview_stale")
+
+    def test_classification_codes_are_independent_and_refunds_follow_payment(self) -> None:
+        payment = self.store.add_payment(
+            {
+                "idempotency_key": key("classification-payment"),
+                "amount_cents": 10_000,
+                "occurred_on": "2026-08-11",
+                "main_category": "主材",
+                "category": "pavilion",
+                "subcategory": "pavilion_steel",
+                "expense_type": "material",
+                "project_id": self.project["id"],
+            }
+        )["transaction"]
+        refund = self.store.add_refund(
+            {
+                "idempotency_key": key("classification-refund"),
+                "original_payment_id": payment["id"],
+                "amount_cents": 1_000,
+                "occurred_on": "2026-08-12",
+            }
+        )["transaction"]
+        self.assertEqual(refund["category"], "pavilion")
+        self.assertEqual(self.store.query({"category": "pavilion"})[1]["id"], refund["id"])
+        with self.assertRaises(LedgerError) as context:
+            self.store.correct_payment(
+                {
+                    "idempotency_key": key("classification-invalid"),
+                    "payment_id": payment["id"],
+                    "version": 1,
+                    "changes": {"category": "terrace", "subcategory": "pavilion_steel"},
+                    "reason": "分类父级校验",
+                }
+            )
+        self.assertEqual(context.exception.code, "subcategory_parent_mismatch")
+        catalog = self.store.classification_catalog({"kind": "category"})
+        self.assertIn("terrace", {item["code"] for item in catalog["items"]})
+
+    def test_payment_plan_derives_paid_remaining_and_refund_effect(self) -> None:
+        plan = self.store.create_payment_plan(
+            {
+                "idempotency_key": key("plan-create"),
+                "project_id": self.project["id"],
+                "name": "凉亭施工付款",
+                "total_amount_cents": 10_000,
+                "payment_nodes": [
+                    {"name": "订金", "amount_cents": 5_000},
+                    {"name": "尾款", "amount_cents": 5_000},
+                ],
+            }
+        )["payment_plan"]
+        deposit = self.store.add_payment(
+            {
+                "idempotency_key": key("plan-deposit"),
+                "amount_cents": 5_000,
+                "occurred_on": "2026-08-11",
+                "main_category": "主材",
+                "project_id": self.project["id"],
+            }
+        )["transaction"]
+        balance = self.store.add_payment(
+            {
+                "idempotency_key": key("plan-balance"),
+                "amount_cents": 3_000,
+                "occurred_on": "2026-08-12",
+                "main_category": "主材",
+                "project_id": self.project["id"],
+            }
+        )["transaction"]
+        self.store.allocate_payment_plan(
+            {
+                "idempotency_key": key("plan-allocate-deposit"),
+                "payment_plan_id": plan["id"],
+                "payment_node_id": plan["payment_nodes"][0]["id"],
+                "transaction_id": deposit["id"],
+                "amount_cents": 5_000,
+                "reason": "关联订金",
+            }
+        )
+        self.store.allocate_payment_plan(
+            {
+                "idempotency_key": key("plan-allocate-balance"),
+                "payment_plan_id": plan["id"],
+                "payment_node_id": plan["payment_nodes"][1]["id"],
+                "transaction_id": balance["id"],
+                "amount_cents": 3_000,
+                "reason": "关联尾款",
+            }
+        )
+        self.store.add_refund(
+            {
+                "idempotency_key": key("plan-refund"),
+                "original_payment_id": deposit["id"],
+                "amount_cents": 1_000,
+                "occurred_on": "2026-08-12",
+            }
+        )
+        result = self.store.show_payment_plan(plan["id"])
+        self.assertEqual(result["paid_amount_cents"], 7_000)
+        self.assertEqual(result["remaining_amount_cents"], 3_000)
+        self.assertEqual(result["payment_status"], "partial")
+        self.assertEqual(result["payment_nodes"][0]["paid_amount_cents"], 4_000)
+
     def test_unified_mutation_rejects_stale_preview_and_updates_event_metadata(self) -> None:
         payment = self.store.add_payment(
             {
@@ -283,7 +552,7 @@ class RenovationHubDomainTests(unittest.TestCase):
     def test_read_api_exposes_projects_and_dashboard(self) -> None:
         self.assertEqual(create_server.__module__, "renovation_hub.api")
         self.assertIn(
-            'server_version = "RenovationHub/0.2.8"',
+            'server_version = "RenovationHub/0.2.10"',
             (Path(__file__).resolve().parents[1] / "renovation_hub" / "renovation_hub" / "api.py").read_text(
                 encoding="utf-8"
             ),

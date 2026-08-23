@@ -44,7 +44,7 @@ from .portable import (
 
 
 FORMAT_ID = "kanhuwan-renovation-ledger@1"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 WRITER_MODES = {
     "uninitialized",
     "read_only",
@@ -68,6 +68,23 @@ WRITER_TRANSITIONS = {
     "suspended": {"read_only"},
 }
 HEX_64 = re.compile(r"^[a-f0-9]{64}$")
+CLASSIFICATION_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+CLASSIFICATION_KINDS = {"category", "subcategory", "expense_type"}
+CLASSIFICATION_FIELDS = ("category", "subcategory", "expense_type")
+DEFAULT_CLASSIFICATION_CATALOG = (
+    ("pavilion", "category", None, "凉亭", 10),
+    ("terrace", "category", None, "露台", 20),
+    ("water_electric", "category", None, "水电", 30),
+    ("doors_windows", "category", None, "门窗", 40),
+    ("pavilion_steel", "subcategory", "pavilion", "钢材", 10),
+    ("pavilion_paint", "subcategory", "pavilion", "油漆", 20),
+    ("pavilion_structural_adhesive", "subcategory", "pavilion", "结构胶", 30),
+    ("material", "expense_type", None, "材料", 10),
+    ("tool", "expense_type", None, "工具", 20),
+    ("labor", "expense_type", None, "人工", 30),
+    ("transport", "expense_type", None, "运输", 40),
+    ("equipment", "expense_type", None, "设备", 50),
+)
 
 
 class LedgerError(ValueError):
@@ -177,6 +194,17 @@ def normalize_grouped_tags(value: Any) -> tuple[list[str], dict[str, list[str]]]
     return flattened, grouped
 
 
+def _classification_code(value: Any, field: str) -> str:
+    if value in {None, ""}:
+        return ""
+    if not isinstance(value, str):
+        raise LedgerError("invalid_input", f"{field} 必须是稳定 code")
+    value = unicodedata.normalize("NFC", value).strip()
+    if not CLASSIFICATION_CODE_RE.fullmatch(value):
+        raise LedgerError("invalid_input", f"{field} 必须是小写字母、数字和下划线组成的稳定 code")
+    return value
+
+
 def _idempotency_key(value: Any) -> str:
     if not isinstance(value, str) or len(value) < 16 or len(value) > 256:
         raise LedgerError("invalid_idempotency_key", "幂等键长度必须为 16 到 256")
@@ -268,6 +296,9 @@ class LedgerStore:
                     amount_cents INTEGER NOT NULL CHECK(amount_cents > 0),
                     occurred_on TEXT NOT NULL,
                     main_category TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT '',
+                    subcategory TEXT NOT NULL DEFAULT '',
+                    expense_type TEXT NOT NULL DEFAULT '',
                     merchant TEXT NOT NULL DEFAULT '',
                     note TEXT NOT NULL DEFAULT '',
                     is_deposit INTEGER NOT NULL DEFAULT 0 CHECK(is_deposit IN (0,1)),
@@ -280,6 +311,18 @@ class LedgerStore:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS transactions_legacy_id
                     ON transactions(legacy_id) WHERE legacy_id IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS classification_catalog (
+                    code TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL CHECK(kind IN ('category','subcategory','expense_type')),
+                    parent_code TEXT REFERENCES classification_catalog(code),
+                    label TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                    position INTEGER NOT NULL DEFAULT 0 CHECK(position >= 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS classification_catalog_kind_idx
+                    ON classification_catalog(kind,active,position,code);
                 CREATE TABLE IF NOT EXISTS tags (
                     normalized TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL
@@ -376,6 +419,20 @@ class LedgerStore:
                 )
             if "portable_id" not in transaction_columns:
                 connection.execute("ALTER TABLE transactions ADD COLUMN portable_id INTEGER")
+            if "category" not in transaction_columns:
+                connection.execute("ALTER TABLE transactions ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+            if "subcategory" not in transaction_columns:
+                connection.execute("ALTER TABLE transactions ADD COLUMN subcategory TEXT NOT NULL DEFAULT ''")
+            if "expense_type" not in transaction_columns:
+                connection.execute("ALTER TABLE transactions ADD COLUMN expense_type TEXT NOT NULL DEFAULT ''")
+            # Existing v1 databases do not have the v2 classification columns.
+            # Create the dependent index only after the additive column migration
+            # has completed; SQLite rejects an index that references a missing
+            # column during the initial schema script.
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS transactions_category_idx "
+                "ON transactions(category,subcategory,expense_type)"
+            )
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS transactions_portable_id ON transactions(portable_id) WHERE portable_id IS NOT NULL"
             )
@@ -447,6 +504,12 @@ class LedgerStore:
                 "UPDATE metadata SET value=? WHERE key='schema_version'",
                 (str(SCHEMA_VERSION),),
             )
+            now = utc_now()
+            for code, kind, parent_code, label, position in DEFAULT_CLASSIFICATION_CATALOG:
+                connection.execute(
+                    "INSERT OR IGNORE INTO classification_catalog(code,kind,parent_code,label,active,position,created_at,updated_at) VALUES (?,?,?,?,1,?,?,?)",
+                    (code, kind, parent_code, label, position, now, now),
+                )
         os.chmod(self.database_path, 0o600)
 
     def metadata(self) -> dict[str, str]:
@@ -541,7 +604,7 @@ class LedgerStore:
         )
         return {
             "service": "renovation_hub",
-            "version": "0.2.8",
+            "version": "0.2.10",
             "health": "degraded" if recovery_required else "ok",
             "recovery_required": recovery_required,
             "schema_version": int(meta["schema_version"]),
@@ -677,10 +740,12 @@ class LedgerStore:
         result["is_deposit"] = bool(result["is_deposit"])
         if result["type"] == "refund" and result["original_payment_id"]:
             original = connection.execute(
-                "SELECT main_category,ledger_format_version FROM transactions WHERE id=?",
+                "SELECT main_category,category,subcategory,expense_type,ledger_format_version FROM transactions WHERE id=?",
                 (result["original_payment_id"],),
             ).fetchone()
             result["main_category"] = original["main_category"] if original else ""
+            for field in CLASSIFICATION_FIELDS:
+                result[field] = original[field] if original else ""
             result["ledger_format_version"] = (
                 int(original["ledger_format_version"]) if original else 1
             )
@@ -708,11 +773,36 @@ class LedgerStore:
         before: dict[str, Any] | None,
         after: dict[str, Any] | None,
     ) -> None:
+        self._audit_event(
+            connection,
+            action=action,
+            target_type="transaction",
+            target_id=target_id,
+            actor_hash=actor_hash,
+            idempotency_key=idempotency_key,
+            reason=reason,
+            before=before,
+            after=after,
+        )
+
+    def _audit_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        action: str,
+        target_type: str,
+        target_id: str,
+        actor_hash: str,
+        idempotency_key: str,
+        reason: str,
+        before: dict[str, Any] | None,
+        after: dict[str, Any] | None,
+    ) -> None:
         connection.execute(
             "INSERT INTO audit_log(action,target_type,target_id,actor_hash,idempotency_key,reason,before_json,after_json,result,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 action,
-                "transaction",
+                target_type,
                 target_id,
                 actor_hash[:128],
                 idempotency_key,
@@ -723,6 +813,131 @@ class LedgerStore:
                 utc_now(),
             ),
         )
+
+    def _validate_classification(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        category: str,
+        subcategory: str,
+        expense_type: str,
+    ) -> None:
+        if subcategory and not category:
+            raise LedgerError("classification_parent_required", "subcategory 必须同时指定 category")
+        values = {
+            "category": category,
+            "subcategory": subcategory,
+            "expense_type": expense_type,
+        }
+        for field, code in values.items():
+            if not code:
+                continue
+            kind = field
+            row = connection.execute(
+                "SELECT code,kind,parent_code,active FROM classification_catalog WHERE code=?",
+                (code,),
+            ).fetchone()
+            if row is None or row["kind"] != kind or not row["active"]:
+                raise LedgerError("classification_not_configured", f"{field} 不在启用的分类配置中", status=409)
+            if field == "subcategory" and row["parent_code"] != category:
+                raise LedgerError("subcategory_parent_mismatch", "subcategory 不属于指定 category", status=409)
+
+    def _clean_classification_fields(self, value: dict[str, Any], *, partial: bool = False) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for field in CLASSIFICATION_FIELDS:
+            if partial and field not in value:
+                continue
+            result[field] = _classification_code(value.get(field), field)
+        return result
+
+    def classification_catalog(self, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        filters = filters or {}
+        kind = filters.get("kind")
+        if kind is not None and kind not in CLASSIFICATION_KINDS:
+            raise LedgerError("invalid_input", "kind 不在分类配置范围")
+        include_inactive = bool(filters.get("include_inactive", False))
+        clauses: list[str] = []
+        values: list[Any] = []
+        if kind:
+            clauses.append("kind=?")
+            values.append(kind)
+        if not include_inactive:
+            clauses.append("active=1")
+        sql = "SELECT code,kind,parent_code,label,active,position,created_at,updated_at FROM classification_catalog"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY kind,position,code"
+        with self._connect() as connection:
+            items = [dict(row) for row in connection.execute(sql, values)]
+        for item in items:
+            item["active"] = bool(item["active"])
+        return {"items": items}
+
+    def upsert_classification(self, payload: dict[str, Any], *, actor_hash: str = "system") -> dict[str, Any]:
+        key = _idempotency_key(payload.get("idempotency_key"))
+        code = _classification_code(payload.get("code"), "code")
+        if not code:
+            raise LedgerError("invalid_input", "code 不能为空")
+        kind = payload.get("kind")
+        if kind not in CLASSIFICATION_KINDS:
+            raise LedgerError("invalid_input", "kind 不在分类配置范围")
+        parent_code = _classification_code(payload.get("parent_code"), "parent_code")
+        if kind != "subcategory" and parent_code:
+            raise LedgerError("invalid_input", "category 和 expense_type 不能设置 parent_code")
+        if kind == "subcategory" and not parent_code:
+            raise LedgerError("invalid_input", "subcategory 必须设置 parent_code")
+        clean = {
+            "code": code,
+            "kind": kind,
+            "parent_code": parent_code or None,
+            "label": _text(payload.get("label"), "label", 120, required=True),
+            "active": bool(payload.get("active", True)),
+            "position": payload.get("position", 0),
+            "reason": _text(payload.get("reason"), "reason", 500, required=True),
+        }
+        if isinstance(clean["position"], bool) or not isinstance(clean["position"], int) or not 0 <= clean["position"] <= 10000:
+            raise LedgerError("invalid_input", "position 必须是 0 到 10000 的整数")
+
+        def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            if clean["parent_code"]:
+                parent = connection.execute(
+                    "SELECT kind,active FROM classification_catalog WHERE code=?",
+                    (clean["parent_code"],),
+                ).fetchone()
+                if parent is None or parent["kind"] != "category" or not parent["active"]:
+                    raise LedgerError("classification_parent_invalid", "parent_code 必须是启用的 category", status=409)
+            before_row = connection.execute(
+                "SELECT * FROM classification_catalog WHERE code=?", (code,)
+            ).fetchone()
+            if before_row is not None and before_row["kind"] != kind:
+                raise LedgerError("classification_kind_immutable", "已存在分类 code 不能改变 kind", status=409)
+            now = utc_now()
+            connection.execute(
+                "INSERT INTO classification_catalog(code,kind,parent_code,label,active,position,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(code) DO UPDATE SET parent_code=excluded.parent_code,label=excluded.label,active=excluded.active,position=excluded.position,updated_at=excluded.updated_at",
+                (code, kind, clean["parent_code"], clean["label"], int(clean["active"]), clean["position"], now, now),
+            )
+            result = dict(connection.execute("SELECT * FROM classification_catalog WHERE code=?", (code,)).fetchone())
+            result["active"] = bool(result["active"])
+            self._audit_event(
+                connection,
+                action="upsert_classification",
+                target_type="classification",
+                target_id=code,
+                actor_hash=actor_hash,
+                idempotency_key=key,
+                reason=clean["reason"],
+                before=dict(before_row) if before_row else None,
+                after=result,
+            )
+            return result
+
+        result, replayed = self._run_idempotent(
+            key=key,
+            request={"tool": "classification.upsert", **clean},
+            operation=operation,
+        )
+        return {"item": result, "idempotent_replay": replayed}
 
     def _after_transaction_insert(
         self,
@@ -749,6 +964,22 @@ class LedgerStore:
         payload: dict[str, Any],
     ) -> None:
         """Extension hook paired with ``_validate_transaction_version``."""
+
+    def _clean_correction_extensions(self, changes: dict[str, Any]) -> dict[str, Any]:
+        """Normalize correction fields owned by a Ledger subclass.
+
+        The base Ledger deliberately does not know about Hub-owned context or
+        other domain fields.  Subclasses may return validated fields here; the
+        base transaction update will keep them out of the ``transactions`` SQL
+        assignment and hand the original payload to the update hook.
+        """
+
+        return {}
+
+    def _correction_extension_fields(self) -> set[str]:
+        """Return fields handled outside the ``transactions`` table."""
+
+        return set()
 
     def _after_canonical_restore(
         self,
@@ -786,6 +1017,7 @@ class LedgerStore:
             "amount_cents": _positive_cents(payload.get("amount_cents")),
             "occurred_on": _validate_date(payload.get("occurred_on")),
             "main_category": main_category,
+            **self._clean_classification_fields(payload),
             "merchant": _text(payload.get("merchant"), "merchant", 200),
             "note": _text(payload.get("note"), "note", 2000),
             "is_deposit": bool(payload.get("is_deposit", False)),
@@ -796,17 +1028,26 @@ class LedgerStore:
         }
 
         def operation(connection: sqlite3.Connection) -> dict[str, Any]:
+            self._validate_classification(
+                connection,
+                category=clean["category"],
+                subcategory=clean["subcategory"],
+                expense_type=clean["expense_type"],
+            )
             transaction_id = str(uuid.uuid4())
             now = utc_now()
             portable_id = self._next_portable_id(connection, "transactions")
             connection.execute(
-                "INSERT INTO transactions(id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,status,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO transactions(id,type,amount_cents,occurred_on,main_category,category,subcategory,expense_type,merchant,note,is_deposit,status,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     transaction_id,
                     "payment",
                     clean["amount_cents"],
                     clean["occurred_on"],
                     clean["main_category"],
+                    clean["category"],
+                    clean["subcategory"],
+                    clean["expense_type"],
                     clean["merchant"],
                     clean["note"],
                     int(clean["is_deposit"]),
@@ -929,6 +1170,8 @@ class LedgerStore:
             clean_changes["note"] = _text(changes["note"], "note", 2000)
         if "is_deposit" in changes:
             clean_changes["is_deposit"] = bool(changes["is_deposit"])
+        clean_changes.update(self._clean_classification_fields(changes, partial=True))
+        clean_changes.update(self._clean_correction_extensions(changes))
 
         def operation(connection: sqlite3.Connection) -> dict[str, Any]:
             row = connection.execute("SELECT * FROM transactions WHERE id=? AND type='payment' AND status='active'", (payment_id,)).fetchone()
@@ -941,8 +1184,9 @@ class LedgerStore:
                 "merchant",
                 "note",
                 "is_deposit",
+                *CLASSIFICATION_FIELDS,
                 *( {"grouped_tags"} if ledger_format_version == 2 else {"main_category", "tags"} ),
-            }
+            } | self._correction_extension_fields()
             if set(changes) - allowed:
                 raise LedgerError("invalid_input", "changes 包含与账本版本不兼容的字段")
             if ledger_format_version == 1:
@@ -962,10 +1206,15 @@ class LedgerStore:
                 refunded = connection.execute("SELECT coalesce(sum(amount_cents),0) FROM transactions WHERE type='refund' AND status='active' AND original_payment_id=?", (payment_id,)).fetchone()[0]
                 if clean_changes["amount_cents"] < refunded:
                     raise LedgerError("refund_exceeds_payment", "付款金额不能低于累计退款", status=409)
+            classification = {field: str(row[field] or "") for field in CLASSIFICATION_FIELDS}
+            classification.update(
+                {field: clean_changes[field] for field in CLASSIFICATION_FIELDS if field in clean_changes}
+            )
+            self._validate_classification(connection, **classification)
             columns = {
                 key: value
                 for key, value in clean_changes.items()
-                if key not in {"tags", "grouped_tags"}
+                if key not in {"tags", "grouped_tags"} | self._correction_extension_fields()
             }
             if "is_deposit" in columns:
                 columns["is_deposit"] = int(columns["is_deposit"])
@@ -982,7 +1231,10 @@ class LedgerStore:
                     clean_changes["grouped_tags"],
                     ledger_format_version=2,
                 )
-            self._after_transaction_update(connection, payment_id, payload)
+            hook_payload = dict(payload)
+            hook_payload["_actor_hash"] = actor_hash
+            hook_payload["_idempotency_key"] = key
+            self._after_transaction_update(connection, payment_id, hook_payload)
             updated = connection.execute("SELECT * FROM transactions WHERE id=?", (payment_id,)).fetchone()
             result = self._row_json(connection, updated)
             self._audit(connection, action="correct_payment", target_id=payment_id, actor_hash=actor_hash, idempotency_key=key, reason=reason, before=before, after=result)
@@ -1185,10 +1437,17 @@ class LedgerStore:
         filters = filters or {}
         clauses: list[str] = []
         values: list[Any] = []
-        for name in ("type", "status", "main_category"):
+        expressions = {
+            "main_category": "CASE WHEN t.type='refund' THEN COALESCE(p.main_category,'') ELSE t.main_category END",
+            "category": "CASE WHEN t.type='refund' THEN COALESCE(p.category,'') ELSE t.category END",
+            "subcategory": "CASE WHEN t.type='refund' THEN COALESCE(p.subcategory,'') ELSE t.subcategory END",
+            "expense_type": "CASE WHEN t.type='refund' THEN COALESCE(p.expense_type,'') ELSE t.expense_type END",
+        }
+        for name in ("type", "status", "main_category", *CLASSIFICATION_FIELDS):
             value = filters.get(name)
             if value:
-                clauses.append(f"{name}=?")
+                value = _classification_code(value, name) if name in CLASSIFICATION_FIELDS else _text(value, name, 80, required=True)
+                clauses.append(f"{expressions.get(name, f't.{name}')}=?")
                 values.append(value)
         if filters.get("start"):
             clauses.append("occurred_on>=?")
@@ -1196,7 +1455,7 @@ class LedgerStore:
         if filters.get("end"):
             clauses.append("occurred_on<=?")
             values.append(_validate_date(filters["end"], "end"))
-        sql = "SELECT * FROM transactions"
+        sql = "SELECT t.* FROM transactions t LEFT JOIN transactions p ON p.id=t.original_payment_id"
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY occurred_on,id"
@@ -1211,7 +1470,7 @@ class LedgerStore:
             items = [self._row_json(connection, row) for row in connection.execute(sql, values)]
         if keyword:
             folded = keyword.casefold()
-            items = [item for item in items if folded in " ".join(str(item.get(key, "")) for key in ("merchant", "note", "main_category")).casefold()]
+            items = [item for item in items if folded in " ".join(str(item.get(key, "")) for key in ("merchant", "note", "main_category", *CLASSIFICATION_FIELDS)).casefold()]
         if tag:
             items = [item for item in items if tag.casefold() in {value.casefold() for value in item["tags"]}]
         return items
@@ -1221,6 +1480,7 @@ class LedgerStore:
         query_filters["status"] = "active"
         query_filters["limit"] = 1000
         category_totals: dict[str, int] = {}
+        classification_totals: dict[str, dict[str, int]] = {field: {} for field in CLASSIFICATION_FIELDS}
         tag_totals: dict[str, int] = {}
         dimensions: dict[str, dict[str, int]] = {dimension: {} for dimension in TAG_DIMENSIONS}
         total = 0
@@ -1229,9 +1489,15 @@ class LedgerStore:
             sign = -1 if item["type"] == "refund" else 1
             amount = sign * item["amount_cents"]
             total += amount
-            if item["ledger_format_version"] == 1:
-                category = item["main_category"] or "未分类"
+            category = item.get("category") or ""
+            if not category and item["ledger_format_version"] != 2:
+                category = item.get("main_category") or "未分类"
+            if category:
                 category_totals[category] = category_totals.get(category, 0) + amount
+            for field in CLASSIFICATION_FIELDS:
+                code = item.get(field) or ""
+                if code:
+                    classification_totals[field][code] = classification_totals[field].get(code, 0) + amount
             for tag in item["tags"]:
                 tag_totals[tag] = tag_totals.get(tag, 0) + amount
                 if item["ledger_format_version"] == 2:
@@ -1243,6 +1509,7 @@ class LedgerStore:
             "net_amount_cents": total,
             "net_amount": f"{total / 100:.2f}",
             "category_totals": category_totals,
+            "classification_totals": classification_totals,
             "tag_totals": tag_totals,
             "dimensions": dimensions,
             "tag_totals_overlap": True,
@@ -2127,7 +2394,7 @@ class LedgerStore:
                 id_map[str(item.get("id") or item.get("legacy_id"))] = transaction_id
                 now = str(item.get("created_at") or utc_now())
                 connection.execute(
-                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,status,void_reason,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,category,subcategory,expense_type,merchant,note,is_deposit,status,void_reason,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         transaction_id,
                         item.get("legacy_id"),
@@ -2135,6 +2402,9 @@ class LedgerStore:
                         _positive_cents(item.get("amount_cents")),
                         _validate_date(item.get("occurred_on")),
                         _text(item.get("main_category"), "main_category", 80, required=True),
+                        _text(item.get("category"), "category", 64),
+                        _text(item.get("subcategory"), "subcategory", 64),
+                        _text(item.get("expense_type"), "expense_type", 64),
                         _text(item.get("merchant"), "merchant", 200),
                         _text(item.get("note"), "note", 2000),
                         int(bool(item.get("is_deposit"))),
@@ -2253,12 +2523,28 @@ class LedgerStore:
             connection.execute("DELETE FROM transactions")
             connection.execute("DELETE FROM tags")
             connection.execute("DELETE FROM idempotency_keys")
+            if "classification_catalog" in state:
+                connection.execute("DELETE FROM classification_catalog")
+                for catalog in state["classification_catalog"]:
+                    connection.execute(
+                        "INSERT INTO classification_catalog(code,kind,parent_code,label,active,position,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                        (
+                            str(catalog["code"]),
+                            str(catalog["kind"]),
+                            catalog.get("parent_code"),
+                            str(catalog["label"]),
+                            int(catalog["active"]),
+                            int(catalog["position"]),
+                            str(catalog["created_at"]),
+                            str(catalog["updated_at"]),
+                        ),
+                    )
             for item in transactions:
                 if item["kind"] != "payment":
                     continue
                 identifier = str(item["id"])
                 connection.execute(
-                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,status,void_reason,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,category,subcategory,expense_type,merchant,note,is_deposit,status,void_reason,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         identifier,
                         int(item["id"]),
@@ -2268,6 +2554,9 @@ class LedgerStore:
                         str(item["category"])
                         if format_version == CANONICAL_PORTABLE_FORMAT_VERSION
                         else "",
+                        str(item.get("category") or "") if format_version == CANONICAL_PORTABLE_FORMAT_VERSION_V2 else "",
+                        str(item.get("subcategory") or "") if format_version == CANONICAL_PORTABLE_FORMAT_VERSION_V2 else "",
+                        str(item.get("expense_type") or "") if format_version == CANONICAL_PORTABLE_FORMAT_VERSION_V2 else "",
                         str(item["vendor"]),
                         str(item["description"]),
                         int(bool(item["is_deposit"])),
@@ -2297,13 +2586,16 @@ class LedgerStore:
                 identifier = str(item["id"])
                 original = str(item["payment_id"])
                 connection.execute(
-                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,merchant,note,is_deposit,original_payment_id,status,void_reason,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO transactions(id,legacy_id,type,amount_cents,occurred_on,main_category,category,subcategory,expense_type,merchant,note,is_deposit,original_payment_id,status,void_reason,source_ref,created_at,updated_at,ledger_format_version,portable_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         identifier,
                         int(item["id"]),
                         "refund",
                         int(item["amount_cents"]),
                         str(item["date"]),
+                        "",
+                        "",
+                        "",
                         "",
                         str(item["vendor"]),
                         str(item["description"]),
@@ -2379,6 +2671,14 @@ class LedgerStore:
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         with shadow._connect() as connection:
+            metadata = {
+                str(row["key"]): str(row["value"])
+                for row in connection.execute("SELECT key,value FROM metadata")
+            }
+            include_classification = (
+                format_version == CANONICAL_PORTABLE_FORMAT_VERSION_V2
+                and metadata.get("schema_version") == "4"
+            )
             rows = connection.execute("SELECT * FROM transactions ORDER BY legacy_id")
             for row in rows:
                 item = shadow._row_json(connection, row)
@@ -2408,6 +2708,9 @@ class LedgerStore:
                     serialized["effective_category"] = item["main_category"]
                 else:
                     serialized["grouped_tags"] = portable_grouped_tags(item["tags"])
+                    if include_classification:
+                        for field in ("category", "subcategory", "expense_type"):
+                            serialized[field] = item.get(field, "")
                 result.append(serialized)
         return result
 
@@ -2422,6 +2725,16 @@ class LedgerStore:
         if transactions != state["transactions"]:
             raise LedgerError("invariant_mismatch", "影子流水字段与来源不一致")
         with shadow._connect() as connection:
+            if "classification_catalog" in state:
+                catalog = [
+                    dict(row)
+                    for row in connection.execute(
+                        "SELECT code,kind,parent_code,label,active,position,created_at,updated_at FROM classification_catalog ORDER BY kind,position,code"
+                    )
+                ]
+                expected_catalog = [dict(row) for row in state["classification_catalog"]]
+                if catalog != expected_catalog:
+                    raise LedgerError("invariant_mismatch", "影子分类配置与来源不一致")
             source_refs = [
                 tuple(row)
                 for row in connection.execute(

@@ -112,6 +112,14 @@ def create_app(
         ("POST", "/api/v1/ledger/refunds", ledger_refund, "ledger.refund.create"),
         ("POST", "/api/v1/ledger/transactions/{transaction_id}/undo", ledger_undo, "ledger.transaction.undo"),
         ("GET", "/api/v1/reports/summary", report_summary, "ledger.report.summary"),
+        ("GET", "/api/v1/quotes", quotes, "quote.list"),
+        ("POST", "/api/v1/quotes", quote_create, "quote.create"),
+        ("GET", "/api/v1/quotes/{request_id}", quote_show, "quote.show"),
+        ("PATCH", "/api/v1/quotes/{request_id}", quote_update, "quote.update"),
+        ("POST", "/api/v1/quotes/{request_id}/offers", quote_offer_create, "quote.offer.create"),
+        ("PATCH", "/api/v1/quote-offers/{offer_id}", quote_offer_update, "quote.offer.update"),
+        ("POST", "/api/v1/quotes/{request_id}/select", quote_select, "quote.select"),
+        ("POST", "/api/v1/quotes/{request_id}/media", quote_media_link, "quote.media.link"),
         ("GET", "/api/v1/search", search, "search.unified"),
         ("GET", "/api/v1/media", media_list, "media.list"),
         ("GET", "/api/v1/media/{media_id}/content", media_content, "media.content"),
@@ -357,6 +365,48 @@ async def ledger_undo(request: web.Request) -> web.Response:
 
 async def report_summary(request: web.Request) -> web.Response:
     return _result(_store(request).summary(_query(request)))
+
+
+async def quotes(request: web.Request) -> web.Response:
+    return _result({"items": _store(request).list_quotes(_query(request))})
+
+
+async def quote_create(request: web.Request) -> web.Response:
+    return _result(_store(request).create_quote(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def quote_show(request: web.Request) -> web.Response:
+    return _result(_store(request).show_quote(request.match_info["request_id"]))
+
+
+async def quote_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["request_id"] = request.match_info["request_id"]
+    return _result(_store(request).update_quote(payload, actor_hash=PAGE_ACTOR))
+
+
+async def quote_offer_create(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["request_id"] = request.match_info["request_id"]
+    return _result(_store(request).add_quote_offer(payload, actor_hash=PAGE_ACTOR), status=201)
+
+
+async def quote_offer_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["offer_id"] = request.match_info["offer_id"]
+    return _result(_store(request).update_quote_offer(payload, actor_hash=PAGE_ACTOR))
+
+
+async def quote_select(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["request_id"] = request.match_info["request_id"]
+    return _result(_store(request).select_quote_offer(payload, actor_hash=PAGE_ACTOR))
+
+
+async def quote_media_link(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["request_id"] = request.match_info["request_id"]
+    return _result(_store(request).attach_quote_media(payload, actor_hash=PAGE_ACTOR), status=201)
 
 
 async def search(request: web.Request) -> web.Response:

@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.10`。
+当前版本：`0.5.11`。
 
 ## 通用微信会话
 
@@ -159,7 +159,9 @@ MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 UR
 
 `ledger_attach` 保留 Legacy Ledger v1 桥接：模型只能提交 Gateway 生成的 `attachment_ref`。Controller 主进程使用独立 bearer 一次性读取附件，校验文件名、MIME、大小和 SHA-256，再转换为旧账本需要的 Base64 内容；第一版 Legacy 单附件限制为 20 MiB。
 
-`renovation_media_ingest` 用于新图片/视频档案。收到附件默认只用于本轮识别，不自动归档；Controller 只有在作业文本明确请求归档到装修/施工/工地档案时才暴露该工具，并在调用时再次执行服务端门禁。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时从 Gateway 的非消费流式接口读取正文，直接转发到 Renovation Hub，Hub 成功后再 ACK 消费 Gateway 引用。Hub 失败时原引用保持可重试，不要求用户重新发送。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
+`renovation_media_ingest` 用于新图片/视频档案。收到附件默认只用于本轮识别，不自动归档；Controller 只有在作业文本明确请求归档到装修/施工/工地档案，或明确保存询价、报价单、价格单、供应商名片、商品规格资料时才暴露该工具，并在调用时再次执行服务端门禁。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时从 Gateway 的非消费流式接口读取正文，直接转发到 Renovation Hub，Hub 成功后再 ACK 消费 Gateway 引用。Hub 失败时原引用保持可重试，不要求用户重新发送。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
+
+Hub `0.3.0` 的九个 `renovation_quote_*` 工具通过受认证动态 manifest 自动进入 owner/owner_legacy 的微信工具目录，支持创建询价、增加与修改供应商报价、列表、详情、比较、选择和媒体关联。选择报价只写 Hub 报价表，不创建 Ledger 流水；图片识别出的供应商、地址、规格和价格建议先保持 `review_required`，由用户复核后再选择。member 的固定只读 allowlist 不随动态目录扩张。
 
 Broker 工具固定为重启提案、Passkey 授权请求/状态、执行和执行状态查询。它们不依赖 Codex UI 审批，但是否允许真正执行仍由 Broker 的不可变提案、Passkey、固定 allowlist、一次性收据、状态机和默认关闭的 `execution_enabled` 决定；Controller 不能绕过这些门禁或提交任意 Supervisor 动作。
 
@@ -176,7 +178,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.10` 回退到 `0.5.9` 会重新引入 `awaiting_confirmation` 被离线 sweep 误判为 recovery、以及孤立 recovery 无法审计收口的问题；回退前先确认没有等待确认或 recovery 任务。继续从 `0.5.9` 回退到 `0.5.8` 会失去 heartbeat 原子续租和“offline 且 lease 过期后才恢复”的保护，并把新安装默认 lease 恢复为 60 秒；回退前先停止新增 `/work`，等待活动任务结束并确认 Runner/Relay outbox 已排空。继续从 `0.5.8` 回退到 `0.5.7` 会恢复 Runner `0.3.4` manifest，并失去进程内临时认证重连、慢心跳 ACK 保留和长任务稳定心跳修复；回退前先确认没有活动长任务，且 Runner/Relay outbox 已排空。从 `0.5.7` 回退到 `0.5.6` 会失去旧 Schema result 的安全 late ACK 与 Runner recovery 确认失败 API。回退前先确认 Relay outbox 无积压，且没有待核对的 `recovery_required` 任务。继续从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续从 `0.5.5` 回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续从 `0.5.4` 回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。从 `0.5.1` 回退到 `0.4.2` 前还要撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
+从 `0.5.11` 回退到 `0.5.10` 会失去询价/报价单/供应商名片/商品规格的明确媒体归档意图识别；回退前确认没有尚未消费的报价附件，并可继续通过文字字段使用 Hub 动态报价工具。从 `0.5.10` 回退到 `0.5.9` 会重新引入 `awaiting_confirmation` 被离线 sweep 误判为 recovery、以及孤立 recovery 无法审计收口的问题；回退前先确认没有等待确认或 recovery 任务。继续从 `0.5.9` 回退到 `0.5.8` 会失去 heartbeat 原子续租和“offline 且 lease 过期后才恢复”的保护，并把新安装默认 lease 恢复为 60 秒；回退前先停止新增 `/work`，等待活动任务结束并确认 Runner/Relay outbox 已排空。继续从 `0.5.8` 回退到 `0.5.7` 会恢复 Runner `0.3.4` manifest，并失去进程内临时认证重连、慢心跳 ACK 保留和长任务稳定心跳修复；回退前先确认没有活动长任务，且 Runner/Relay outbox 已排空。从 `0.5.7` 回退到 `0.5.6` 会失去旧 Schema result 的安全 late ACK 与 Runner recovery 确认失败 API。回退前先确认 Relay outbox 无积压，且没有待核对的 `recovery_required` 任务。继续从 `0.5.6` 回退到 `0.5.5` 会恢复 Runner `0.3.3` manifest；该 Runner 可以执行模型并产生文件，但 linked worktree 无法在 `workspace-write` 中写入仓库外的 Git metadata，因此不得再分配要求本地 commit 的任务。继续从 `0.5.5` 回退到 `0.5.4` 会恢复 Runner `0.3.2` manifest；该版本的结构化结果 Schema 与当前 Codex API 不兼容，不得再分配真实任务。继续从 `0.5.4` 回退到 `0.5.3` 会恢复启动期在线读取 manifest；若 HAOS 无法访问 GitHub，页面安装入口将关闭。继续从 `0.5.3` 回退到 `0.5.2` 前先关闭新增任务入口并恢复 Runner `0.3.1` 的固定 manifest；从 `0.5.2` 回退到 `0.5.1` 前核对没有活动 lease 或 `recovery_required` 任务。从 `0.5.1` 回退到 `0.4.2` 前还要撤销或等待所有一次性安装链接过期、停止 `/install/` 外部流量，并同时恢复 Relay `0.1.1` 与 Runner `0.2.0` manifest 配置。不要删除已注册 Runner、数据库审计、服务器 worktree 或 Codex Session。
 
 继续从 `0.4.2` 回退到 `0.3.1` 前，必须等待所有旧式未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档；`0.3.1` 不识别 enrollment 的 `revoked_at`。只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。
 

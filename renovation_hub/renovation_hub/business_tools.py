@@ -16,7 +16,7 @@ from .portable import MAX_GROUPED_TAG_LENGTH, MAX_GROUPED_TAGS, TAG_DIMENSIONS
 MANIFEST_VERSION = 1
 MANIFEST_SERVICE = "renovation_hub"
 MANIFEST_SCOPE = "business"
-BUSINESS_CATALOG_REVISION = 3
+BUSINESS_CATALOG_REVISION = 4
 ALLOWED_TRANSPORTS = {"json", "gateway_attachment", "gateway_media_stream"}
 ALLOWED_RISK_TYPES = {"read", "write"}
 
@@ -177,6 +177,12 @@ def _store_call(method: str, *, result_key: str | None = None) -> ToolHandler:
             "create_event",
             "update_event",
             "mutate",
+            "create_quote",
+            "update_quote",
+            "add_quote_offer",
+            "update_quote_offer",
+            "select_quote_offer",
+            "attach_quote_media",
         }:
             result = function(arguments, actor_hash=actor_hash)
         else:
@@ -285,13 +291,14 @@ def _public_media_asset(asset: dict[str, Any]) -> dict[str, Any]:
 
 
 def search_business_data(store: Any, media: Any | None, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Search the three user-facing business collections with stable ordering."""
+    """Search user-facing business collections with stable ordering."""
 
     media_service = _require_media(media)
     return {
         "ledger": store.query(arguments),
         "timeline": store.timeline(arguments),
         "media": [_public_media_asset(item) for item in media_service.list(arguments)],
+        "quotes": store.list_quotes(arguments),
     }
 
 
@@ -349,6 +356,57 @@ MEDIA_FILTERS = {
     "end": DATETIME,
     "keyword": _string(100, minimum=1),
     "limit": LIMIT,
+}
+SPECIFICATION = {
+    "type": "object",
+    "maxProperties": 32,
+    "additionalProperties": _string(240),
+}
+QUOTE_FILTERS = {
+    "project_id": ID,
+    "status": _enum("inquiry", "quoted", "review_required", "selected", "purchased", "closed", "archived"),
+    "keyword": _string(100, minimum=1),
+    "limit": LIMIT,
+}
+QUOTE_REQUEST_FIELDS = {
+    "title": _string(160, minimum=1),
+    "category": _string(80),
+    "description": _string(4000),
+    "specification": SPECIFICATION,
+    "quantity_milli": _integer(1, 1_000_000_000),
+    "unit": _string(40),
+    "status": _enum("inquiry", "quoted", "review_required", "selected", "purchased", "closed", "archived"),
+    "follow_up_at": DATETIME,
+    "source_ref": _string(256),
+    "note": _string(2000),
+}
+QUOTE_OFFER_FIELDS = {
+    "supplier_name": _string(200, minimum=1),
+    "contact_name": _string(120),
+    "contact_phone": _string(80),
+    "supplier_address": _string(500),
+    "quoted_at": DATETIME,
+    "valid_until": DATE,
+    "subtotal_cents": _integer(0, 100_000_000_000),
+    "tax_cents": _integer(0, 100_000_000_000),
+    "shipping_cents": _integer(0, 100_000_000_000),
+    "installation_cents": _integer(0, 100_000_000_000),
+    "discount_cents": _integer(0, 100_000_000_000),
+    "total_cents": _integer(0, 100_000_000_000),
+    "quantity_milli": _integer(1, 1_000_000_000),
+    "unit": _string(40),
+    "unit_price_cents": _integer(0, 100_000_000_000),
+    "price_includes_tax": {"type": "boolean"},
+    "lead_time_days": _integer(0, 3650),
+    "brand": _string(120),
+    "model": _string(120),
+    "specification": SPECIFICATION,
+    "payment_terms": _string(1000),
+    "warranty": _string(1000),
+    "note": _string(2000),
+    "status": _enum("quoted", "review_required", "rejected", "expired", "purchased"),
+    "extraction_confidence": _integer(0, 100),
+    "source_ref": _string(256),
 }
 
 MUTATION_PATCH = _object(
@@ -808,6 +866,122 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
         input_schema=_object({"project_id": ID}, required=("project_id",)),
         business_actions=("dashboard.read",),
         handler=_dashboard,
+    ),
+    _tool(
+        "renovation_quote_create",
+        "创建询价",
+        "创建一个物品或服务询价；图片识别结果应默认标记为待确认。",
+        risk_type="write",
+        input_schema=_object(
+            {"project_id": ID, **QUOTE_REQUEST_FIELDS},
+            required=("project_id", "title"),
+        ),
+        business_actions=("quote.create",),
+        handler=_store_call("create_quote"),
+    ),
+    _tool(
+        "renovation_quote_add_offer",
+        "添加供应商报价",
+        "在既有询价下保存一家供应商的价格、规格、联系方式和履约条件。",
+        risk_type="write",
+        input_schema=_object(
+            {"request_id": ID, **QUOTE_OFFER_FIELDS},
+            required=("request_id", "supplier_name"),
+        ),
+        business_actions=("quote.offer.create",),
+        handler=_store_call("add_quote_offer"),
+    ),
+    _tool(
+        "renovation_quote_update",
+        "更新询价",
+        "按对象版本确认或修改询价名称、规格、数量、状态和跟进信息。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "request_id": ID,
+                "version": _integer(1, 2_147_483_647),
+                "changes": _object(QUOTE_REQUEST_FIELDS),
+            },
+            required=("request_id", "version", "changes"),
+        ),
+        business_actions=("quote.update",),
+        handler=_store_call("update_quote"),
+    ),
+    _tool(
+        "renovation_quote_update_offer",
+        "更新供应商报价",
+        "按对象版本确认或修改一家供应商报价。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "offer_id": ID,
+                "version": _integer(1, 2_147_483_647),
+                "changes": _object(QUOTE_OFFER_FIELDS),
+            },
+            required=("offer_id", "version", "changes"),
+        ),
+        business_actions=("quote.offer.update",),
+        handler=_store_call("update_quote_offer"),
+    ),
+    _tool(
+        "renovation_quote_list",
+        "查询询价",
+        "按项目、状态或关键词查询询价和报价摘要。",
+        risk_type="read",
+        input_schema=_object(QUOTE_FILTERS, required=("project_id",)),
+        business_actions=("quote.list",),
+        handler=_store_call("list_quotes", result_key="items"),
+    ),
+    _tool(
+        "renovation_quote_show",
+        "查看询价详情",
+        "查看一个询价、全部供应商报价和关联图片元数据。",
+        risk_type="read",
+        input_schema=_object({"request_id": ID}, required=("request_id",)),
+        business_actions=("quote.show",),
+        handler=lambda store, _media, arguments, _actor: store.show_quote(str(arguments.get("request_id") or "")),
+    ),
+    _tool(
+        "renovation_quote_compare",
+        "比较供应商报价",
+        "比较同一询价下各供应商总价、标准化单价、规格、交期和有效期。",
+        risk_type="read",
+        input_schema=_object({"request_id": ID}, required=("request_id",)),
+        business_actions=("quote.compare",),
+        handler=lambda store, _media, arguments, _actor: store.compare_quote(str(arguments.get("request_id") or "")),
+    ),
+    _tool(
+        "renovation_quote_select",
+        "选择供应商报价",
+        "把同一询价中的一家供应商设为唯一选中报价；不会生成账目或付款。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "request_id": ID,
+                "offer_id": ID,
+                "version": _integer(1, 2_147_483_647),
+            },
+            required=("request_id", "offer_id", "version"),
+        ),
+        business_actions=("quote.select",),
+        handler=_store_call("select_quote_offer"),
+    ),
+    _tool(
+        "renovation_quote_attach_media",
+        "关联报价图片",
+        "把已经安全归档的商品图、报价单、名片或地址图关联到询价或供应商报价。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "request_id": ID,
+                "offer_id": ID,
+                "media_id": ID,
+                "role": _enum("source", "product", "quote_sheet", "business_card", "address", "other"),
+            },
+            required=("request_id", "media_id"),
+        ),
+        business_actions=("quote.media.link",),
+        handler=_store_call("attach_quote_media"),
     ),
     _tool(
         "renovation_media_ingest",

@@ -8,6 +8,10 @@ import type {
   LedgerSummary,
   MediaAsset,
   Project,
+  QuoteDetail,
+  QuoteMediaRole,
+  QuoteOffer,
+  QuoteRequest,
   SessionState,
   Stage,
   TimelineEvent,
@@ -97,6 +101,8 @@ export const api = {
   timeline: (projectId: string) => get<{ items: TimelineEvent[] }>(`api/v1/timeline?project_id=${encodeURIComponent(projectId)}&limit=500`),
   ledger: (projectId: string) => get<{ items: Transaction[]; summary: LedgerSummary }>(`api/v1/ledger/transactions?project_id=${encodeURIComponent(projectId)}&limit=1000`),
   media: (projectId: string) => get<{ items: MediaAsset[] }>(`api/v1/media?project_id=${encodeURIComponent(projectId)}&limit=500`),
+  quotes: (projectId: string) => get<{ items: QuoteRequest[] }>(`api/v1/quotes?project_id=${encodeURIComponent(projectId)}&limit=500`),
+  quote: (requestId: string) => get<QuoteDetail>(`api/v1/quotes/${encodeURIComponent(requestId)}`),
   createProject: (body: unknown) => write<{ project: Project }>("POST", "api/v1/projects", body, "project"),
   updateProject: (projectId: string, body: unknown) => write<{ project: Project }>("PATCH", `api/v1/projects/${projectId}`, body, "project-update"),
   createStage: (body: unknown) => write<{ stage: Stage }>("POST", "api/v1/stages", body, "stage"),
@@ -109,6 +115,12 @@ export const api = {
   correctPayment: (transactionId: string, body: unknown) => write<{ transaction: Transaction }>("PATCH", `api/v1/ledger/transactions/${transactionId}`, body, "payment-update"),
   addRefund: (body: unknown) => write<{ transaction: Transaction }>("POST", "api/v1/ledger/refunds", body, "refund"),
   undoTransaction: (transactionId: string, body: unknown) => write<{ transaction: Transaction }>("POST", `api/v1/ledger/transactions/${transactionId}/undo`, body, "undo"),
+  createQuote: (body: unknown) => write<{ quote: QuoteRequest }>("POST", "api/v1/quotes", body, "quote"),
+  updateQuote: (requestId: string, body: unknown) => write<{ quote: QuoteRequest }>("PATCH", `api/v1/quotes/${requestId}`, body, "quote-update"),
+  addQuoteOffer: (requestId: string, body: unknown) => write<{ offer: QuoteOffer }>("POST", `api/v1/quotes/${requestId}/offers`, body, "quote-offer"),
+  updateQuoteOffer: (offerId: string, body: unknown) => write<{ offer: QuoteOffer }>("PATCH", `api/v1/quote-offers/${offerId}`, body, "quote-offer-update"),
+  selectQuoteOffer: (requestId: string, body: unknown) => write<{ quote: QuoteRequest; offer: QuoteOffer }>("POST", `api/v1/quotes/${requestId}/select`, body, "quote-select"),
+  linkQuoteMedia: (requestId: string, body: { media_id: string; offer_id?: string | null; role: QuoteMediaRole }) => write<{ link: unknown }>("POST", `api/v1/quotes/${requestId}/media`, body, "quote-media"),
 };
 
 async function fileSha256(file: File): Promise<string> {

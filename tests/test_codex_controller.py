@@ -1350,7 +1350,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.10"
+        expected = "0.5.11"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1680,6 +1680,10 @@ class ToolRouterTests(unittest.TestCase):
         self.assertFalse(has_explicit_media_archive_intent("把这张装修图片保存到相册", attachment))
         self.assertFalse(has_explicit_media_archive_intent("把这份施工文件保存一下", attachment))
         self.assertFalse(has_explicit_media_archive_intent("这不是装修图片，不要归档", attachment))
+        self.assertTrue(has_explicit_media_archive_intent("记录这张报价单并保存到询价", attachment))
+        self.assertTrue(has_explicit_media_archive_intent("把供应商名片加入报价记录", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("查询一下瓷砖报价", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("看看这张报价单，不要保存", attachment))
 
     def test_media_archive_tool_is_hidden_and_rejected_without_explicit_intent(self) -> None:
         router = ToolRouter(

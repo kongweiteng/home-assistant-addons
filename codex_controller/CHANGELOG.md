@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.11
+
+- 扩展微信附件的明确媒体归档意图识别到询价、报价、报价单、价格单、供应商名片、商品规格和产品规格；普通附件仍只用于识别，否定表达和未明确保存意图继续拒绝归档。
+- Renovation Hub `0.3.0` 的九个 `renovation_quote_*` 工具继续通过受认证动态 manifest 自动进入 owner/owner_legacy 工具目录，可在微信创建、查询、比较、修改和选择报价；member 固定只读 allowlist、写入幂等和 Hub writer 边界不变。
+- 新增报价资料归档正反例回归；本版本不改变普通 Codex、Runner Center、Operations、家庭备忘录或 Ledger 写入语义。
+
 ## 0.5.10
 
 - 修复已经收到 `awaiting_confirmation` 结构化结果并释放 lease 的任务仍被离线 sweep 误判为 `recovery_required` 的问题。等待确认现在保持可继续/可取消状态，不会因 Runner 后续离线而伪造未知执行结果。

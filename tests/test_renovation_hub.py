@@ -121,7 +121,7 @@ class RenovationHubDomainTests(unittest.TestCase):
         self.assertEqual(dashboard["counts"]["areas"], 1)
         self.assertEqual(dashboard["budget_remaining_cents"], 1_000_000)
         status = self.store.status()
-        self.assertEqual(status["version"], "0.3.1")
+        self.assertEqual(status["version"], "0.3.2")
         self.assertEqual(status["hub_schema_version"], 2)
         self.assertEqual(status["quote_schema_version"], 1)
         self.assertGreaterEqual(status["counts"]["audit_events"], 2)
@@ -284,7 +284,7 @@ class RenovationHubDomainTests(unittest.TestCase):
     def test_read_api_exposes_projects_and_dashboard(self) -> None:
         self.assertEqual(create_server.__module__, "renovation_hub.api")
         self.assertIn(
-            'server_version = "RenovationHub/0.3.1"',
+            'server_version = "RenovationHub/0.3.2"',
             (Path(__file__).resolve().parents[1] / "renovation_hub" / "renovation_hub" / "api.py").read_text(
                 encoding="utf-8"
             ),
@@ -303,6 +303,16 @@ class RenovationHubDomainTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_single_quote_image_viewer_keeps_canvas_in_center_column(self) -> None:
+        styles = (
+            Path(__file__).resolve().parents[1]
+            / "renovation_hub"
+            / "frontend"
+            / "src"
+            / "styles.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn(".quote-viewer-canvas { grid-column: 2;", styles)
 
 
 if __name__ == "__main__":

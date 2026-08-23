@@ -27,6 +27,8 @@ import {
 } from "@tabler/icons-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, assetUrl, loadSession, uploadMedia } from "./api";
+import { QuotesPage } from "./QuotesPage";
+import type { QuotesPageHandle } from "./QuotesPage";
 import type {
   Area,
   HubData,
@@ -47,12 +49,14 @@ const EMPTY_DATA: HubData = {
   transactions: [],
   summary: null,
   media: [],
+  quotes: [],
 };
 
 const NAV_ITEMS: Array<{ key: PageKey; label: string; icon: typeof IconHome }> = [
   { key: "overview", label: "总览", icon: IconLayoutDashboard },
   { key: "timeline", label: "时间线", icon: IconTimeline },
   { key: "ledger", label: "资金账目", icon: IconCoinYuan },
+  { key: "quotes", label: "询价报价", icon: IconReceipt2 },
   { key: "media", label: "图片视频", icon: IconPhoto },
   { key: "stages", label: "装修阶段", icon: IconFlag },
   { key: "settings", label: "设置", icon: IconSettings },
@@ -94,14 +98,14 @@ function currency(cents = 0): string {
 
 function shortDate(value?: string | null): string {
   if (!value) return "—";
-  const parsed = new Date(value.length === 10 ? `${value}T00:00:00` : value);
-  return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" }).format(parsed);
+  const parsed = new Date(value.length === 10 ? `${value}T00:00:00+08:00` : value);
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit" }).format(parsed);
 }
 
 function fullDate(value?: string | null): string {
   if (!value) return "未设置";
-  const parsed = new Date(value.length === 10 ? `${value}T00:00:00` : value);
-  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed);
+  const parsed = new Date(value.length === 10 ? `${value}T00:00:00+08:00` : value);
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).format(parsed);
 }
 
 function transactionCategory(item: Transaction): string {
@@ -118,7 +122,7 @@ function transactionKind(item: Transaction): "付款" | "订金" | "退款" {
 }
 
 function timeText(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+  return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
 }
 
 function percent(value: number | null | undefined): number {
@@ -127,8 +131,9 @@ function percent(value: number | null | undefined): number {
 
 function localDateTime(value?: string): string {
   const date = value ? new Date(value) : new Date();
-  const pad = (part: number) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const parts = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || "00";
+  return `${part("year")}-${part("month")}-${part("day")}T${part("hour")}:${part("minute")}`;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -156,6 +161,7 @@ export function App() {
   const [stageFilter, setStageFilter] = useState("");
   const [areaFilter, setAreaFilter] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const quotePageRef = useRef<QuotesPageHandle>(null);
 
   const activeProject = projects.find((item) => item.id === projectId) || null;
   const activeStage = data.dashboard?.active_stage || data.stages.find((item) => item.status === "active") || null;
@@ -170,13 +176,14 @@ export function App() {
     setLoading(true);
     setError("");
     try {
-      const [dashboard, stages, areas, timeline, ledger, media] = await Promise.all([
+      const [dashboard, stages, areas, timeline, ledger, media, quotes] = await Promise.all([
         api.dashboard(targetProjectId),
         api.stages(targetProjectId),
         api.areas(targetProjectId),
         api.timeline(targetProjectId),
         api.ledger(targetProjectId),
         api.media(targetProjectId),
+        api.quotes(targetProjectId),
       ]);
       setData({
         dashboard,
@@ -186,6 +193,7 @@ export function App() {
         transactions: ledger.items,
         summary: ledger.summary,
         media: media.items,
+        quotes: quotes.items,
       });
     } catch (caught) {
       setError(getErrorMessage(caught));
@@ -321,13 +329,14 @@ export function App() {
           stages={data.stages}
           areas={data.areas}
           writable={writable}
+          page={page}
           filtersOpen={filtersOpen}
           onProjectChange={changeProject}
           onSearch={setSearch}
           onStageFilter={setStageFilter}
           onAreaFilter={setAreaFilter}
           onToggleFilters={() => setFiltersOpen((value) => !value)}
-          onAdd={() => openEditor({ kind: "payment" })}
+          onAdd={() => page === "quotes" ? quotePageRef.current?.openCreate() : openEditor({ kind: "payment" })}
         />
 
         {error && (
@@ -384,6 +393,18 @@ export function App() {
                   onEdit={(item) => openEditor({ kind: "payment", item })}
                   onRefund={(item) => openEditor({ kind: "refund", item })}
                   onUndo={(item) => openEditor({ kind: "undo", item })}
+                />
+              )}
+              {page === "quotes" && (
+                <QuotesPage
+                  ref={quotePageRef}
+                  project={activeProject}
+                  items={data.quotes}
+                  search={search}
+                  writable={writable}
+                  onReload={() => loadProject(projectId)}
+                  onError={setError}
+                  onToast={setToast}
                 />
               )}
               {page === "media" && (
@@ -529,7 +550,7 @@ function Sidebar({ page, project, onNavigate }: { page: PageKey; project: Projec
 function MobileNav({ page, onNavigate }: { page: PageKey; onNavigate: (page: PageKey) => void }) {
   return (
     <nav className="mobile-nav" aria-label="手机导航">
-      {NAV_ITEMS.slice(0, 5).map((item) => {
+      {NAV_ITEMS.map((item) => {
         const Icon = item.icon;
         return <button key={item.key} className={page === item.key ? "active" : ""} type="button" onClick={() => onNavigate(item.key)}><Icon size={20} /><span>{item.label.replace("资金", "")}</span></button>;
       })}
@@ -547,6 +568,7 @@ function Header(props: {
   stages: Stage[];
   areas: Area[];
   writable: boolean;
+  page: PageKey;
   filtersOpen: boolean;
   onProjectChange: (value: string) => void;
   onSearch: (value: string) => void;
@@ -573,13 +595,11 @@ function Header(props: {
         </div>
       </div>
       <div className="topbar-actions">
-        <label className="search-box"><IconSearch size={18} /><input value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder="搜索记录、标签、内容..." /></label>
-        <select className="select-control" value={props.stageFilter} onChange={(event) => props.onStageFilter(event.target.value)} aria-label="筛选阶段"><option value="">全部阶段</option>{props.stages.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-        <select className="select-control" value={props.areaFilter} onChange={(event) => props.onAreaFilter(event.target.value)} aria-label="筛选空间"><option value="">全部空间</option>{props.areas.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-        <button className={`filter-button ${props.filtersOpen ? "active" : ""}`} type="button" onClick={props.onToggleFilters}><IconAdjustmentsHorizontal size={18} />筛选</button>
-        <button className="primary-button" type="button" onClick={props.onAdd} disabled={!props.writable}><IconPlus size={19} />新增记录</button>
+        <label className="search-box"><IconSearch size={18} /><input value={props.search} onChange={(event) => props.onSearch(event.target.value)} placeholder={props.page === "quotes" ? "搜索询价、供应商、品牌..." : "搜索记录、标签、内容..."} /></label>
+        {props.page !== "quotes" && <><select className="select-control" value={props.stageFilter} onChange={(event) => props.onStageFilter(event.target.value)} aria-label="筛选阶段"><option value="">全部阶段</option>{props.stages.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><select className="select-control" value={props.areaFilter} onChange={(event) => props.onAreaFilter(event.target.value)} aria-label="筛选空间"><option value="">全部空间</option>{props.areas.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button className={`filter-button ${props.filtersOpen ? "active" : ""}`} type="button" onClick={props.onToggleFilters}><IconAdjustmentsHorizontal size={18} />筛选</button></>}
+        <button className="primary-button" type="button" onClick={props.onAdd} disabled={!props.writable}><IconPlus size={19} />{props.page === "quotes" ? "新增询价" : "新增记录"}</button>
       </div>
-      {props.filtersOpen && <div className="filter-summary">已显示：{props.stageFilter ? "指定阶段" : "全部阶段"} · {props.areaFilter ? "指定空间" : "全部空间"} · 输入关键词可跨账目、现场记录和媒体过滤。</div>}
+      {props.page !== "quotes" && props.filtersOpen && <div className="filter-summary">已显示：{props.stageFilter ? "指定阶段" : "全部阶段"} · {props.areaFilter ? "指定空间" : "全部空间"} · 输入关键词可跨账目、现场记录和媒体过滤。</div>}
     </header>
   );
 }

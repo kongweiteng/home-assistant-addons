@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import hashlib
 from io import BytesIO
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -11,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import aiohttp
 from aiohttp import web
@@ -91,6 +94,65 @@ class MediaServiceTests(unittest.TestCase):
         self.assertEqual(content_path.read_bytes(), content)
         self.assertTrue(preview_path.is_file())
         self.assertEqual(self.media.list({"project_id": self.project["id"], "media_type": "image"})[0]["id"], asset["id"])
+
+    def test_cross_filesystem_upload_uses_verified_destination_copy(self) -> None:
+        content = jpeg_bytes("#526B73")
+        prepared = self.media.prepare_upload(
+            idempotency_key=key("cross-device"),
+            source_ref_hash=hashlib.sha256(b"cross-device").hexdigest(),
+            original_filename="跨卷现场.jpg",
+            mime_type="image/jpeg",
+            expected_bytes=len(content),
+        )
+        staging_path = Path(prepared["path"])
+        staging_path.write_bytes(content)
+        original_replace = os.replace
+
+        def replace_with_cross_device(source: str | Path, target: str | Path) -> None:
+            if Path(source) == staging_path:
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            original_replace(source, target)
+
+        with patch("renovation_hub.media.os.replace", side_effect=replace_with_cross_device):
+            result = self.media.finalize_upload(
+                prepared,
+                received_bytes=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+                expected_sha256=hashlib.sha256(content).hexdigest(),
+                metadata={
+                    "idempotency_key": key("cross-device"),
+                    "source_ref_hash": hashlib.sha256(b"cross-device").hexdigest(),
+                    "project_id": self.project["id"],
+                    "source": "fixture",
+                    "links": [],
+                },
+                actor_hash="sha256:fixture",
+            )
+
+        final_path, _ = self.media.content_path(result["media"]["id"])
+        self.assertEqual(final_path.read_bytes(), content)
+        self.assertFalse(staging_path.exists())
+        self.assertEqual(final_path.stat().st_mode & 0o777, 0o600)
+
+    def test_cross_filesystem_copy_failure_preserves_staging_for_retry(self) -> None:
+        content = jpeg_bytes("#8B6F47")
+        staging_path = self.root / "staging" / "retry.part"
+        final_path = self.root / "media" / "retry.jpg"
+        staging_path.write_bytes(content)
+
+        with patch("renovation_hub.media.os.replace", side_effect=OSError(errno.EXDEV, "Invalid cross-device link")):
+            with self.assertRaises(LedgerError) as context:
+                self.media._commit_staging_file(
+                    staging_path,
+                    final_path,
+                    expected_bytes=len(content),
+                    expected_sha256="0" * 64,
+                )
+
+        self.assertEqual(context.exception.code, "media_store_failed")
+        self.assertEqual(staging_path.read_bytes(), content)
+        self.assertFalse(final_path.exists())
+        self.assertEqual(list(final_path.parent.glob(".*.tmp")), [])
 
     def test_video_is_probed_and_cover_is_generated(self) -> None:
         video_path = self.root / "fixture.mp4"

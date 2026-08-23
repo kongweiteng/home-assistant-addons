@@ -13,6 +13,7 @@ from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
 from .runner_service import RunnerManagerService
 from .desktop_service import DesktopControllerService
+from .source_identity import runtime_source_identity
 from .store import ControllerStore, StoreError
 from .tool_proxy import ToolProxyError
 
@@ -24,6 +25,11 @@ MEDIA_ARCHIVE_TARGET_RE = re.compile(r"(?:装修|施工|工地|现场).{0,12}(?:
 MEDIA_ARCHIVE_MEDIA_ACTION_RE = re.compile(
     r"(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体).{0,8}(?:归档|存档|归入|收录|记录)"
     r"|(?:归档|存档|归入|收录|记录).{0,8}(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体)"
+)
+QUOTE_ARCHIVE_TARGET_RE = re.compile(r"(?:询价|报价|报价单|价格单|供应商|名片|商品规格|产品规格)")
+QUOTE_ARCHIVE_MEDIA_ACTION_RE = re.compile(
+    r"(?:询价|报价|报价单|价格单|名片|商品规格|产品规格).{0,10}(?:归档|存档|保存|添加|加入|关联|记录)"
+    r"|(?:归档|存档|保存|添加|加入|关联|记录).{0,10}(?:询价|报价|报价单|价格单|名片|商品规格|产品规格)"
 )
 MEDIA_ARCHIVE_NEGATION_RE = re.compile(r"(?:不要|别|无需|不用|不需要).{0,12}(?:归档|存档|保存|添加|加入|关联|记录)")
 MEMO_CREATE_PREFIX_RE = re.compile(
@@ -81,7 +87,12 @@ def has_explicit_media_archive_intent(text: str, attachments: list[dict[str, Any
         return False
     return bool(
         MEDIA_ARCHIVE_ACTION_RE.search(normalized)
-        and (MEDIA_ARCHIVE_TARGET_RE.search(normalized) or MEDIA_ARCHIVE_MEDIA_ACTION_RE.search(normalized))
+        and (
+            MEDIA_ARCHIVE_TARGET_RE.search(normalized)
+            or MEDIA_ARCHIVE_MEDIA_ACTION_RE.search(normalized)
+            or QUOTE_ARCHIVE_TARGET_RE.search(normalized)
+            or QUOTE_ARCHIVE_MEDIA_ACTION_RE.search(normalized)
+        )
     )
 
 
@@ -481,7 +492,8 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.11",
+            "version": "0.5.12",
+            "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),

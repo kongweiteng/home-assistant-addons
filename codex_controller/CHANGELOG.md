@@ -1,12 +1,15 @@
 # 更新记录
 
+## 0.5.12
+
+- 统一此前分叉的两个 `0.5.11` Controller 源码线：同时保留 macOS Codex Desktop 原任务接管的 `/desktop`、`/api/desktop/v1/**`、事件与控制契约，以及询价/报价单/供应商名片/商品规格的明确媒体归档意图。
+- `/api/status` 新增确定性的 `source_identity`，对运行包内全部 Python 源码按路径与字节计算 SHA-256。发布 helper 必须同时核对版本与摘要，禁止再把相同版本号当作相同运行源码。
+- Desktop 继续只允许既有 enabled/online macOS Runner、脱敏引用、固定 capability 和 fail-closed 控制；报价媒体仍要求明确正向保存意图，否定和仅查询表达不会开放归档工具。
+- Renovation Hub `0.3.2` 与 40 项动态业务工具一并保留；Relay `0.2.9`、Runner `0.3.10`、Controller options/data、原 Thread 与 archive capability 均不因本次 Controller-only 修复而改变。
+
 ## 0.5.11
 
-- 新增 macOS Codex Desktop 原任务接管的脱敏读取模型、`/api/desktop/v1/**` API、事件 cursor、幂等命令和收据持久化；同一原 Thread 的 stale revision、expected Turn 冲突、未知发布结果、重启恢复和容量上限全部 fail closed。
-- Controller 只允许 enabled、online、macOS 且声明 `desktop_takeover_v1` 的既有 Runner 上报和接收 Desktop 控制；Runner Center 全局关闭时 Desktop 状态与写 API 同时禁用，项目白名单和每动作 capability 再次在服务端核对。
-- 固定 Runner 制品升级为 `0.3.6`，内置四平台 manifest；配套 Relay `0.2.8` 增加 `desktop_command` 与 `desktop_snapshot/event/receipt` 传输并提高有界消息/速率上限。原始 Thread/Turn ID、Socket、绝对路径、凭据和隐藏 reasoning 不进入 Controller。
-- 新增独立 `/desktop` Ingress 工作台：手机单栏、桌面三栏、多 Mac/项目/原 Thread 聚合、状态/标题筛选、历史与实时事件、弱网 cursor 恢复，以及 safe steer、native steer、interrupt、continue、archive/unarchive 的能力感知控制。390×844 与 1440×900 合成数据视觉/交互验收通过，方向输入优先于长历史显示。
-- 当前版本完成 P1～P4 本地候选；正式 HAOS/Mac 部署、真实 2 项目×2 Thread 和手机同任务 E2E 尚未交付。
+- 历史上 Desktop 工作台与装修报价媒体意图曾分别从同一基线发布为两个不同源码的 `0.5.11` 候选，版本号无法唯一标识运行内容；该冲突由 `0.5.12` 终止。
 
 ## 0.5.10
 

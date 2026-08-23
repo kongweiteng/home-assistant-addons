@@ -157,6 +157,96 @@ class RenovationPageApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertGreater(len(await response.read()), 100)
 
+    async def test_quote_page_api_supports_multiple_offers_selection_and_images(self) -> None:
+        quote_payload = {
+            "project_id": self.project["id"],
+            "title": "客厅主灯",
+            "category": "灯具",
+            "specification": {"色温": "3500K", "尺寸": "直径 800mm"},
+            "quantity_milli": 1_000,
+            "unit": "盏",
+        }
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/api/v1/quotes",
+            json=quote_payload,
+            headers=self.headers("page-quote-create-000000000000"),
+        ) as response:
+            self.assertEqual(response.status, 201)
+            quote = (await response.json())["result"]["quote"]
+
+        offers = []
+        for index, (supplier, total) in enumerate((("示例灯饰一店", 368_000), ("示例灯饰二店", 338_000))):
+            async with self.session.post(
+                f"http://127.0.0.1:{self.port}/api/v1/quotes/{quote['id']}/offers",
+                json={
+                    "supplier_name": supplier,
+                    "total_cents": total,
+                    "quantity_milli": 1_000,
+                    "unit": "盏",
+                    "lead_time_days": index + 2,
+                },
+                headers=self.headers(f"page-quote-offer-{index}-0000000000"),
+            ) as response:
+                self.assertEqual(response.status, 201)
+                offers.append((await response.json())["result"]["offer"])
+
+        content = jpeg_bytes()
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/api/v1/uploads",
+            json={
+                "project_id": self.project["id"],
+                "original_filename": "主灯报价单.jpg",
+                "mime_type": "image/jpeg",
+                "size_bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "links": [],
+            },
+            headers=self.headers("page-quote-upload-000000000000"),
+        ) as response:
+            self.assertEqual(response.status, 201)
+            upload = (await response.json())["result"]
+        async with self.session.put(
+            f"http://127.0.0.1:{self.port}{upload['content_url']}",
+            data=content,
+            headers={**self.headers(), "Content-Type": "image/jpeg"},
+        ) as response:
+            self.assertEqual(response.status, 200)
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}{upload['complete_url']}", headers=self.headers()
+        ) as response:
+            asset = (await response.json())["result"]["media"]
+
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/api/v1/quotes/{quote['id']}/media",
+            json={"media_id": asset["id"], "offer_id": offers[1]["id"], "role": "quote_sheet"},
+            headers=self.headers("page-quote-media-0000000000000"),
+        ) as response:
+            self.assertEqual(response.status, 201)
+
+        async with self.session.get(
+            f"http://127.0.0.1:{self.port}/api/v1/quotes/{quote['id']}"
+        ) as response:
+            detail = (await response.json())["result"]
+        self.assertEqual(len(detail["offers"]), 2)
+        self.assertEqual(len(detail["media"]), 1)
+        self.assertEqual(detail["media"][0]["offer_id"], offers[1]["id"])
+
+        async with self.session.post(
+            f"http://127.0.0.1:{self.port}/api/v1/quotes/{quote['id']}/select",
+            json={"offer_id": offers[1]["id"], "version": detail["quote"]["version"]},
+            headers=self.headers("page-quote-select-000000000000"),
+        ) as response:
+            self.assertEqual(response.status, 200)
+            selected = (await response.json())["result"]
+        self.assertEqual(selected["quote"]["selected_offer_id"], offers[1]["id"])
+
+        async with self.session.get(
+            f"http://127.0.0.1:{self.port}/api/v1/quotes?project_id={self.project['id']}&keyword=%E7%81%AF%E9%A5%B0%E4%BA%8C%E5%BA%97"
+        ) as response:
+            listed = (await response.json())["result"]["items"]
+        self.assertEqual([item["id"] for item in listed], [quote["id"]])
+        self.assertEqual(self.store.summary({"project_id": self.project["id"]})["transaction_count"], 0)
+
     async def test_internal_auth_and_upload_mime_fail_closed_without_staging_file(self) -> None:
         async with self.session.get(f"http://127.0.0.1:{self.port}/internal/v1/status") as response:
             self.assertEqual(response.status, 401)

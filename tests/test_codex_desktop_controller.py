@@ -304,6 +304,15 @@ class DesktopStoreServiceTests(unittest.TestCase):
         )
         self.assertEqual(stale["status"], "stale_ignored")
         self.assertEqual(self.service.thread(THREAD_REF)["title"], "原桌面任务")
+        refreshed = snapshot(self.runner_id)
+        refreshed["created_at"] = (NOW + dt.timedelta(seconds=30)).isoformat()
+        refreshed["host"]["synced_at"] = refreshed["created_at"]
+        refreshed["body_digest"] = body_digest(refreshed)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", refreshed)["status"],
+            "refreshed",
+        )
+        self.assertEqual(self.service.thread(THREAD_REF)["title"], "原桌面任务")
         conflicting = snapshot(self.runner_id, revision=7, title="冲突快照")
         with self.assertRaises(StoreError) as context:
             self.service.receive("desktop_snapshot", conflicting)
@@ -346,6 +355,26 @@ class DesktopStoreServiceTests(unittest.TestCase):
             self.service.receive(
                 "desktop_event",
                 event(self.runner_id, sequence=2, revision=8),
+            )
+        self.assertEqual(context.exception.code, "desktop_snapshot_required")
+
+    def test_event_for_pruned_superseded_revision_uses_existing_stale_ack_contract(self) -> None:
+        for revision in (8, 9, 10, 11):
+            self.service.receive(
+                "desktop_snapshot",
+                snapshot(self.runner_id, revision=revision, status="idle"),
+            )
+        with self.assertRaises(StoreError) as context:
+            self.service.receive(
+                "desktop_event",
+                event(self.runner_id, sequence=2, revision=7),
+            )
+        self.assertEqual(context.exception.code, "desktop_event_sequence_stale")
+
+        with self.assertRaises(StoreError) as context:
+            self.service.receive(
+                "desktop_event",
+                event(self.runner_id, sequence=3, revision=12),
             )
         self.assertEqual(context.exception.code, "desktop_snapshot_required")
 

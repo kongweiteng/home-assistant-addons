@@ -57,10 +57,11 @@ class DesktopStore:
                 observed_at,
             )
             existing = connection.execute(
-                "SELECT id,host_ref,project_ref,runner_id,thread_revision,snapshot_digest "
+                "SELECT id,host_ref,project_ref,runner_id,thread_revision,snapshot_digest,snapshot_json "
                 "FROM desktop_threads WHERE thread_ref=?",
                 (thread_ref,),
             ).fetchone()
+            semantic_refresh = False
             if existing is not None:
                 if (
                     existing["host_ref"] != host_ref
@@ -76,11 +77,14 @@ class DesktopStore:
                 if revision < previous_revision:
                     return {"status": "stale_ignored", "thread": self._thread_row(connection, thread_ref)}
                 if revision == previous_revision and existing["snapshot_digest"] not in {None, digest}:
-                    raise StoreError(
-                        "desktop_revision_conflict",
-                        "同一 Desktop Thread revision 出现不同快照",
-                        status=409,
-                    )
+                    if existing["snapshot_json"] == encoded_snapshot:
+                        semantic_refresh = True
+                    else:
+                        raise StoreError(
+                            "desktop_revision_conflict",
+                            "同一 Desktop Thread revision 出现不同快照",
+                            status=409,
+                        )
             elif self._count(connection, "desktop_threads") >= MAX_THREADS:
                 raise StoreError("desktop_thread_capacity", "Desktop Thread 容量已满", status=507)
 
@@ -112,13 +116,31 @@ class DesktopStore:
                     observed_at,
                 ),
             )
-            connection.execute(
-                "INSERT INTO desktop_snapshots(thread_ref,thread_revision,body_digest,document_json,observed_at) "
-                "VALUES(?,?,?,?,?)",
-                (thread_ref, revision, digest, encoded_document, observed_at),
-            )
+            if semantic_refresh:
+                refreshed = connection.execute(
+                    "UPDATE desktop_snapshots SET body_digest=?,document_json=?,observed_at=? "
+                    "WHERE thread_ref=? AND thread_revision=?",
+                    (digest, encoded_document, observed_at, thread_ref, revision),
+                )
+                if refreshed.rowcount == 0:
+                    connection.execute(
+                        "INSERT INTO desktop_snapshots("
+                        "thread_ref,thread_revision,body_digest,document_json,observed_at"
+                        ") VALUES(?,?,?,?,?)",
+                        (thread_ref, revision, digest, encoded_document, observed_at),
+                    )
+            else:
+                connection.execute(
+                    "INSERT INTO desktop_snapshots("
+                    "thread_ref,thread_revision,body_digest,document_json,observed_at"
+                    ") VALUES(?,?,?,?,?)",
+                    (thread_ref, revision, digest, encoded_document, observed_at),
+                )
             self._prune_snapshots(connection, thread_ref)
-            return {"status": "stored", "thread": self._thread_row(connection, thread_ref)}
+            return {
+                "status": "refreshed" if semantic_refresh else "stored",
+                "thread": self._thread_row(connection, thread_ref),
+            }
 
     def ingest_event(self, document: Mapping[str, Any]) -> dict[str, Any]:
         host_ref = str(document["host_ref"])
@@ -158,7 +180,7 @@ class DesktopStore:
                 )
             self._bind_host(connection, host_ref, runner_id, {}, "{}", created_at)
             binding = connection.execute(
-                "SELECT host_ref,project_ref,runner_id FROM desktop_threads WHERE thread_ref=?",
+                "SELECT host_ref,project_ref,runner_id,thread_revision FROM desktop_threads WHERE thread_ref=?",
                 (thread_ref,),
             ).fetchone()
             if binding is None:
@@ -182,6 +204,12 @@ class DesktopStore:
                 (thread_ref, int(document["thread_revision"])),
             ).fetchone()
             if target_snapshot is None:
+                if int(binding["thread_revision"]) > int(document["thread_revision"]):
+                    raise StoreError(
+                        "desktop_event_sequence_stale",
+                        "Desktop event 对应 revision 已被更新快照取代",
+                        status=409,
+                    )
                 raise StoreError(
                     "desktop_snapshot_required",
                     "Desktop event 对应 revision 的快照必须先接收",

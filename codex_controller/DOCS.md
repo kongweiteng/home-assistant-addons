@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.15`。
+当前版本：`0.5.16`。
 
 ## M8 微信两阶段备车
 
@@ -51,7 +51,7 @@
 
 ## Runner Center v2
 
-`0.5.15` 继续默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.16` 继续默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
@@ -205,7 +205,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.15` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的正式 `0.5.14` 源码树与运行摘要 `e241acaa420866bdd449e6f78d875b2c35954fd23558d7a5cbf5fc2005b9a5b7`；不能仅指定版本号，因为 `0.5.11` 曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。`0.5.14` 会重新暴露旧内置 Runner `0.3.6` manifest 与已配置 `0.3.11` 摘要不一致的问题，因此回滚后安装入口保持关闭属于已知降级结果，不得为恢复入口而放宽摘要校验。
+从 `0.5.16` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的正式 `0.5.14` 源码树与运行摘要 `e241acaa420866bdd449e6f78d875b2c35954fd23558d7a5cbf5fc2005b9a5b7`；不能仅指定版本号，因为 `0.5.11` 曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。`0.5.14` 会重新暴露旧内置 Runner `0.3.6` manifest 与已配置 `0.3.11` 摘要不一致的问题，因此回滚后安装入口保持关闭属于已知降级结果，不得为恢复入口而放宽摘要校验。
 
 如果有意继续降级到不含 Desktop 的 `0.5.10`，先关闭 Desktop 页面入口和 Runner 的 `[desktop].enabled`，等待所有 Desktop 命令离开 `pending/submitted/accepted/unknown`，确认 Relay 与 Runner Desktop outbox 已排空，再同时回退 Relay 到 `0.2.7` 和 Runner manifest 到 `0.3.5`。旧版会忽略 additive Desktop 表，但不得删除 Controller 数据目录、Desktop 审计、Mac 本地 refs store 或任何 Codex 原 Thread；未知收据必须保留为只读核对证据。
 

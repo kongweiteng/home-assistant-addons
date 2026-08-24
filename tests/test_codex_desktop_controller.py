@@ -350,6 +350,17 @@ class DesktopStoreServiceTests(unittest.TestCase):
             "refreshed",
         )
         self.assertEqual(self.service.thread(THREAD_REF)["title"], "原桌面任务")
+        availability = snapshot(self.runner_id)
+        availability["snapshot"]["status"] = "recovery_required"
+        availability["snapshot"]["control_state"] = "recovery_required"
+        availability["body_digest"] = body_digest(availability)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", availability)["status"],
+            "refreshed",
+        )
+        current = self.service.thread(THREAD_REF)
+        self.assertEqual(current["status"], "recovery_required")
+        self.assertEqual(current["control_state"], "recovery_required")
         conflicting = snapshot(self.runner_id, revision=7, title="冲突快照")
         with self.assertRaises(StoreError) as context:
             self.service.receive("desktop_snapshot", conflicting)

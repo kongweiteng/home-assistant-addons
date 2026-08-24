@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.16
+
+- 修复 Mac Desktop Owner/IPC 可用性变化时，Adapter 在 App `thread_revision` 未变化的情况下仅切换 `status` 与 `control_state`，却被 Controller 误判为 `desktop_revision_conflict` 的恢复死锁。
+- 同 revision 现在只允许上述两个派生可用性字段做语义刷新；title、preview、turns、active Turn、history、project、Runner/host 绑定及其他任意业务差异继续失败关闭。
+- 该修复使 Relay 可以正常 ACK 已被权威接受的 snapshot，解除历史 outbox 队头饥饿；不清理 Runner 状态库，不放宽 Relay 其他拒绝，也不执行任何 Desktop 控制或车辆动作。
+
 ## 0.5.15
 
 - 新增 owner-only M8 备车状态、请求和执行三个固定 MCP 工具，以及微信精确意图的确定性直达路由。

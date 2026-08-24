@@ -27,9 +27,9 @@ export RELAY_CONTROLLER_BASE_URL
 export RELAY_CONTROLLER_API_TOKEN
 export RELAY_API_TOKEN
 export RELAY_MAX_CONNECTIONS=$(jq -r '.max_connections // 64' "$OPTIONS_FILE")
-export RELAY_MAX_MESSAGE_BYTES=$(jq -r '.max_message_bytes // 32768' "$OPTIONS_FILE")
+export RELAY_MAX_MESSAGE_BYTES=$(jq -r '.max_message_bytes // 524288' "$OPTIONS_FILE")
 export RELAY_FIRST_FRAME_TIMEOUT_SECONDS=$(jq -r '.first_frame_timeout_seconds // 10' "$OPTIONS_FILE")
-export RELAY_MESSAGES_PER_MINUTE=$(jq -r '.messages_per_minute // 120' "$OPTIONS_FILE")
+export RELAY_MESSAGES_PER_MINUTE=$(jq -r '.messages_per_minute // 1200' "$OPTIONS_FILE")
 export RELAY_CONTROLLER_TIMEOUT_SECONDS=$(jq -r '.controller_timeout_seconds // 10' "$OPTIONS_FILE")
 export NO_PROXY="localhost,127.0.0.1,::1,supervisor,homeassistant,hassio,local-codex-controller,local-codex-runner-relay"
 

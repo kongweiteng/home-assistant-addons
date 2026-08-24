@@ -22,6 +22,7 @@ from .ledger import (
     normalize_tags,
     utc_now,
 )
+from .quotes import QUOTE_SCHEMA_VERSION, QuoteStoreMixin, initialize_quote_schema
 
 
 HUB_SCHEMA_VERSION = 2
@@ -78,7 +79,7 @@ def _datetime(value: Any, field: str = "occurred_at") -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-class RenovationHubStore(LedgerStore):
+class RenovationHubStore(QuoteStoreMixin, LedgerStore):
     """Ledger-compatible store extended with renovation project records."""
 
     def _initialize(self) -> None:
@@ -189,16 +190,22 @@ class RenovationHubStore(LedgerStore):
                 "INSERT OR IGNORE INTO metadata(key,value) VALUES ('hub_schema_version',?)",
                 (str(HUB_SCHEMA_VERSION),),
             )
+            connection.execute(
+                "UPDATE metadata SET value=? WHERE key='hub_schema_version'",
+                (str(HUB_SCHEMA_VERSION),),
+            )
         from .media import initialize_media_schema
         from .progress_capture import initialize_progress_capture_schema
 
         initialize_media_schema(self)
+        initialize_quote_schema(self)
         initialize_progress_capture_schema(self)
 
     def status(self) -> dict[str, Any]:
         result = super().status()
         with self._connect() as connection:
             result["hub_schema_version"] = HUB_SCHEMA_VERSION
+            result["quote_schema_version"] = QUOTE_SCHEMA_VERSION
             result["counts"].update(
                 {
                     "projects": connection.execute("SELECT count(*) FROM projects WHERE status!='archived'").fetchone()[0],
@@ -211,6 +218,7 @@ class RenovationHubStore(LedgerStore):
                     ).fetchone()[0],
                 }
             )
+            result["counts"].update(self.quote_counts(connection))
         return result
 
     def _domain_audit(
@@ -376,6 +384,9 @@ class RenovationHubStore(LedgerStore):
             "media_links",
             "uploads",
             "media_ingest_results",
+            "quote_requests",
+            "quote_offers",
+            "quote_media_links",
         ):
             if connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0]:
                 raise LedgerError("invariant_mismatch", f"影子派生表 {table} 包含未授权数据")

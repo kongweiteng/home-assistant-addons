@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.2.9
+
+- Controller 已保存更高 Desktop event sequence 并返回 `desktop_event_sequence_stale` 时，Relay 对精确的 `desktop_event` 返回传输 ACK，使恢复期旧 event 可从 Runner outbox 安全删除，不再反复关闭 WSS 连接。
+- 新增终态消费例外只绑定 `desktop_event`；`desktop_event_sequence_stale` 不适用于 snapshot/receipt，既有 `runner_late_message` 行为保持兼容，冲突、绑定、隐私、摘要和其他 Controller 拒绝仍失败关闭。Runner 身份、credential、Desktop 原 Thread、Controller 数据和网络边界不变。
+
+## 0.2.8
+
+- 新增 `desktop_command` 下行和 `desktop_snapshot`、`desktop_event`、`desktop_receipt` 上行消息类型，继续按已认证 runner_id 与单一 WSS 连接一对一转发；Relay 不解析或保存原始 App Thread/Turn ID。
+- 默认消息上限提高到 `512 KiB`、每连接速率提高到每分钟 `1200` 条，Schema 上限分别为 `1 MiB` 和 `10000`；Runner 端净化、截断、outbox 背压以及 Controller digest/revision/receipt 校验仍是硬门禁。
+- `/install/<ticket>` 固定升级到 Runner `0.3.6`，与 Controller `0.5.11` 的内置 manifest 和四平台自包含制品保持一致。Registry、lease、ticket/enrollment 不落盘、IPv4 Controller 客户端和最小权限网络边界不变。
+
 ## 0.2.7
 
 - `/install/<ticket>` 固定升级到 Runner `0.3.5`，与 Controller `0.5.8` 的内置 manifest 和四平台自包含制品保持一致。

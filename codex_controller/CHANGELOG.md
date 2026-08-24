@@ -1,10 +1,28 @@
 # 更新记录
 
-## 0.5.12
+## 0.5.14
 
 - 新增 `progress_capture_v1` 确定性作业路径；装修进度开始、登记、说明、暂停、恢复、取消、状态和完成不再依赖模型选择媒体工具。
 - Controller 按 16 项批次登记、逐项流送并复用稳定幂等键；Hub 已存但 Gateway ACK 未确认时会走 replay 补 ACK，明确 pending 时阻断最终完成。
 - 新增低噪声回复抑制字段；Gateway 只在开始、首项、每 5 项、失败、状态和控制动作回执，普通连续单图不刷屏。
+- 保留 `0.5.13` 的 Desktop 原任务接管、运行源码摘要、Runner 和报价媒体意图；正式升级必须同时核对版本与 `source_identity`。
+
+## 0.5.13
+
+- 修复 Controller 数据保留但 Runner outbox 重新投递同一业务快照时的恢复死锁：同一 Thread revision、相同业务 snapshot 只因 envelope `created_at` 或 host `synced_at` 改变时按语义幂等刷新，不再误报 `desktop_revision_conflict`。
+- 精确 revision snapshot 已被保留上限淘汰、但当前 Thread revision 明确更高时，旧 Desktop event 复用 Relay `0.2.9` 已冻结的 `desktop_event_sequence_stale` 消费契约；未来 revision 缺 snapshot、真正同 revision 不同业务快照、绑定/隐私/摘要冲突继续 fail closed。
+- 本次仍是 Controller-only 恢复修复；Relay `0.2.9`、Runner `0.3.10`、Controller options/data、原 Thread、archive capability 和网络边界不变。
+
+## 0.5.12
+
+- 统一此前分叉的两个 `0.5.11` Controller 源码线：同时保留 macOS Codex Desktop 原任务接管的 `/desktop`、`/api/desktop/v1/**`、事件与控制契约，以及询价/报价单/供应商名片/商品规格的明确媒体归档意图。
+- `/api/status` 新增确定性的 `source_identity`，对运行包内全部 Python 源码按路径与字节计算 SHA-256。发布 helper 必须同时核对版本与摘要，禁止再把相同版本号当作相同运行源码。
+- Desktop 继续只允许既有 enabled/online macOS Runner、脱敏引用、固定 capability 和 fail-closed 控制；报价媒体仍要求明确正向保存意图，否定和仅查询表达不会开放归档工具。
+- Renovation Hub `0.3.2` 与 40 项动态业务工具一并保留；Relay `0.2.9`、Runner `0.3.10`、Controller options/data、原 Thread 与 archive capability 均不因本次 Controller-only 修复而改变。
+
+## 0.5.11
+
+- 历史上 Desktop 工作台与装修报价媒体意图曾分别从同一基线发布为两个不同源码的 `0.5.11` 候选，版本号无法唯一标识运行内容；该冲突由 `0.5.12` 终止。
 
 ## 0.5.10
 

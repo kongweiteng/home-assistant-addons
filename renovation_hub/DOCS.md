@@ -19,6 +19,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 - **总览**：预算、净支出、当前阶段、媒体统计、施工进度、空间影像、近期动态和资金构成。
 - **时间线**：按发生时间查看施工、验收、决策、里程碑和普通记录；可新增和编辑记录。
 - **资金账目**：查看付款、订金与退款明细；分类优先读取 v2 的“主题/专业”分组标签，备注作为用途显示，商家作为次要信息；仍可新增、纠正、退款和撤销，并保留审计与版本冲突保护。
+- **询价报价**：独立记录需要询价的物品或服务、规格和跟进时间；同一询价可保存多家供应商报价、联系人、电话、地址、品牌型号、费用、交期、有效期、付款条件与质保。选择报价只记录决策，不写入 Ledger。报价单、名片、地址图和商品图可关联整项询价或具体供应商，并在原图查看器中缩放、切换和下载。
 - **图片视频**：按阶段、空间、类型、时间和关键词筛选，查看图片或播放视频，并上传多个现场文件。
 - **装修阶段**：维护阶段名称、状态、颜色、计划/实际时间；同一项目最多一个进行中阶段。
 - **设置**：维护项目与空间，查看 writer、导出和媒体存储状态。
@@ -43,7 +44,7 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.2.10` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.3.3` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。
@@ -90,10 +91,12 @@ Legacy 附件只在 writer、幂等键和目标流水验证通过后写入内容
 - `GET /api/v1/areas`
 - `GET /api/v1/timeline`
 - `GET /api/v1/ledger/transactions`
+- `GET /api/v1/quotes`
+- `GET /api/v1/quotes/{request_id}`
 - `GET /api/v1/media`
 - `GET /api/v1/search`
 
-项目、阶段、空间、事件和账目通过 `POST`/`PATCH` 页面 API 写入。退款和撤销使用独立动作端点。
+项目、阶段、空间、事件和账目通过 `POST`/`PATCH` 页面 API 写入。退款和撤销使用独立动作端点。询价使用 `POST/PATCH /api/v1/quotes`，供应商报价使用询价下的 `offers` 端点，选择报价与关联媒体使用独立动作端点；这些动作不会创建 Ledger 流水。
 
 浏览器媒体上传使用：
 
@@ -130,7 +133,7 @@ Content-Type: application/json
 X-Cutover-Token: <独立 cutover token>
 ```
 
-`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、`catalog_revision=3`、digest 和当前 37 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。`renovation_mutate` 要求明确对象 ID、预览摘要和确认后才应用批量变更。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
+`GET /internal/v1/mcp/manifest` 返回 `version=1`、固定 `service=renovation_hub`、`scope=business`、`catalog_revision=4`、digest 和当前 46 个公开业务工具。manifest 与 `POST /internal/v1/tools/call` 共用 `business_tools.py` 的单一 registry；工具名固定在 `ledger_*` / `renovation_*` 命名空间，Schema 禁止额外字段，transport 只允许 JSON、受控附件或唯一媒体流。`renovation_mutate` 要求明确对象 ID、预览摘要和确认后才应用批量变更。内部 cutover、writer lease、恢复、清理、原始 SQL/文件和任意 URL 能力不会进入 manifest。
 
 `ledger_correct_payment` 与 `renovation_mutate` 可为历史账单补充 `project_id`、`stage_id`、`area_id`；批量修改必须先提交筛选条件和预览摘要，再以相同摘要应用，并写入审计。`category`、`subcategory`、`expense_type` 是独立字段，catalog 只负责稳定 code、展示名和有效性，不把标签推断为分类事实。付款计划的 `total_amount`、`paid_amount` 和 `remaining_amount` 从关联 Ledger 流水计算，付款节点只保存计划配置与状态。
 
@@ -138,7 +141,7 @@ X-Cutover-Token: <独立 cutover token>
 
 `ledger_add_payment` 在 manifest 中只发布 canonical v2 输入：必填 `amount_cents`、`occurred_on`、`grouped_tags`，其中 `grouped_tags` 仅允许“主题、空间、专业、性质、渠道、品牌、生态、阶段、状态”九个固定维度。`amount/date/category/description/main_category/tags/ledger_format_version` 等 legacy 或猜测字段不会暴露，并在业务 dispatch 进入账本事务前返回确定性校验错误。页面和迁移等内部调用仍可使用 `LedgerStore.add_payment` 的 v1 兼容路径。
 
-公开业务动作由测试逐项核对为“已映射 MCP”或“带原因排除”。统一 `renovation_search` 同时查询账目、时间线和媒体；`renovation_media_list` / `renovation_media_show` 返回脱敏业务元数据，不返回 `storage_name`、`preview_name`、`source_ref_hash` 或私有绝对路径。
+公开业务动作由测试逐项核对为“已映射 MCP”或“带原因排除”。九个 `renovation_quote_*` 工具提供创建询价、添加报价、更新询价、更新报价、列表、详情、比较、选择和媒体关联；过期报价不可选择，图片识别结果建议保持 `review_required` 直到人工复核。统一 `renovation_search` 同时查询账目、时间线、媒体和报价；`renovation_media_list` / `renovation_media_show` 返回脱敏业务元数据，不返回 `storage_name`、`preview_name`、`source_ref_hash` 或私有绝对路径。
 
 接口依次为 `/internal/v1/admin/cutover/prepare`、`freeze`、`seed`、`ready`、`activate` 和 `suspend`。激活确认串必须精确为 `ACTIVATE_PRIMARY_WRITER:<manifest-id>:<generation>`。旧 `/internal/v1/admin/writer-mode` 不再允许推进正式状态，只保留紧急暂停和只读状态确认。
 
@@ -146,7 +149,7 @@ X-Cutover-Token: <独立 cutover token>
 
 兼容工具入口为 `POST /internal/v1/tools/call`。历史 contracts 继续作为兼容输入事实源；当前模型可见目录以受认证 manifest 为准，并由同一 registry 执行。
 
-`renovation_media_ingest` 只允许在用户明确请求归档装修/施工/工地媒体时提交一次性 `attachment_ref` 和结构化元数据。Controller 主进程先检查 Hub 幂等结果，再从 Gateway 非消费流式读取正文并转发到 `/internal/v1/media/ingest`；Hub 成功后由 Controller ACK 消费 Gateway 引用，失败时原引用保持可重试。不会生成 Base64 JSON，也不会把 Gateway bearer、Hub bearer、内部路径或媒体正文交给模型。
+`renovation_media_ingest` 只允许在用户明确请求归档装修/施工/工地或询价报价媒体时提交一次性 `attachment_ref` 和结构化元数据。Controller 主进程先检查 Hub 幂等结果，再从 Gateway 非消费流式读取正文并转发到 `/internal/v1/media/ingest`；Hub 成功后由 Controller ACK 消费 Gateway 引用，失败时原引用保持可重试。不会生成 Base64 JSON，也不会把 Gateway bearer、Hub bearer、内部路径或媒体正文交给模型。归档后再用 `renovation_quote_attach_media` 把报价单、商品图、名片或地址图关联到询价或具体供应商。
 
 ## 支持媒体
 
@@ -172,7 +175,7 @@ python3 scripts/fixture_preview.py --static-dir frontend/dist --port 8101
 1. 停止新写入并记录 writer mode、数据库状态、最后流水、媒体数量和便携包 SHA-256。
 2. 使用 HAOS 冷备份恢复 `/data`；媒体原件还必须从已验证的 `/media` 独立备份恢复。
 3. 如需从便携包重建账本，先在 `read_only` 影子目录执行全不变量校验和导入。
-4. 对比付款、退款、订金、有效/撤销状态、分类、标签、月份、附件、审计、项目/阶段/空间/事件和媒体 manifest 后，另行批准 writer 切换。
+4. 对比付款、退款、订金、有效/撤销状态、分类、标签、月份、附件、审计、项目/阶段/空间/事件、询价、供应商报价、报价媒体关联和媒体 manifest 后，另行批准 writer 切换。
 5. 切换后若已经产生新真实账目或媒体，禁止使用旧数据库直接覆盖；必须先导出增量并执行无损反向迁移。
 
 本地源码、合成测试或双架构构建通过不能替代 HAOS Ingress、大文件、存储容量、重启恢复和真实微信链路验收。

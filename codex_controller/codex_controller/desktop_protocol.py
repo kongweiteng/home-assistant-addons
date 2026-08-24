@@ -1,0 +1,479 @@
+"""Strict ref-only protocol for Codex Desktop takeover messages."""
+
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import json
+import re
+from typing import Any, Mapping
+from zoneinfo import ZoneInfo
+
+
+DESKTOP_PROTOCOL_VERSION = 1
+MAX_DOCUMENT_BYTES = 256 * 1024
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+RUNNER_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
+REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+REF_RE = re.compile(r"^(HS|PJ|TH|TR)-[A-Z2-7]{20,52}$")
+DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+UUID_RE = re.compile(
+    r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
+)
+PRIVATE_PATH_RE = re.compile(
+    r"(?i)(?:^|[\s\"'])"
+    r"(?:/(?:Users|private|var|etc|opt|Applications)/[^\s\"']+|[A-Z]:\\Users\\[^\s\"']+)"
+)
+SECRET_RE = re.compile(
+    r"(?i)\b(?:token|password|passwd|secret|authorization|cookie|api[_-]?key)\s*[:=]\s*[^\s,;]+"
+)
+FORBIDDEN_PUBLIC_KEYS = frozenset(
+    {
+        "thread_id",
+        "turn_id",
+        "conversation_id",
+        "conversationId",
+        "expectedTurnId",
+        "cwd",
+        "path",
+        "absolute_path",
+        "socket",
+        "credential",
+        "token",
+        "cookie",
+        "private_key",
+        "reasoning",
+        "prompt",
+        "system_prompt",
+        "developer_instructions",
+    }
+)
+EVENT_KINDS = frozenset(
+    {
+        "thread.discovered",
+        "thread.updated",
+        "thread.archived",
+        "turn.started",
+        "turn.completed",
+        "turn.interrupted",
+        "turn.failed",
+        "user.message",
+        "assistant.delta",
+        "assistant.completed",
+        "plan.updated",
+        "command.started",
+        "command.output",
+        "command.completed",
+        "file.changed",
+        "file.patch",
+        "reasoning.summary",
+        "awaiting.input",
+        "recovery.required",
+        "protocol.degraded",
+    }
+)
+THREAD_STATUSES = frozenset(
+    {
+        "active",
+        "idle",
+        "notLoaded",
+        "archived",
+        "failed",
+        "recovery_required",
+        "protocol_degraded",
+    }
+)
+RECEIPT_STATES = frozenset(
+    {"accepted", "confirmed", "conflict", "expired", "failed", "unknown", "recovery_required"}
+)
+ACTIONS = frozenset({"read", "load", "steer", "interrupt", "continue", "archive", "unarchive"})
+
+
+class DesktopProtocolError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def canonical_json(value: Mapping[str, Any]) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise DesktopProtocolError("desktop_payload_invalid", "Desktop 文档不是有效 JSON") from exc
+
+
+def body_digest(value: Mapping[str, Any]) -> str:
+    document = dict(value)
+    document.pop("body_digest", None)
+    return "sha256:" + hashlib.sha256(canonical_json(document).encode("utf-8")).hexdigest()
+
+
+def intent_digest(value: Mapping[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def validate_desktop_document(message_type: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    if message_type == "desktop_snapshot":
+        return _validate_snapshot(value)
+    if message_type == "desktop_event":
+        return _validate_event(value)
+    if message_type == "desktop_receipt":
+        return _validate_receipt(value)
+    raise DesktopProtocolError("desktop_message_type_invalid", "Desktop 消息类型无效")
+
+
+def build_desktop_command(
+    *,
+    runner_id: str,
+    request_id: str,
+    host_ref: str,
+    thread_ref: str,
+    expected_thread_revision: int,
+    action: str,
+    now: dt.datetime,
+    expected_turn_ref: str | None = None,
+    input_text: str | None = None,
+    mode: str | None = None,
+    ttl_seconds: int = 120,
+) -> dict[str, Any]:
+    _runner(runner_id)
+    _request(request_id)
+    _ref(host_ref, "HS")
+    _ref(thread_ref, "TH")
+    _revision(expected_thread_revision)
+    if action not in ACTIONS:
+        raise DesktopProtocolError("desktop_action_invalid", "Desktop 动作无效")
+    if not 5 <= ttl_seconds <= 600:
+        raise DesktopProtocolError("desktop_expiry_invalid", "Desktop 命令有效期无效")
+    current = _aware(now, "now").astimezone(SHANGHAI)
+    document: dict[str, Any] = {
+        "version": DESKTOP_PROTOCOL_VERSION,
+        "message_type": "desktop_command",
+        "runner_id": runner_id,
+        "request_id": request_id,
+        "host_ref": host_ref,
+        "thread_ref": thread_ref,
+        "expected_thread_revision": expected_thread_revision,
+        "action": action,
+        "created_at": current.isoformat(),
+        "expires_at": (current + dt.timedelta(seconds=ttl_seconds)).isoformat(),
+    }
+    if expected_turn_ref is not None:
+        document["expected_turn_ref"] = expected_turn_ref
+    if input_text is not None:
+        document["input"] = input_text
+    if mode is not None:
+        document["mode"] = mode
+    document["body_digest"] = body_digest(document)
+    return validate_desktop_command(document, now=current)
+
+
+def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> dict[str, Any]:
+    required = {
+        "version",
+        "message_type",
+        "runner_id",
+        "request_id",
+        "host_ref",
+        "thread_ref",
+        "expected_thread_revision",
+        "action",
+        "created_at",
+        "expires_at",
+        "body_digest",
+    }
+    optional = {"expected_turn_ref", "input", "mode"}
+    document = _exact_mapping(value, required, optional)
+    _base(document, "desktop_command")
+    _request(document["request_id"])
+    _ref(document["host_ref"], "HS")
+    _ref(document["thread_ref"], "TH")
+    _revision(document["expected_thread_revision"])
+    action = document["action"]
+    if action not in ACTIONS:
+        raise DesktopProtocolError("desktop_action_invalid", "Desktop 动作无效")
+    created_at = _shanghai_time(document["created_at"], "created_at")
+    expires_at = _shanghai_time(document["expires_at"], "expires_at")
+    current = _aware(now, "now")
+    if expires_at <= current:
+        raise DesktopProtocolError("desktop_request_expired", "Desktop 命令已过期")
+    if expires_at <= created_at or expires_at - created_at > dt.timedelta(minutes=10):
+        raise DesktopProtocolError("desktop_expiry_invalid", "Desktop 命令有效期无效")
+    expected_turn = document.get("expected_turn_ref")
+    if expected_turn is not None:
+        _ref(expected_turn, "TR")
+    input_text = document.get("input")
+    if action in {"steer", "continue"}:
+        _safe_input(input_text)
+    elif input_text is not None:
+        raise DesktopProtocolError("desktop_input_invalid", "该 Desktop 动作不允许输入文本")
+    if action in {"steer", "interrupt"} and expected_turn is None:
+        raise DesktopProtocolError("desktop_expected_turn_required", "Desktop 动作缺少 expected Turn")
+    if action not in {"steer", "interrupt"} and expected_turn is not None:
+        raise DesktopProtocolError("desktop_expected_turn_invalid", "该 Desktop 动作不允许 expected Turn")
+    mode = document.get("mode")
+    if action == "steer":
+        if mode not in {"safe", "native"}:
+            raise DesktopProtocolError("desktop_mode_invalid", "Desktop steer 模式无效")
+    elif mode is not None:
+        raise DesktopProtocolError("desktop_mode_invalid", "该 Desktop 动作不允许 mode")
+    _digest(document)
+    return document
+
+
+def validate_public_input(value: Any) -> None:
+    _public(value)
+
+
+def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "version",
+        "message_type",
+        "runner_id",
+        "created_at",
+        "host_ref",
+        "project_ref",
+        "thread_ref",
+        "thread_revision",
+        "snapshot",
+        "body_digest",
+    }
+    document = _exact_mapping(value, required, {"host"})
+    _base(document, "desktop_snapshot")
+    _ref(document["host_ref"], "HS")
+    _ref(document["project_ref"], "PJ")
+    _ref(document["thread_ref"], "TH")
+    _revision(document["thread_revision"])
+    _shanghai_time(document["created_at"], "created_at")
+    snapshot = document["snapshot"]
+    if not isinstance(snapshot, Mapping):
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop snapshot 无效")
+    if snapshot.get("project_ref") != document["project_ref"] or snapshot.get("thread_ref") != document["thread_ref"]:
+        raise DesktopProtocolError("desktop_identity_mismatch", "Desktop snapshot ref 不一致")
+    if snapshot.get("thread_revision") != document["thread_revision"]:
+        raise DesktopProtocolError("desktop_revision_mismatch", "Desktop snapshot revision 不一致")
+    alias = snapshot.get("project_alias")
+    if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", alias):
+        raise DesktopProtocolError("desktop_project_invalid", "Desktop 项目别名无效")
+    if snapshot.get("status") not in THREAD_STATUSES:
+        raise DesktopProtocolError("desktop_status_invalid", "Desktop Thread 状态无效")
+    if not isinstance(snapshot.get("title"), str) or len(snapshot["title"]) > 500:
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop Thread title 无效")
+    if not isinstance(snapshot.get("preview"), str) or len(snapshot["preview"]) > 1200:
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop Thread preview 无效")
+    if not isinstance(snapshot.get("control_state"), str) or len(snapshot["control_state"]) > 64:
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop control_state 无效")
+    if not isinstance(snapshot.get("history_incomplete"), bool):
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop history_incomplete 无效")
+    for field in ("created_at", "updated_at"):
+        if snapshot.get(field) is not None:
+            _shanghai_time(snapshot[field], f"snapshot.{field}")
+    active_turn = snapshot.get("active_turn_ref")
+    if active_turn is not None:
+        _ref(active_turn, "TR")
+    turns = snapshot.get("turns")
+    if not isinstance(turns, list) or len(turns) > 100:
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop Turn 列表无效")
+    _public(snapshot)
+    host = document.get("host")
+    if host is not None:
+        if not isinstance(host, Mapping) or host.get("host_ref") != document["host_ref"]:
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host 文档无效")
+        _shanghai_time(host.get("synced_at"), "host.synced_at")
+        capabilities = host.get("capabilities")
+        if not isinstance(capabilities, list) or any(not isinstance(item, str) for item in capabilities):
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host capabilities 无效")
+        if host.get("state") not in {"normal", "unavailable", "protocol_degraded"}:
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host state 无效")
+        if not isinstance(host.get("control_enabled"), bool):
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host control flag 无效")
+        if host.get("control_enabled") is True and host.get("state") != "normal":
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host control/state 不一致")
+        listener_count = host.get("tcp_listener_count")
+        if not isinstance(listener_count, int) or isinstance(listener_count, bool) or listener_count < -1:
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host listener count 无效")
+        for field in ("app_version", "app_build", "cli_version", "schema_digest", "socket_mode"):
+            field_value = host.get(field)
+            if not isinstance(field_value, str) or not field_value or len(field_value) > 128:
+                raise DesktopProtocolError("desktop_host_invalid", f"Desktop host {field} 无效")
+        _public(host)
+    _digest(document)
+    return document
+
+
+def _validate_event(value: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "version",
+        "message_type",
+        "runner_id",
+        "created_at",
+        "host_ref",
+        "project_ref",
+        "thread_ref",
+        "turn_ref",
+        "thread_revision",
+        "event_sequence",
+        "event_kind",
+        "source",
+        "payload",
+        "body_digest",
+    }
+    document = _exact_mapping(value, required)
+    _base(document, "desktop_event")
+    _ref(document["host_ref"], "HS")
+    _ref(document["project_ref"], "PJ")
+    _ref(document["thread_ref"], "TH")
+    if document["turn_ref"] is not None:
+        _ref(document["turn_ref"], "TR")
+    _revision(document["thread_revision"])
+    sequence = document["event_sequence"]
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+        raise DesktopProtocolError("desktop_sequence_invalid", "Desktop event sequence 无效")
+    if document["event_kind"] not in EVENT_KINDS or document["source"] not in {"desktop", "mobile", "app"}:
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop event 类型或来源无效")
+    if not isinstance(document["payload"], Mapping):
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop event payload 无效")
+    _shanghai_time(document["created_at"], "created_at")
+    _public(document["payload"])
+    _digest(document)
+    return document
+
+
+def _validate_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "version",
+        "message_type",
+        "runner_id",
+        "created_at",
+        "request_id",
+        "host_ref",
+        "thread_ref",
+        "turn_ref",
+        "action",
+        "state",
+        "thread_revision",
+        "body_digest",
+    }
+    document = _exact_mapping(value, required, {"error_code"})
+    _base(document, "desktop_receipt")
+    _request(document["request_id"])
+    _ref(document["host_ref"], "HS")
+    _ref(document["thread_ref"], "TH")
+    if document["turn_ref"] is not None:
+        _ref(document["turn_ref"], "TR")
+    if document["action"] not in ACTIONS or document["state"] not in RECEIPT_STATES:
+        raise DesktopProtocolError("desktop_receipt_invalid", "Desktop receipt 动作或状态无效")
+    _revision(document["thread_revision"])
+    error_code = document.get("error_code")
+    if error_code is not None:
+        _request(error_code)
+    _shanghai_time(document["created_at"], "created_at")
+    _digest(document)
+    return document
+
+
+def _base(document: Mapping[str, Any], message_type: str) -> None:
+    if document.get("version") != DESKTOP_PROTOCOL_VERSION or document.get("message_type") != message_type:
+        raise DesktopProtocolError("desktop_version_invalid", "Desktop 协议版本或消息类型无效")
+    _runner(document.get("runner_id"))
+    if len(canonical_json(document).encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        raise DesktopProtocolError("desktop_payload_too_large", "Desktop 文档过大")
+
+
+def _exact_mapping(
+    value: Mapping[str, Any],
+    required: set[str],
+    optional: set[str] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise DesktopProtocolError("desktop_payload_invalid", "Desktop 文档必须是 object")
+    allowed = required | (optional or set())
+    if required - set(value) or set(value) - allowed:
+        raise DesktopProtocolError("desktop_fields_invalid", "Desktop 文档字段无效")
+    return dict(value)
+
+
+def _digest(document: Mapping[str, Any]) -> None:
+    value = document.get("body_digest")
+    if not isinstance(value, str) or not DIGEST_RE.fullmatch(value) or value != body_digest(document):
+        raise DesktopProtocolError("desktop_digest_invalid", "Desktop 文档摘要无效")
+
+
+def _runner(value: Any) -> None:
+    if not isinstance(value, str) or not RUNNER_RE.fullmatch(value):
+        raise DesktopProtocolError("desktop_runner_invalid", "Desktop Runner ID 无效")
+
+
+def _request(value: Any) -> None:
+    if not isinstance(value, str) or not REQUEST_RE.fullmatch(value):
+        raise DesktopProtocolError("desktop_request_id_invalid", "Desktop request ID 无效")
+
+
+def _ref(value: Any, prefix: str) -> None:
+    if not isinstance(value, str) or not REF_RE.fullmatch(value) or not value.startswith(prefix + "-"):
+        raise DesktopProtocolError("desktop_ref_invalid", f"Desktop {prefix} ref 无效")
+
+
+def _revision(value: Any) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise DesktopProtocolError("desktop_revision_invalid", "Desktop revision 无效")
+
+
+def _shanghai_time(value: Any, name: str) -> dt.datetime:
+    if not isinstance(value, str):
+        raise DesktopProtocolError("desktop_time_invalid", f"Desktop {name} 时间无效")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DesktopProtocolError("desktop_time_invalid", f"Desktop {name} 时间无效") from exc
+    parsed = _aware(parsed, name)
+    if parsed.utcoffset() != dt.timedelta(hours=8):
+        raise DesktopProtocolError("desktop_time_zone_invalid", f"Desktop {name} 必须使用 +08:00")
+    return parsed
+
+
+def _aware(value: dt.datetime, name: str) -> dt.datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise DesktopProtocolError("desktop_time_invalid", f"Desktop {name} 必须包含时区")
+    return value
+
+
+def _safe_input(value: Any) -> None:
+    if not isinstance(value, str) or not value.strip() or len(value) > 12000:
+        raise DesktopProtocolError("desktop_input_invalid", "Desktop 输入文本无效")
+    _public(value)
+
+
+def _public(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            if key in FORBIDDEN_PUBLIC_KEYS:
+                raise DesktopProtocolError("desktop_privacy_rejected", f"Desktop 公开字段 {key} 被禁止")
+            _public(child)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _public(child)
+        return
+    if isinstance(value, str) and (
+        UUID_RE.search(value) or PRIVATE_PATH_RE.search(value) or SECRET_RE.search(value)
+    ):
+        raise DesktopProtocolError("desktop_privacy_rejected", "Desktop 公开文本包含禁止内容")
+
+
+__all__ = [
+    "ACTIONS",
+    "DESKTOP_PROTOCOL_VERSION",
+    "DesktopProtocolError",
+    "REF_RE",
+    "REQUEST_RE",
+    "SHANGHAI",
+    "THREAD_STATUSES",
+    "body_digest",
+    "build_desktop_command",
+    "canonical_json",
+    "intent_digest",
+    "validate_desktop_command",
+    "validate_desktop_document",
+    "validate_public_input",
+]

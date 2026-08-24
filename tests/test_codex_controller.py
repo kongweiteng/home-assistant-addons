@@ -35,6 +35,7 @@ from codex_controller.service import (
     has_explicit_media_archive_intent,
     is_new_thread_command,
 )
+from codex_controller.source_identity import calculate_source_identity
 from codex_controller.store import ControllerStore, StoreError
 from codex_controller.tool_catalog import ALL_TOOL_NAMES, MEMBER_READ_ONLY_TOOL_NAMES, MEMO_TOOLS, TOOL_BY_NAME
 from codex_controller.tool_proxy import (
@@ -1350,7 +1351,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.12"
+        expected = "0.5.14"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1363,6 +1364,23 @@ class ControllerAuthenticationTests(unittest.TestCase):
         ):
             with self.subTest(relative=relative):
                 self.assertIn(expected, (root / relative).read_text(encoding="utf-8"))
+
+    def test_source_identity_is_deterministic_and_content_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            (package / "alpha.py").write_text("value = 1\n", encoding="utf-8")
+            nested = package / "nested"
+            nested.mkdir()
+            (nested / "beta.py").write_text("value = 2\n", encoding="utf-8")
+            first = calculate_source_identity(package)
+            second = calculate_source_identity(package)
+            self.assertEqual(first, second)
+            self.assertEqual(first["schema_version"], 1)
+            self.assertEqual(first["algorithm"], "sha256")
+            self.assertEqual(first["file_count"], 2)
+            self.assertRegex(first["digest"], r"^[0-9a-f]{64}$")
+            (nested / "beta.py").write_text("value = 3\n", encoding="utf-8")
+            self.assertNotEqual(first["digest"], calculate_source_identity(package)["digest"])
 
     def test_dispatch_resumes_an_existing_conversation_thread(self) -> None:
         class App:
@@ -1680,6 +1698,10 @@ class ToolRouterTests(unittest.TestCase):
         self.assertFalse(has_explicit_media_archive_intent("把这张装修图片保存到相册", attachment))
         self.assertFalse(has_explicit_media_archive_intent("把这份施工文件保存一下", attachment))
         self.assertFalse(has_explicit_media_archive_intent("这不是装修图片，不要归档", attachment))
+        self.assertTrue(has_explicit_media_archive_intent("记录这张报价单并保存到询价", attachment))
+        self.assertTrue(has_explicit_media_archive_intent("把供应商名片加入报价记录", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("查询一下瓷砖报价", attachment))
+        self.assertFalse(has_explicit_media_archive_intent("看看这张报价单，不要保存", attachment))
 
     def test_media_archive_tool_is_hidden_and_rejected_without_explicit_intent(self) -> None:
         router = ToolRouter(

@@ -52,11 +52,23 @@ class BusinessManifestTests(unittest.TestCase):
         self.assertEqual(manifest["service"], "renovation_hub")
         self.assertEqual(manifest["scope"], "business")
         self.assertGreater(manifest["catalog_revision"], 0)
-        self.assertEqual(len(manifest["tools"]), 37)
+        self.assertEqual(len(manifest["tools"]), 46)
         names = [tool["name"] for tool in manifest["tools"]]
         self.assertEqual(names, sorted(names))
         self.assertEqual(
-            {"renovation_search", "renovation_media_list", "renovation_media_show", "renovation_mutate"} - set(names),
+            {
+                "renovation_search",
+                "renovation_media_list",
+                "renovation_media_show",
+                "renovation_mutate",
+                "renovation_quote_create",
+                "renovation_quote_add_offer",
+                "renovation_quote_list",
+                "renovation_quote_show",
+                "renovation_quote_compare",
+                "renovation_quote_select",
+            }
+            - set(names),
             set(),
         )
 
@@ -310,6 +322,7 @@ class BusinessDispatchTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in search["ledger"]], [self.payment["id"]])
         self.assertEqual([item["id"] for item in search["timeline"]], [self.event["id"]])
         self.assertEqual([item["id"] for item in search["media"]], ["media-fixture"])
+        self.assertEqual(search["quotes"], [])
 
         listed = dispatch_tool(
             self.store,
@@ -379,6 +392,86 @@ class BusinessDispatchTests(unittest.TestCase):
             media=self.media,
         )
         self.assertEqual(empty, {"items": []})
+
+    def test_quote_tools_create_query_compare_and_select_without_ledger_write(self) -> None:
+        created = dispatch_tool(
+            self.store,
+            {
+                "name": "renovation_quote_create",
+                "actor_hash": "sha256:fixture",
+                "arguments": {
+                    "idempotency_key": key("quote-create"),
+                    "project_id": self.project["id"],
+                    "title": "厨房水槽",
+                    "specification": {"材质": "304 不锈钢", "尺寸": "780×480mm"},
+                    "quantity_milli": 1_000,
+                    "unit": "套",
+                },
+            },
+        )["quote"]
+        first = dispatch_tool(
+            self.store,
+            {
+                "name": "renovation_quote_add_offer",
+                "actor_hash": "sha256:fixture",
+                "arguments": {
+                    "idempotency_key": key("quote-offer-a"),
+                    "request_id": created["id"],
+                    "supplier_name": "示例厨卫一店",
+                    "total_cents": 128_000,
+                    "quantity_milli": 1_000,
+                    "unit": "套",
+                },
+            },
+        )["offer"]
+        second = dispatch_tool(
+            self.store,
+            {
+                "name": "renovation_quote_add_offer",
+                "actor_hash": "sha256:fixture",
+                "arguments": {
+                    "idempotency_key": key("quote-offer-b"),
+                    "request_id": created["id"],
+                    "supplier_name": "示例厨卫二店",
+                    "total_cents": 118_000,
+                    "quantity_milli": 1_000,
+                    "unit": "套",
+                },
+            },
+        )["offer"]
+        listed = dispatch_tool(
+            self.store,
+            {
+                "name": "renovation_quote_list",
+                "arguments": {"project_id": self.project["id"], "keyword": "厨卫二店"},
+            },
+        )
+        self.assertEqual([item["id"] for item in listed["items"]], [created["id"]])
+        compared = dispatch_tool(
+            self.store,
+            {"name": "renovation_quote_compare", "arguments": {"request_id": created["id"]}},
+        )
+        self.assertEqual(compared["best_offer_id"], second["id"])
+        detail = dispatch_tool(
+            self.store,
+            {"name": "renovation_quote_show", "arguments": {"request_id": created["id"]}},
+        )
+        selected = dispatch_tool(
+            self.store,
+            {
+                "name": "renovation_quote_select",
+                "actor_hash": "sha256:fixture",
+                "arguments": {
+                    "idempotency_key": key("quote-select"),
+                    "request_id": created["id"],
+                    "offer_id": second["id"],
+                    "version": detail["quote"]["version"],
+                },
+            },
+        )
+        self.assertEqual(selected["offer"]["status"], "selected")
+        self.assertEqual(first["status"], "quoted")
+        self.assertEqual(self.store.summary({})["transaction_count"], 1)
 
     def test_dispatch_errors_are_deterministic_and_fail_closed(self) -> None:
         with self.assertRaises(LedgerError) as context:

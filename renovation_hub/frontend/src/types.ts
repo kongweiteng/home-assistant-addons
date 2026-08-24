@@ -1,4 +1,4 @@
-export type PageKey = "overview" | "timeline" | "ledger" | "media" | "stages" | "settings";
+export type PageKey = "overview" | "timeline" | "ledger" | "quotes" | "media" | "stages" | "settings";
 
 export interface SessionState {
   csrf_token: string;
@@ -160,6 +160,86 @@ export interface MediaAsset {
   preview_url: string | null;
 }
 
+export type QuoteRequestStatus = "inquiry" | "quoted" | "review_required" | "selected" | "purchased" | "closed" | "archived";
+export type QuoteOfferStatus = "quoted" | "review_required" | "selected" | "rejected" | "expired" | "purchased";
+export type QuoteMediaRole = "source" | "product" | "quote_sheet" | "business_card" | "address" | "other";
+
+export interface QuoteCoverMedia {
+  id: string;
+  original_filename: string;
+  preview_url: string;
+}
+
+export interface QuoteRequest {
+  id: string;
+  project_id: string;
+  title: string;
+  category: string;
+  description: string;
+  specification: Record<string, string>;
+  quantity_milli: number | null;
+  unit: string;
+  status: QuoteRequestStatus;
+  follow_up_at: string | null;
+  selected_offer_id: string | null;
+  source_ref: string;
+  note: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  offer_count: number;
+  best_total_cents: number | null;
+  supplier_names: string[];
+  cover_media: QuoteCoverMedia | null;
+}
+
+export interface QuoteOffer {
+  id: string;
+  request_id: string;
+  supplier_name: string;
+  contact_name: string;
+  contact_phone: string;
+  supplier_address: string;
+  quoted_at: string | null;
+  valid_until: string | null;
+  currency: "CNY";
+  subtotal_cents: number | null;
+  tax_cents: number;
+  shipping_cents: number;
+  installation_cents: number;
+  discount_cents: number;
+  total_cents: number | null;
+  quantity_milli: number | null;
+  unit: string;
+  unit_price_cents: number | null;
+  price_includes_tax: boolean;
+  lead_time_days: number | null;
+  brand: string;
+  model: string;
+  specification: Record<string, string>;
+  payment_terms: string;
+  warranty: string;
+  note: string;
+  status: QuoteOfferStatus;
+  effective_status: QuoteOfferStatus;
+  extraction_confidence: number | null;
+  source_ref: string;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QuoteMediaAsset extends Omit<MediaAsset, "links"> {
+  offer_id: string | null;
+  role: QuoteMediaRole;
+}
+
+export interface QuoteDetail {
+  quote: QuoteRequest;
+  offers: QuoteOffer[];
+  media: QuoteMediaAsset[];
+}
+
 export interface Dashboard {
   project: Project;
   active_stage: Stage | null;
@@ -184,6 +264,7 @@ export interface HubData {
   media: MediaAsset[];
   catalog: ClassificationCatalogItem[];
   paymentPlans: PaymentPlan[];
+  quotes: QuoteRequest[];
 }
 
 export interface ApiEnvelope<T> {

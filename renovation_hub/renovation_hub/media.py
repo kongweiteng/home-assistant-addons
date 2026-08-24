@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import mimetypes
@@ -351,7 +352,12 @@ class MediaService:
                 raise LedgerError("content_address_conflict", "内容寻址文件冲突", status=409)
             staging_path.unlink(missing_ok=True)
         else:
-            os.replace(staging_path, final_path)
+            self._commit_staging_file(
+                staging_path,
+                final_path,
+                expected_bytes=received_bytes,
+                expected_sha256=sha256,
+            )
             os.chmod(final_path, 0o600)
             created_file = True
         processing = self._process(final_path, media_type, upload["mime_type"], sha256)
@@ -453,6 +459,43 @@ class MediaService:
                 ),
             )
             return self._asset(connection, media_id)
+
+    @staticmethod
+    def _commit_staging_file(
+        staging_path: Path,
+        final_path: Path,
+        *,
+        expected_bytes: int,
+        expected_sha256: str,
+    ) -> None:
+        """Atomically commit an upload even when staging and media are separate mounts."""
+
+        try:
+            os.replace(staging_path, final_path)
+            return
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+
+        temporary_path = final_path.with_name(f".{final_path.name}.{uuid.uuid4().hex}.tmp")
+        digest = hashlib.sha256()
+        copied = 0
+        try:
+            with staging_path.open("rb") as source, temporary_path.open("xb") as target:
+                while chunk := source.read(1024 * 1024):
+                    copied += len(chunk)
+                    digest.update(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            if copied != expected_bytes or digest.hexdigest() != expected_sha256:
+                raise LedgerError("media_store_failed", "媒体原图跨卷复制校验失败", status=500)
+            os.chmod(temporary_path, 0o600)
+            os.replace(temporary_path, final_path)
+            staging_path.unlink()
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
 
     def replay(self, idempotency_key: str, source_ref_hash: str) -> dict[str, Any] | None:
         key = _idempotency_key(idempotency_key)

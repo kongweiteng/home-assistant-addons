@@ -9,8 +9,17 @@ from typing import Any, Mapping
 
 RUNNER_ID_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
 CREDENTIAL_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
-EVENT_TYPES = frozenset({"heartbeat", "status", "result"})
-PUBLISH_TYPES = frozenset({"request", "control"})
+EVENT_TYPES = frozenset(
+    {
+        "heartbeat",
+        "status",
+        "result",
+        "desktop_snapshot",
+        "desktop_event",
+        "desktop_receipt",
+    }
+)
+PUBLISH_TYPES = frozenset({"request", "control", "desktop_command"})
 
 
 class RelayProtocolError(ValueError):

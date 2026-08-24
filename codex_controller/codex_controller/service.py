@@ -13,6 +13,8 @@ from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
 from .progress_capture import ProgressCaptureCoordinator
 from .runner_service import RunnerManagerService
+from .desktop_service import DesktopControllerService
+from .source_identity import runtime_source_identity
 from .store import ControllerStore, StoreError
 from .tool_proxy import ToolProxyError
 
@@ -24,6 +26,11 @@ MEDIA_ARCHIVE_TARGET_RE = re.compile(r"(?:装修|施工|工地|现场).{0,12}(?:
 MEDIA_ARCHIVE_MEDIA_ACTION_RE = re.compile(
     r"(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体).{0,8}(?:归档|存档|归入|收录|记录)"
     r"|(?:归档|存档|归入|收录|记录).{0,8}(?:装修|施工|工地|现场).{0,12}(?:照片|图片|视频|媒体)"
+)
+QUOTE_ARCHIVE_TARGET_RE = re.compile(r"(?:询价|报价|报价单|价格单|供应商|名片|商品规格|产品规格)")
+QUOTE_ARCHIVE_MEDIA_ACTION_RE = re.compile(
+    r"(?:询价|报价|报价单|价格单|名片|商品规格|产品规格).{0,10}(?:归档|存档|保存|添加|加入|关联|记录)"
+    r"|(?:归档|存档|保存|添加|加入|关联|记录).{0,10}(?:询价|报价|报价单|价格单|名片|商品规格|产品规格)"
 )
 MEDIA_ARCHIVE_NEGATION_RE = re.compile(r"(?:不要|别|无需|不用|不需要).{0,12}(?:归档|存档|保存|添加|加入|关联|记录)")
 MEMO_CREATE_PREFIX_RE = re.compile(
@@ -81,7 +88,12 @@ def has_explicit_media_archive_intent(text: str, attachments: list[dict[str, Any
         return False
     return bool(
         MEDIA_ARCHIVE_ACTION_RE.search(normalized)
-        and (MEDIA_ARCHIVE_TARGET_RE.search(normalized) or MEDIA_ARCHIVE_MEDIA_ACTION_RE.search(normalized))
+        and (
+            MEDIA_ARCHIVE_TARGET_RE.search(normalized)
+            or MEDIA_ARCHIVE_MEDIA_ACTION_RE.search(normalized)
+            or QUOTE_ARCHIVE_TARGET_RE.search(normalized)
+            or QUOTE_ARCHIVE_MEDIA_ACTION_RE.search(normalized)
+        )
     )
 
 
@@ -321,6 +333,7 @@ class ControllerService:
         turn_media: TurnMediaManager | None = None,
         tool_context: Any | None = None,
         runner_manager: RunnerManagerService | None = None,
+        desktop_controller: DesktopControllerService | None = None,
     ):
         if auth_mode not in self.AUTH_MODES:
             raise ValueError("Controller auth_mode 不受支持")
@@ -338,6 +351,7 @@ class ControllerService:
         self.turn_media = turn_media
         self.tool_context = tool_context
         self.runner_manager = runner_manager
+        self.desktop_controller = desktop_controller
         self.auth_error: str | None = None
         self.pending_login: dict[str, Any] | None = None
         self.start_error: str | None = None
@@ -388,6 +402,7 @@ class ControllerService:
                 "job_artifacts_v1",
                 "runner_manager_v2",
                 "progress_capture_v1",
+                "desktop_takeover_v1",
             ],
         }
 
@@ -479,7 +494,8 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.12",
+            "version": "0.5.14",
+            "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -522,7 +538,7 @@ class ControllerService:
                     "installer": {
                         "ready": False,
                         "error_code": "runner_manager_unavailable",
-                        "runner_version": "0.3.5",
+                        "runner_version": "0.3.6",
                     },
                     "last_error": None,
                     "summary": {
@@ -532,6 +548,15 @@ class ControllerService:
                         "busy": 0,
                         "recovery_required": 0,
                     },
+                }
+            ),
+            "desktop_takeover": (
+                self.desktop_controller.hosts()
+                if self.desktop_controller is not None
+                else {
+                    "hosts": [],
+                    "relay_configured": False,
+                    "server_time": datetime.now(SHANGHAI).isoformat(),
                 }
             ),
         }
@@ -581,7 +606,14 @@ class ControllerService:
 
     def _scheduler_loop(self) -> None:
         next_artifact_cleanup = 0.0
+        next_desktop_sweep = 0.0
         while not self._stop.wait(0.5):
+            if self.desktop_controller is not None and time.monotonic() >= next_desktop_sweep:
+                try:
+                    self.desktop_controller.sweep()
+                except StoreError:
+                    pass
+                next_desktop_sweep = time.monotonic() + 5
             if time.monotonic() >= next_artifact_cleanup:
                 try:
                     self.store.cleanup_artifacts()

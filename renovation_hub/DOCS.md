@@ -116,7 +116,7 @@ Controller 使用受认证的 `POST /internal/v1/progress-captures/action` 管�
 - 图片/视频处理失败时原件已经内容寻址保存，item 标记 `failed` 并阻断完成；`retry_failed` 只重新处理原件，不生成重复媒体。
 - `finalize` 只有在 `received = registered = stored = linked` 且 `failed = pending = 0` 时完成，并把最终数量写入事件说明。取消只把草稿事件标记为 `voided`，已经安全保存的原件继续保留。
 
-从 `0.2.10` 回退到 `0.2.9` 前，先关闭 Gateway Poller 与 Controller intake，并确认没有 active、paused 或 finalizing 采集。旧 Hub 会忽略 additive 采集表，但不能继续处理新上下文；不要删除表、媒体原件或事件，恢复 `0.2.10` 后再完成、取消或人工核对。
+从 `0.3.3` 回退到 `0.3.2` 前，先关闭 Gateway Poller 与 Controller intake，并确认没有 active、paused 或 finalizing 采集。旧 Hub 会忽略 additive 采集表、分类与付款计划扩展，但不能继续处理新上下文；不要删除表、媒体原件或事件，恢复 `0.3.3` 后再完成、取消或人工核对。
 
 ## 内部 API 与 Codex 工具
 

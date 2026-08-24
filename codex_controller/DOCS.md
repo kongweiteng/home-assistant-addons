@@ -207,7 +207,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.14` 回滚时，只允许恢复升级前备份中精确记录的源码树与摘要。先停止 Gateway Poller、关闭 intake，并确认没有 active/paused/finalizing 的装修进度会话、queued/running/recovery 作业、Desktop 待确认控制或待补附件 ACK。旧 Controller 会忽略 `progress_capture_context@1` 和 `reply_suppressed`，因此必须与 Gateway/Hub 成组回退；保留 Controller SQLite、Gateway spool、Hub 草稿、Desktop 审计、Mac refs store和所有 Codex 原 Thread，并在恢复后重新核对运行源码摘要。
+从 `0.5.14` 回滚时，只允许恢复升级前备份中精确记录的源码树与摘要。先停止 Gateway Poller、关闭 intake，并确认没有 active/paused/finalizing 的装修进度会话、queued/running/recovery 作业、Desktop 待确认控制或待补附件 ACK。旧 Controller 会忽略 `progress_capture_context@1` 和 `reply_suppressed`，因此必须与 Gateway/Hub 成组回退；保留 Controller SQLite、Gateway spool、Hub 草稿、Desktop 审计、Mac refs store 和所有 Codex 原 Thread，并在恢复后重新核对运行源码摘要。
 
 如果有意继续降级到不含 Desktop 的 `0.5.10`，先关闭 Desktop 页面入口和 Runner 的 `[desktop].enabled`，等待所有 Desktop 命令离开 `pending/submitted/accepted/unknown`，确认 Relay 与 Runner Desktop outbox 已排空，再同时回退 Relay 到 `0.2.7` 和 Runner manifest 到 `0.3.5`。旧版会忽略 additive Desktop 表，但不得删除 Controller 数据目录、Desktop 审计、Mac 本地 refs store 或任何 Codex 原 Thread；未知收据必须保留为只读核对证据。
 

@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.11
+
+- 安装 renderer 与 Controller `0.5.16` 的内置目录同步到 Runner `0.3.12`，并保留 `0.3.6/0.3.11` 的精确滚动兼容，使 Relay 可先升级、Runner 再原位升级。
+- WSS、Desktop stale ACK、Controller 拒绝失败关闭、双 Token、IPv4 客户端、ticket/enrollment 不落盘、Registry/lease 所有权和网络边界不变。
+
 ## 0.2.10
 
 - `/install/<ticket>` 当前固定目录升级为正式 Runner `0.3.11`，与 Controller `0.5.15` 的内置 manifest、公开 Release 字节和 SHA-256 一致。

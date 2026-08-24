@@ -29,11 +29,11 @@ class Installer:
 
     def status(self) -> dict:
         if self.error is not None:
-            return {"ready": False, "error_code": self.error.code, "runner_version": "0.3.11"}
+            return {"ready": False, "error_code": self.error.code, "runner_version": "0.3.12"}
         return {
             "ready": True,
             "error_code": None,
-            "runner_version": "0.3.11",
+            "runner_version": "0.3.12",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
         }
@@ -60,7 +60,7 @@ class Installer:
         return {
             "link": link,
             "command": f"curl -fsSL {link} -o /tmp/install-runner && sh /tmp/install-runner",
-            "runner_version": "0.3.11",
+            "runner_version": "0.3.12",
             "codex_version": "0.146.0",
             "python_version": "3.11.13",
             "platform": os_name,
@@ -87,7 +87,7 @@ class Installer:
             "projects": projects,
             "labels": labels,
             "policy_revision": policy_revision,
-            "runner_version": "0.3.11",
+            "runner_version": "0.3.12",
         }
 
     @staticmethod
@@ -113,7 +113,7 @@ def redeem_payload(runner_id: str, token: str) -> dict:
         "token": token,
         "runner_id": runner_id,
         "protocol_version": 2,
-        "agent_version": "0.3.11",
+        "agent_version": "0.3.12",
         "codex_version": "0.146.0",
         "os": "linux",
         "arch": "amd64",

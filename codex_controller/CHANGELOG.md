@@ -5,6 +5,7 @@
 - 修复 Mac Desktop Owner/IPC 可用性变化时，Adapter 在 App `thread_revision` 未变化的情况下仅切换 `status` 与 `control_state`，却被 Controller 误判为 `desktop_revision_conflict` 的恢复死锁。
 - 同 revision 现在只有在去除顶层 `status/control_state` 后 snapshot 完全相同时才按 semantic availability refresh 接受；title、preview、turns、active Turn、history、project、Runner/host 绑定及其他任意业务差异继续失败关闭。
 - 该修复使 Relay 可以 ACK 已被权威接受的 snapshot，解除历史 outbox 队头饥饿；不清理 Runner 状态库，不放宽 Relay 其他拒绝，也不执行任何 Desktop 控制或车辆动作。
+- 镜像内置 installer manifest 同步冻结为 Runner `0.3.12` 四平台候选，配套 Relay `0.2.11` 在保留 `0.3.6/0.3.11` 滚动兼容的同时增加 `0.3.12`；生产发布仍需独立批准。
 
 ## 0.5.15
 

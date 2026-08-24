@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from .store import StoreError
 
 
-RUNNER_VERSION = "0.3.11"
+RUNNER_VERSION = "0.3.12"
 CODEX_VERSION = "0.146.0"
 PYTHON_VERSION = "3.11.13"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")

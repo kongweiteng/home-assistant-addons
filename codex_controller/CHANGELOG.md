@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.5.14
+
+- `/desktop` 现从既有 Mac Runner host 快照展示当前 Codex App 严格净化后的运行模型目录；默认“沿用原任务模型”，并标明 App 默认模型。
+- `continue` 与安全调整可选择目录内模型，模型进入请求 intent/body digest，Controller 入队前与 Runner 执行前分别校验；native same-Turn steer、非法模型、缺失能力和目录漂移全部 fail closed。
+- 模型覆盖只作用于同一 `thread_ref` 对应原 `threadId` 的新 Turn，不创建、复制或 fork Thread；最近命令 DTO 显示所选模型 ID，不公开 provider、endpoint、credential 或 reasoning 参数。
+- Relay 保持 `0.2.9`；配套 Runner `0.3.11` 增加 `model/list` 目录、`turnStartParams.model` 与立即终态新 Turn 启动收据。
+
 ## 0.5.13
 
 - 修复 Controller 数据保留但 Runner outbox 重新投递同一业务快照时的恢复死锁：同一 Thread revision、相同业务 snapshot 只因 envelope `created_at` 或 host `synced_at` 改变时按语义幂等刷新，不再误报 `desktop_revision_conflict`。

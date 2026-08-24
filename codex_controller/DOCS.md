@@ -1,15 +1,16 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.13`。
+当前版本：`0.5.14`。
 
 ## Codex Desktop 原任务接管
 
-- `0.5.13` 提供 `/desktop` 独立 Ingress 工作台，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件和能力感知控制；手机采用单栏，桌面采用三栏。
+- `0.5.14` 提供 `/desktop` 独立 Ingress 工作台，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件、当前 App 模型目录和能力感知控制；手机采用单栏，桌面采用三栏。
 - Controller 恢复期对同 revision、同业务 snapshot 的 envelope 时间刷新按语义幂等处理；精确 snapshot 已淘汰且当前 Thread revision 更高的旧 event 按 stale 消费。真正 revision 冲突和未来 revision 缺 snapshot 继续失败关闭。
 - Controller 只接收 `HS-*`、`PJ-*`、`TH-*`、`TR-*` 脱敏引用、容量受限快照、事件 cursor 和幂等收据。原始 App `threadId`、`turnId`、Socket、绝对路径、凭据、隐藏 reasoning 和 developer instructions 不得进入 HAOS。
 - Desktop host 必须来自 enabled、online、macOS 且声明 `desktop_takeover_v1` 的既有 Runner；Runner Center 全局关闭、Relay 未配置、host stale、协议降级、项目不在 Runner 白名单或缺少动作 capability 时全部拒绝写控制。
 - 页面或 API 每次写入必须提交随机 `request_id` 和当前 `thread_revision`；steer/interrupt 还必须提交 `expected_turn_ref`。相同 request ID 与相同正文幂等返回原结果，不同正文冲突；同一 Thread 存在 pending、submitted、accepted 或 unknown 命令时不接受第二个控制。
 - `steer` 默认 `mode=safe`：Runner 先按 expected Turn interrupt，独立读回，再在同一原 Thread 创建下一 Turn。`mode=native` 保持同 active Turn，但当前 App build 不强制调用方 expected Turn，只允许显式风险模式并要求前后快照对账。
+- 模型选择默认“沿用原任务模型”。Controller 只接受 host 最新 `models[]` 中的净化 ID，并仅对 `continue` 或 `mode=safe` 创建的新 Turn 提交；Runner 执行前重新读取当前 App `model/list`，目录缺失、漂移或模型已移除时拒绝。native steer、interrupt、archive/unarchive 不接受 model，页面和 API 不开放 provider、endpoint、credential、service tier 或 reasoning。
 - `continue` 只允许 idle/notLoaded/failed 且无 active Turn 的原 Thread；`archive` 只允许 idle，`unarchive` 只允许 archived。Runner 未配置固定非目标 archive 控制任务时不声明 `archive_control_v1`，Controller 因此直接拒绝 archive/unarchive。
 - 事件接口使用 `after_cursor` 恢复，最多等待 25 秒；事件对应的精确 revision 快照必须先入库。断线、超时或发布结果未知时只允许重新读取和对账，不自动重放控制。
 - 页面不使用 `localStorage`/`sessionStorage`，不接收原始 `thread_id`/`turn_id` 或原始 UUID；时间统一显示 `Asia/Shanghai`。390×844 与 1440×900 合成数据浏览器验收无水平溢出，native steer 竞态、recovery/protocol degraded、缺失 archive capability 和弱网重连均保持可见或 fail closed。
@@ -42,7 +43,7 @@
 
 ## Runner Center v2
 
-`0.5.13` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.14` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
@@ -196,7 +197,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.13` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的源码树与摘要；不能仅指定 `0.5.11`，因为该版本曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。
+从 `0.5.14` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的 `0.5.13` 源码树与摘要；若继续降级，也不能仅指定 `0.5.11`，因为该版本曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。
 
 如果有意继续降级到不含 Desktop 的 `0.5.10`，先关闭 Desktop 页面入口和 Runner 的 `[desktop].enabled`，等待所有 Desktop 命令离开 `pending/submitted/accepted/unknown`，确认 Relay 与 Runner Desktop outbox 已排空，再同时回退 Relay 到 `0.2.7` 和 Runner manifest 到 `0.3.5`。旧版会忽略 additive Desktop 表，但不得删除 Controller 数据目录、Desktop 审计、Mac 本地 refs store 或任何 Codex 原 Thread；未知收据必须保留为只读核对证据。
 

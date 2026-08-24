@@ -5,6 +5,7 @@ DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
 <title>Codex 桌面任务</title><style>
 :root{color-scheme:dark;--bg:#0b1220;--surface:#121c2e;--surface-2:#17253a;--surface-3:#0f1929;--line:#263751;--line-strong:#375174;--text:#edf4ff;--muted:#91a4bd;--blue:#4f9cff;--blue-strong:#2374e1;--green:#42d392;--amber:#f1b84b;--red:#ef6b73;--shadow:0 18px 44px rgba(0,0,0,.22)}
 *{box-sizing:border-box}html{background:var(--bg)}body{margin:0;min-width:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button,a,input,select,textarea{outline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--blue)}button{min-height:42px;border:1px solid var(--line-strong);border-radius:10px;padding:9px 13px;background:var(--surface-2);color:var(--text);cursor:pointer}button:hover:not(:disabled){border-color:#5477a4}button:disabled{opacity:.48;cursor:not-allowed}button.primary{background:var(--blue-strong);border-color:var(--blue-strong)}button.danger{background:#8f3037;border-color:#a7434b}button.ghost{background:transparent}a{color:#8fc0ff;text-decoration:none}.shell{max-width:1600px;margin:auto;padding:18px}.topbar{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:14px}.eyebrow{color:var(--blue);font-size:12px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.topbar h1{font-size:27px;line-height:1.15;margin:4px 0 5px}.subtitle{margin:0;color:var(--muted)}.top-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.connection{display:inline-flex;align-items:center;min-height:34px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;color:var(--muted);background:var(--surface)}.connection.good{color:var(--green);border-color:#28775d}.connection.warn{color:var(--amber);border-color:#8c6723}.connection.bad{color:#ff9ca2;border-color:#8f3d44}.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px}.metric{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:12px}.metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin-top:4px;font-size:21px;line-height:1.2;overflow-wrap:anywhere}.workspace{display:grid;grid-template-columns:minmax(210px,.7fr) minmax(280px,1fr) minmax(0,1.7fr);gap:12px;align-items:start}.panel{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden}.panel-head{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:13px 14px;border-bottom:1px solid var(--line);background:var(--surface-3)}.panel-head h2,.panel-head h3{font-size:15px;margin:0}.panel-body{padding:12px}.stack{display:grid;gap:9px}.muted{color:var(--muted)}.error{color:#ff9ca2}.success{color:#69deb3}.warning{color:#f6cb72}.badge-row{display:flex;flex-wrap:wrap;gap:6px}.badge{display:inline-flex;align-items:center;min-height:25px;border:1px solid #3a4c65;border-radius:999px;padding:2px 8px;color:#c7d4e5;font-size:12px}.badge.good{border-color:#28775d;color:#69deb3}.badge.warn{border-color:#8c6723;color:#f6cb72}.badge.bad{border-color:#8f3d44;color:#ff9ca2}.field{display:grid;gap:5px}.field label{font-size:12px;color:var(--muted)}select,input,textarea{width:100%;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-2);color:var(--text);padding:9px 11px}textarea{min-height:104px;resize:vertical}.project-list,.thread-list{display:grid;gap:7px}.project-button,.thread-button{width:100%;height:auto;text-align:left;background:transparent;border-color:transparent;padding:10px}.project-button:hover,.thread-button:hover{background:var(--surface-2)}.project-button.selected,.thread-button.selected{background:#172b48;border-color:#37669c}.project-title,.thread-title{font-weight:720;overflow-wrap:anywhere}.project-meta,.thread-meta{margin-top:4px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.project-counts,.thread-flags{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.count{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:2px 6px;color:var(--muted)}.filters{display:grid;grid-template-columns:1fr 1fr;gap:8px}.thread-scroll{max-height:calc(100vh - 310px);overflow:auto;padding:9px}.empty{padding:26px 16px;text-align:center;color:var(--muted)}.detail-empty{min-height:460px;display:grid;place-items:center;padding:30px;text-align:center}.detail-head{padding:15px;border-bottom:1px solid var(--line);background:var(--surface-3)}.detail-title-row{display:flex;gap:12px;justify-content:space-between;align-items:flex-start}.detail-head h2{font-size:20px;margin:0;overflow-wrap:anywhere}.detail-ref{font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);overflow-wrap:anywhere}.detail-meta{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}.detail-actions{display:flex;flex-wrap:wrap;gap:8px;padding:12px 15px;border-bottom:1px solid var(--line)}.notice{margin:12px 15px 0;border-left:4px solid var(--blue);border-radius:8px;background:#101c2f;padding:10px 12px;color:var(--muted)}.notice.warn{border-color:var(--amber);background:#211b10;color:#f6cb72}.notice.bad{border-color:var(--red);background:#261417;color:#ff9ca2}.tabs{display:flex;gap:6px;padding:12px 15px 0}.tab{min-height:36px;padding:6px 10px;background:transparent}.tab[aria-pressed="true"]{background:var(--surface-2);border-color:#5277a5}.timeline,.live-feed{display:grid;gap:10px;padding:12px 15px 18px;max-height:calc(100vh - 440px);overflow:auto}.turn{border:1px solid var(--line);border-radius:12px;overflow:hidden}.turn-head{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:9px 11px;background:var(--surface-3);color:var(--muted);font-size:12px}.turn-items{display:grid;gap:8px;padding:10px}.item{min-width:0;border-left:3px solid var(--line-strong);padding:8px 10px;background:#101a2a;border-radius:7px}.item.user{border-color:var(--blue)}.item.assistant{border-color:var(--green)}.item.reasoning,.item.plan{border-color:var(--amber)}.item.command,.item.file{border-color:#8b74d8}.item-label{color:var(--muted);font-size:11px;font-weight:700;margin-bottom:4px}.item-text{white-space:pre-wrap;overflow-wrap:anywhere}.code-output{max-height:220px;margin:7px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:9px;background:#09111e;color:#cde8d8;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.change-list{display:grid;gap:4px;margin-top:5px}.change{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#cbd8e8;overflow-wrap:anywhere}.live-event{border:1px solid var(--line);border-radius:10px;padding:10px;background:#101a2a}.live-event-head{display:flex;gap:8px;justify-content:space-between;color:var(--muted);font-size:11px}.live-event-body{margin-top:5px;white-space:pre-wrap;overflow-wrap:anywhere}.composer{position:sticky;bottom:0;border-top:1px solid var(--line);background:rgba(15,25,41,.97);backdrop-filter:blur(10px);padding:12px 15px calc(12px + env(safe-area-inset-bottom))}.mode-switch{display:flex;gap:6px;margin-bottom:8px}.mode-switch button{min-height:35px;padding:6px 10px;background:transparent}.mode-switch button[aria-pressed="true"]{background:#17355c;border-color:#4f86c9}.composer-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:8px}.feedback{min-height:22px;margin-right:auto;color:var(--muted);font-size:12px}.hidden{display:none!important}.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.model-field{margin-bottom:8px}.model-meta{min-height:18px;font-size:11px;color:var(--muted)}
 @media(max-width:1050px){.workspace{grid-template-columns:220px minmax(280px,.95fr) minmax(0,1.4fr)}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:820px){.shell{padding:12px}.topbar{align-items:stretch}.top-actions{justify-content:flex-start}.workspace{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.panel{box-shadow:none}.thread-scroll,.timeline,.live-feed{max-height:none}.detail-empty{min-height:220px}.project-panel .panel-body{padding:10px}.project-list{grid-template-columns:repeat(2,minmax(0,1fr))}.composer{position:sticky}.detail-title-row{display:block}.detail-ref{margin-top:6px}}
 @media(max-width:520px){.shell{padding:10px}.topbar{display:grid}.topbar h1{font-size:24px}.top-actions{display:grid;grid-template-columns:1fr 1fr}.connection{grid-column:1/-1}.metrics{gap:7px}.metric{padding:10px}.metric strong{font-size:18px}.workspace{gap:9px}.project-list{grid-template-columns:1fr 1fr}.filters{grid-template-columns:1fr}.panel-head,.detail-head,.detail-actions,.tabs,.timeline,.live-feed,.composer{padding-left:11px;padding-right:11px}.detail-actions button{flex:1 1 calc(50% - 5px)}.composer-actions{align-items:stretch;flex-direction:column}.composer-actions button{width:100%}.feedback{margin:0}.mode-switch{display:grid;grid-template-columns:1fr 1fr}.mode-switch button{height:auto}.item{padding:8px}.top-actions a,.top-actions button{text-align:center}}
@@ -15,7 +16,7 @@ DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
 <section class="workspace">
 <aside class="panel project-panel" aria-label="主机与项目"><div class="panel-head"><h2>主机与项目</h2><span id="hostWriteState" class="badge">只读</span></div><div class="panel-body stack"><div class="field"><label for="hostSelect">Mac 主机</label><select id="hostSelect" aria-label="选择 Mac 主机"></select></div><div id="hostMeta" class="muted">等待主机快照。</div><div id="projectList" class="project-list" aria-label="项目列表"></div></div></aside>
 <section class="panel" aria-label="Thread 列表"><div class="panel-head"><h2>原 Thread</h2><span id="threadCount" class="badge">0</span></div><div class="panel-body stack"><div class="filters"><div class="field"><label for="statusFilter">状态</label><select id="statusFilter"><option value="all">全部</option><option value="active">活动中</option><option value="idle">空闲</option><option value="notLoaded">未加载</option><option value="failed">失败</option><option value="recovery_required">需恢复</option><option value="protocol_degraded">协议降级</option><option value="archived">已归档</option></select></div><div class="field"><label for="threadSearch">搜索标题</label><input id="threadSearch" maxlength="120" placeholder="输入任务标题"></div></div></div><div id="threadList" class="thread-list thread-scroll" aria-live="polite"></div></section>
-<section class="panel" aria-label="Thread 详情"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个原 Thread</h2><p class="muted">这里会显示公开历史、活动 Turn、实时事件和可用控制。</p></div></div><div id="detailContent" class="hidden"><div class="detail-head"><div class="detail-title-row"><div><h2 id="detailTitle">-</h2><div id="detailPreview" class="muted"></div></div><div id="detailRef" class="detail-ref"></div></div><div id="detailMeta" class="detail-meta"></div></div><div id="detailNotice" class="notice hidden"></div><div class="detail-actions"><button id="interruptButton" class="danger" type="button">停止当前 Turn</button><button id="archiveButton" type="button">归档</button><button id="unarchiveButton" type="button">恢复归档</button><button id="reloadThread" type="button">刷新详情</button></div><div class="tabs"><button id="historyTab" class="tab" type="button" aria-pressed="true">任务历史</button><button id="liveTab" class="tab" type="button" aria-pressed="false">实时活动</button></div><div id="historyView" class="timeline"></div><div id="liveView" class="live-feed hidden"></div><form id="composer" class="composer"><div class="mode-switch" aria-label="调整模式"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">原生快速调整</button></div><label class="sr-only" for="composerInput">给当前原 Thread 的新指令</label><textarea id="composerInput" maxlength="12000" placeholder="输入新的方向、补充要求或继续任务内容"></textarea><div class="composer-actions"><span id="composerFeedback" class="feedback" role="status"></span><button id="submitDirection" class="primary" type="submit">发送</button></div></form></div></section>
+<section class="panel" aria-label="Thread 详情"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个原 Thread</h2><p class="muted">这里会显示公开历史、活动 Turn、实时事件和可用控制。</p></div></div><div id="detailContent" class="hidden"><div class="detail-head"><div class="detail-title-row"><div><h2 id="detailTitle">-</h2><div id="detailPreview" class="muted"></div></div><div id="detailRef" class="detail-ref"></div></div><div id="detailMeta" class="detail-meta"></div></div><div id="detailNotice" class="notice hidden"></div><div class="detail-actions"><button id="interruptButton" class="danger" type="button">停止当前 Turn</button><button id="archiveButton" type="button">归档</button><button id="unarchiveButton" type="button">恢复归档</button><button id="reloadThread" type="button">刷新详情</button></div><div class="tabs"><button id="historyTab" class="tab" type="button" aria-pressed="true">任务历史</button><button id="liveTab" class="tab" type="button" aria-pressed="false">实时活动</button></div><div id="historyView" class="timeline"></div><div id="liveView" class="live-feed hidden"></div><form id="composer" class="composer"><div class="mode-switch" aria-label="调整模式"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">原生快速调整</button></div><div id="modelField" class="field model-field"><label for="modelSelect">运行模型</label><select id="modelSelect" aria-describedby="modelMeta"></select><div id="modelMeta" class="model-meta"></div></div><label class="sr-only" for="composerInput">给当前原 Thread 的新指令</label><textarea id="composerInput" maxlength="12000" placeholder="输入新的方向、补充要求或继续任务内容"></textarea><div class="composer-actions"><span id="composerFeedback" class="feedback" role="status"></span><button id="submitDirection" class="primary" type="submit">发送</button></div></form></div></section>
 </section></main><script src="desktop.js"></script></body></html>"""
 
 
@@ -24,7 +25,7 @@ const q = id => document.getElementById(id);
 const API = '../api/desktop/v1';
 const STATUS_API = '../api/status';
 const SHANGHAI_TIME = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
-const state = {csrf: '', hosts: [], projects: [], threads: [], selectedHost: '', selectedProject: 'all', selectedThread: '', detail: null, events: [], eventCursor: 0, eventGeneration: 0, eventController: null, mode: 'safe', view: 'history', loading: false};
+const state = {csrf: '', hosts: [], projects: [], threads: [], selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', detail: null, events: [], eventCursor: 0, eventGeneration: 0, eventController: null, mode: 'safe', view: 'history', loading: false};
 
 function requestId() {
   const bytes = new Uint8Array(16);
@@ -203,6 +204,7 @@ function renderDetail() {
   const meta = q('detailMeta');
   meta.replaceChildren(badge(statusText(detail.status), statusKind(detail.status)), badge(`控制 ${detail.control_state || '未知'}`), badge(`更新 ${formatTime(detail.updated_at)}`));
   if (detail.active_turn_ref) meta.append(badge(`活动 Turn ${detail.active_turn_ref}`, 'good'));
+  if (detail.latest_command?.model) meta.append(badge(`最近命令模型 ${detail.latest_command.model}`));
   if (snapshot.history_incomplete) meta.append(badge('历史可能截断', 'warn'));
   renderNotice(detail);
   renderActionState(detail);
@@ -229,7 +231,8 @@ function renderNotice(detail) {
     notice.textContent = '该原 Thread 当前未由 App View 持有；继续时会先通过 deep link 加载同一个 threadId，再重新对账。';
   } else if (detail.latest_command && ['submitted', 'accepted', 'unknown'].includes(detail.latest_command.state)) {
     notice.className = detail.latest_command.state === 'unknown' ? 'notice bad' : 'notice warn';
-    notice.textContent = detail.latest_command.state === 'unknown' ? '上一控制命令结果未知，已禁止新的写操作；请等待独立快照和收据对账。' : `控制命令 ${detail.latest_command.action} 正在等待 Runner 收据。`;
+    const model = detail.latest_command.model ? ` · 模型 ${detail.latest_command.model}` : '';
+    notice.textContent = detail.latest_command.state === 'unknown' ? '上一控制命令结果未知，已禁止新的写操作；请等待独立快照和收据对账。' : `控制命令 ${detail.latest_command.action}${model} 正在等待 Runner 收据。`;
   }
 }
 
@@ -382,6 +385,32 @@ function composerAction(detail) {
   return null;
 }
 
+function renderModelSelector(action, enabled) {
+  const select = q('modelSelect');
+  const models = Array.isArray(currentHost()?.models) ? currentHost().models : [];
+  const modelIds = new Set(models.map(model => model.id));
+  if (!modelIds.has(state.selectedModel)) state.selectedModel = '';
+  select.replaceChildren();
+  const inherit = document.createElement('option');
+  inherit.value = '';
+  inherit.textContent = '沿用原任务模型';
+  select.append(inherit);
+  for (const model of models) {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.textContent = `${model.display_name || model.id}${model.is_default ? ' · App 默认' : ''}${model.display_name && model.display_name !== model.id ? ` · ${model.id}` : ''}`;
+    select.append(option);
+  }
+  const supported = hasCapability('model_override_v1') && models.length > 0;
+  const allowedForAction = action === 'continue' || (action === 'steer' && state.mode === 'safe');
+  select.value = state.selectedModel;
+  select.disabled = !enabled || !supported || !allowedForAction;
+  const defaultModel = models.find(model => model.is_default);
+  if (!supported) q('modelMeta').textContent = '当前 App 未提供可用模型目录，将沿用原任务模型。';
+  else if (!allowedForAction) q('modelMeta').textContent = '原生快速调整保持同一 Turn，不允许切换模型。';
+  else q('modelMeta').textContent = `仅对本次新 Turn 生效；不选择则沿用原任务模型${defaultModel ? `。App 默认：${defaultModel.display_name || defaultModel.id}` : ''}。`;
+}
+
 function renderComposer(detail) {
   const action = composerAction(detail);
   const blockedCommand = detail.latest_command && ['pending', 'submitted', 'accepted', 'unknown'].includes(detail.latest_command.state);
@@ -392,12 +421,14 @@ function renderComposer(detail) {
   q('safeMode').disabled = detail.status !== 'active';
   q('nativeMode').disabled = detail.status !== 'active' || !hasCapability('native_steer_racy');
   q('submitDirection').disabled = !enabled;
+  renderModelSelector(action, enabled);
   q('submitDirection').textContent = action === 'steer' ? (state.mode === 'native' ? '原生快速调整' : '安全调整方向') : detail.status === 'notLoaded' ? '加载并继续' : '继续此任务';
   q('composerInput').placeholder = action === 'steer' ? '输入立即替代当前方向的新要求' : '输入此原 Thread 的下一步要求';
 }
 
 function setMode(mode) {
   state.mode = mode;
+  if (mode === 'native') state.selectedModel = '';
   q('safeMode').setAttribute('aria-pressed', mode === 'safe' ? 'true' : 'false');
   q('nativeMode').setAttribute('aria-pressed', mode === 'native' ? 'true' : 'false');
   if (state.detail) renderDetail();
@@ -469,6 +500,7 @@ async function selectProject(projectRef) {
 
 async function selectThread(threadRef) {
   state.selectedThread = threadRef;
+  state.selectedModel = '';
   state.events = [];
   state.eventCursor = 0;
   renderThreads();
@@ -541,6 +573,7 @@ async function submitAction(action, extra = {}) {
     q('composerFeedback').className = 'feedback success';
     q('composerFeedback').textContent = result.state === 'submitted' ? '命令已提交，等待 Mac 收据。' : `命令状态：${result.state}`;
     q('composerInput').value = '';
+    state.selectedModel = '';
     await loadThread(detail.thread_ref, {restartStream: false});
     setTimeout(() => void loadThread(detail.thread_ref, {restartStream: false}), 1200);
   } catch (error) {
@@ -550,13 +583,14 @@ async function submitAction(action, extra = {}) {
   }
 }
 
-q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.detail = null; stopEventStream(); await refreshOverview({preserveDetail: false}); };
+q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.detail = null; stopEventStream(); await refreshOverview({preserveDetail: false}); };
 q('statusFilter').onchange = renderThreads;
 q('threadSearch').oninput = renderThreads;
 q('refreshAll').onclick = () => refreshOverview();
 q('reloadThread').onclick = () => state.selectedThread && loadThread(state.selectedThread, {restartStream: false});
 q('safeMode').onclick = () => setMode('safe');
 q('nativeMode').onclick = () => setMode('native');
+q('modelSelect').onchange = () => { state.selectedModel = q('modelSelect').value; };
 q('historyTab').onclick = () => setView('history');
 q('liveTab').onclick = () => setView('live');
 q('interruptButton').onclick = () => state.detail && submitAction('interrupt', {expected_turn_ref: state.detail.active_turn_ref});
@@ -568,8 +602,9 @@ q('composer').onsubmit = event => {
   const input = q('composerInput').value.trim();
   const action = detail ? composerAction(detail) : null;
   if (!detail || !action || !input) { q('composerFeedback').className = 'feedback warning'; q('composerFeedback').textContent = '请输入要发送的新方向。'; return; }
-  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode});
-  else void submitAction('continue', {input});
+  const model = state.selectedModel && (action === 'continue' || state.mode === 'safe') ? state.selectedModel : '';
+  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...(model ? {model} : {})});
+  else void submitAction('continue', {input, ...(model ? {model} : {})});
 };
 window.addEventListener('online', () => { setConnection('网络已恢复', 'good'); void refreshOverview(); });
 window.addEventListener('offline', () => setConnection('手机网络离线', 'bad'));

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import re
 import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
@@ -192,6 +193,7 @@ class DesktopControllerService:
                 "action": action,
                 "input": normalized.get("input"),
                 "mode": normalized.get("mode"),
+                "model": normalized.get("model"),
             }
         )
         replay = self.store.replay_command(
@@ -232,6 +234,7 @@ class DesktopControllerService:
             expected_turn_ref=normalized.get("expected_turn_ref"),
             input_text=normalized.get("input"),
             mode=normalized.get("mode"),
+            model=normalized.get("model"),
             now=current,
         )
         stored, created = self.store.prepare_command(command=command, intent_digest=intent)
@@ -281,6 +284,7 @@ class DesktopControllerService:
         if host.get("control_enabled") is not True:
             raise StoreError("desktop_protocol_degraded", "Desktop host 当前只读", status=409)
         capabilities = set(host.get("capabilities") or [])
+        model = payload.get("model")
         required_capabilities = {
             "steer": (
                 {"native_steer_racy"}
@@ -298,6 +302,20 @@ class DesktopControllerService:
                 "Desktop host 缺少该控制动作所需能力",
                 status=409,
             )
+        if model is not None:
+            if "model_override_v1" not in capabilities:
+                raise StoreError(
+                    "desktop_capability_unavailable",
+                    "Desktop host 不支持运行模型覆盖",
+                    status=409,
+                )
+            available_models = {
+                item.get("id")
+                for item in host.get("models") or []
+                if isinstance(item, Mapping)
+            }
+            if model not in available_models:
+                raise StoreError("desktop_model_unavailable", "所选模型已不在当前 App 目录", status=409)
         status = thread["status"]
         active_turn = thread["active_turn_ref"]
         expected_turn = payload.get("expected_turn_ref")
@@ -343,7 +361,7 @@ class DesktopControllerService:
         required = fields.get(action)
         if required is None:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
-        allowed = required | ({"mode"} if action == "steer" else set())
+        allowed = required | ({"mode", "model"} if action == "steer" else {"model"} if action == "continue" else set())
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop API 字段无效", status=400)
         result = dict(payload)
@@ -368,6 +386,12 @@ class DesktopControllerService:
             if mode not in {"safe", "native"}:
                 raise StoreError("desktop_mode_invalid", "Desktop steer mode 无效", status=400)
             result["mode"] = mode
+        model = result.get("model")
+        if model is not None:
+            if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", model):
+                raise StoreError("desktop_model_invalid", "Desktop model 无效", status=400)
+            if action == "steer" and result.get("mode") != "safe":
+                raise StoreError("desktop_model_invalid", "原生快速调整不允许覆盖模型", status=400)
         return result
 
     def _runner_id(self, thread_ref: str) -> str:

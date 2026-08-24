@@ -7,6 +7,12 @@
 - 仅通过运行时 Supervisor token 访问固定 AITO switch 状态与 `switch.turn_on|turn_off`；不开放任意 HA API，并保持 `member_read_only`/`owner_legacy` 禁止备车。
 - Add-on 声明 `homeassistant_api: true`；HA service 受理与 AITO 车辆回读成功继续严格区分。
 
+## 0.5.13
+
+- 修复 Controller 数据保留但 Runner outbox 重新投递同一业务快照时的恢复死锁：同一 Thread revision、相同业务 snapshot 只因 envelope `created_at` 或 host `synced_at` 改变时按语义幂等刷新，不再误报 `desktop_revision_conflict`。
+- 精确 revision snapshot 已被保留上限淘汰、但当前 Thread revision 明确更高时，旧 Desktop event 复用 Relay `0.2.9` 已冻结的 `desktop_event_sequence_stale` 消费契约；未来 revision 缺 snapshot、真正同 revision 不同业务快照、绑定/隐私/摘要冲突继续 fail closed。
+- 本次仍是 Controller-only 恢复修复；Relay `0.2.9`、Runner `0.3.10`、Controller options/data、原 Thread、archive capability 和网络边界不变。
+
 ## 0.5.12
 
 - 统一此前分叉的两个 `0.5.11` Controller 源码线：同时保留 macOS Codex Desktop 原任务接管的 `/desktop`、`/api/desktop/v1/**`、事件与控制契约，以及询价/报价单/供应商名片/商品规格的明确媒体归档意图。

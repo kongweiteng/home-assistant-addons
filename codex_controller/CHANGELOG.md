@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.5.14
+
+- 新增 owner-only M8 备车状态、请求和执行三个固定 MCP 工具，以及微信精确意图的确定性直达路由。
+- 新增 `conversation_key` 绑定的 2 分钟持久确认、下一消息取消、动作匹配、TTL、单次消费、message ID 幂等和 unknown-outcome 防重放。
+- 仅通过运行时 Supervisor token 访问固定 AITO switch 状态与 `switch.turn_on|turn_off`；不开放任意 HA API，并保持 `member_read_only`/`owner_legacy` 禁止备车。
+- Add-on 声明 `homeassistant_api: true`；HA service 受理与 AITO 车辆回读成功继续严格区分。
+
 ## 0.5.12
 
 - 统一此前分叉的两个 `0.5.11` Controller 源码线：同时保留 macOS Codex Desktop 原任务接管的 `/desktop`、`/api/desktop/v1/**`、事件与控制契约，以及询价/报价单/供应商名片/商品规格的明确媒体归档意图。

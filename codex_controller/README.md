@@ -54,6 +54,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.5.7` 新增管理员 CSRF/revision/request ID 保护的 Runner recovery 确认失败操作。它只将已核对的 `recovery_required` 任务记为 `failed`、释放 lease 并让 Runner 回到 idle；任务、审计、worktree 和 Session 全部保留，不删除、不重放。
 - `0.5.9` 固定 Runner `0.3.5`，并让有效 active-task `busy` heartbeat 原子续期任务和 active lease。已运行任务只有在 Runner offline 且 lease 过期后才进入 `recovery_required`；默认 lease 为 600 秒，保持原 assignment/epoch、不自动转移，既有迟到结果和人工恢复边界不变。
 - `0.5.10` 将 `awaiting_confirmation` 明确视为已经接收结果的等待状态，不再参与离线 sweep；真正 recovery 会保持 task/Runner 关联。旧版本形成的孤立 recovery 仅在 task 仍属于该 Runner、Runner idle 且没有其他活动任务时允许审计式确认失败。
+- `0.5.14` 新增 owner-only 的 `aito_prepare_car_status`、`aito_prepare_car_request`、`aito_prepare_car_execute`。微信“备车/停止备车”只创建同会话 2 分钟确认，下一条动作一致的明确确认才单次调用固定 `switch.wen_jie_m8zeng_cheng_max`；任意其他下一条消息取消确认，重复 message ID 不重复调用，结果未知不盲重试。
+- M8 备车使用 `homeassistant_api: true` 提供的运行时 Supervisor token，只访问固定 Core API 状态路径和 `switch.turn_on|turn_off`。不接受任意实体、domain、service、温度或出发时间，`member_read_only` 与 `owner_legacy` 均无备车能力，HA service 受理不会被表述为车辆成功。
 - `0.5.12` 统一保留 macOS Codex Desktop 原任务接管和装修报价媒体意图：Controller 提供 `/desktop` 与 `/api/desktop/v1/**`，接收既有 Runner 的脱敏 host/project/thread 快照、事件和控制收据；同时仅在用户明确要求保存询价、报价单、供应商名片或商品规格时开放对应媒体归档工具。
 - Desktop 写控制仅对 enabled、online、macOS 且声明 `desktop_takeover_v1` 的既有 Runner 开放；Runner Center 全局关闭时 Desktop 状态和写 API 同时禁用。默认 steer 是 interrupt + 独立读回 + 同 Thread continue，native steer 仅作为显式竞态模式；archive capability 只有 Runner 配置固定非目标控制任务后才可发布。
 - `/api/status` 发布运行包实际 Python 源码的 `source_identity` SHA-256；部署和回滚必须核对版本与摘要，不能再以相同版本号替代源码身份。历史上两个不同源码的 `0.5.11` 候选已由 `0.5.12` 收敛。

@@ -318,6 +318,7 @@ def main() -> None:
         memo_http_username=os.environ.get("CONTROLLER_MEMO_HTTP_USERNAME", ""),
         memo_http_password=os.environ.get("CONTROLLER_MEMO_HTTP_PASSWORD", ""),
         memo_api_token=os.environ.get("CONTROLLER_MEMO_API_TOKEN", ""),
+        home_assistant_token=os.environ.get("SUPERVISOR_TOKEN", ""),
         max_media_bytes=int(os.environ.get("CONTROLLER_MAX_MEDIA_BYTES", str(1024 * 1024 * 1024))),
         store=store,
         manifest_poll_interval=float(os.environ.get("CONTROLLER_HUB_MANIFEST_POLL_SECONDS", "30")),

@@ -1,5 +1,5 @@
 name: Codex Controller
-version: "0.5.12"
+version: "0.5.14"
 slug: codex_controller
 description: "基于官方 Codex app-server 的持久任务、认证与受限工具控制器。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_controller"
@@ -11,6 +11,7 @@ startup: application
 boot: manual
 stage: experimental
 backup: cold
+homeassistant_api: true
 ingress: true
 ingress_port: 8102
 panel_icon: mdi:robot-outline

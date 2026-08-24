@@ -24,7 +24,17 @@ from .hub_manifest import (
     validate_hub_manifest,
 )
 from .store import ControllerStore, StoreError
+from .prepare_car import (
+    HomeAssistantPrepareCarError,
+    HomeAssistantRequest,
+    PREPARE_CAR_CONFIRMATION_TTL_SECONDS,
+    PREPARE_CAR_ENTITY_ID,
+    PREPARE_CAR_TOOL_NAMES,
+    request_home_assistant_json,
+    safe_entity_state,
+)
 from .tool_catalog import (
+    AITO_PREPARE_CAR_DEFINITIONS,
     MEMBER_ALLOWED_TOOL_NAMES,
     MEMO_DEFINITIONS,
     MEMO_TOOLS,
@@ -132,10 +142,12 @@ class ToolRouter:
         memo_http_username: str = "",
         memo_http_password: str = "",
         memo_api_token: str = "",
+        home_assistant_token: str = "",
         request_json: Callable[..., dict[str, Any]] | None = None,
         request_memo_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
         request_artifact: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
+        request_home_assistant: HomeAssistantRequest | None = None,
         stream_media: Callable[..., dict[str, Any]] | None = None,
         max_media_bytes: int = DEFAULT_MAX_GATEWAY_MEDIA_BYTES,
         store: ControllerStore | None = None,
@@ -151,16 +163,18 @@ class ToolRouter:
         self.memo_http_username = memo_http_username
         self.memo_http_password = memo_http_password
         self.memo_api_token = memo_api_token
+        self.home_assistant_token = home_assistant_token
         self.request_json = request_json or _request_json
         self.request_memo_json = request_memo_json or _request_memo_json
         self.request_bytes = request_bytes or _request_bytes
         self.request_artifact = request_artifact or _request_hub_chart
+        self.request_home_assistant = request_home_assistant or request_home_assistant_json
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
         self.store = store
         self.manifest_poll_interval = max(0.1, float(manifest_poll_interval))
         self._context_lock = threading.Lock()
-        self._active_context: dict[str, str] | None = None
+        self._active_context: dict[str, Any] | None = None
         self._definition_lock = threading.RLock()
         self._hub_manifest: ValidatedHubManifest = BOOTSTRAP_MANIFEST
         self._fallback_revision = 1
@@ -174,6 +188,7 @@ class ToolRouter:
         message_id: str,
         capability_profile: str = "owner_legacy",
         *,
+        conversation_key: str = "",
         media_archive_authorized: bool | None = None,
     ) -> None:
         if not job_id or not message_id:
@@ -188,6 +203,7 @@ class ToolRouter:
                 "message_id": message_id,
                 "turn_id": "",
                 "capability_profile": capability_profile,
+                "conversation_key": conversation_key,
             }
             if media_archive_authorized is not None:
                 self._active_context["media_archive_authorized"] = media_archive_authorized
@@ -231,7 +247,7 @@ class ToolRouter:
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         with self._definition_lock:
             hub_definitions = self._hub_manifest.definitions
-        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS
+        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS
 
     def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
         return {definition.name: definition for definition in self.tool_definitions()}
@@ -241,7 +257,7 @@ class ToolRouter:
             for definition in self._hub_manifest.definitions:
                 if definition.name == name:
                     return definition
-        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS:
+        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS:
             if definition.name == name:
                 return definition
         return None
@@ -268,6 +284,9 @@ class ToolRouter:
             and len(self.memo_api_token) >= 32
         )
 
+    def _prepare_car_configured(self) -> bool:
+        return isinstance(self.home_assistant_token, str) and len(self.home_assistant_token) >= 32
+
     def configured_tools(self) -> frozenset[str]:
         tools: set[str] = set()
         hub_configured = self._hub_configured()
@@ -283,6 +302,8 @@ class ToolRouter:
                 if self.operations_base_url and len(self.operations_token) >= 32:
                     tools.add(definition.name)
             elif definition.service == "family_memo" and self._memo_configured():
+                tools.add(definition.name)
+            elif definition.service == "home_assistant_prepare_car" and self._prepare_car_configured():
                 tools.add(definition.name)
         return frozenset(tools)
 
@@ -311,7 +332,9 @@ class ToolRouter:
                 return []
         if capability_profile == "member_read_only":
             configured &= set(MEMBER_ALLOWED_TOOL_NAMES)
-        elif capability_profile not in {None, "owner_legacy", "owner"}:
+        elif capability_profile == "owner_legacy":
+            configured -= set(PREPARE_CAR_TOOL_NAMES)
+        elif capability_profile not in {None, "owner"}:
             return []
         if media_archive_authorized is False:
             configured.discard("renovation_media_ingest")
@@ -579,6 +602,8 @@ class ToolRouter:
         with self._context_lock:
             context = None if self._active_context is None else dict(self._active_context)
         profile = None if context is None else context.get("capability_profile")
+        if name in PREPARE_CAR_TOOL_NAMES and profile != "owner":
+            raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
         if profile == "member_read_only" and name not in MEMBER_ALLOWED_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
         if name not in self.configured_tools():
@@ -646,6 +671,8 @@ class ToolRouter:
             )
         if definition.service == "family_memo":
             return self._memo_call(name, arguments)
+        if definition.service == "home_assistant_prepare_car":
+            return self._prepare_car_call(name, arguments)
         if name == "ha_operations_propose_restart":
             self._require_exact_keys(arguments, {"target"})
             target = arguments.get("target")
@@ -696,6 +723,109 @@ class ToolRouter:
             action_id = self._action_id(arguments)
             return self._operations("GET", f"/v1/executions/{quote(action_id, safe='')}", None)
         raise ToolProxyError("unknown_tool", "工具不在允许清单")
+
+    def cancel_pending_prepare_car(self, conversation_key: str, message_id: str) -> bool:
+        if self.store is None:
+            return False
+        try:
+            return self.store.cancel_prepare_car_pending(conversation_key, message_id)
+        except StoreError as exc:
+            raise ToolProxyError(exc.code, str(exc)) from exc
+
+    def _prepare_car_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name not in PREPARE_CAR_TOOL_NAMES:
+            raise ToolProxyError("unknown_tool", "备车工具不在允许清单")
+        if not self._prepare_car_configured() or self.store is None:
+            raise ToolProxyError("prepare_car_unavailable", "备车工具未配置")
+        with self._context_lock:
+            context = None if self._active_context is None else dict(self._active_context)
+        if context is None or context.get("capability_profile") != "owner":
+            raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
+        if name == "aito_prepare_car_status":
+            self._require_exact_keys(arguments, set())
+            try:
+                document = self.request_home_assistant(
+                    "GET",
+                    f"/states/{PREPARE_CAR_ENTITY_ID}",
+                    self.home_assistant_token,
+                    None,
+                )
+                return safe_entity_state(document)
+            except HomeAssistantPrepareCarError as exc:
+                return {"status": "unavailable", "error_code": exc.code}
+        self._require_exact_keys(arguments, {"target"})
+        target = arguments.get("target")
+        if not isinstance(target, bool):
+            raise ToolProxyError("invalid_arguments", "target 必须是布尔值")
+        conversation_key = context.get("conversation_key")
+        message_id = context.get("message_id")
+        if not isinstance(conversation_key, str) or not isinstance(message_id, str):
+            raise ToolProxyError("tool_context_unavailable", "备车工具缺少微信会话上下文")
+        if name == "aito_prepare_car_request":
+            try:
+                return self.store.prepare_car_request(
+                    conversation_key,
+                    message_id,
+                    target,
+                    ttl_seconds=PREPARE_CAR_CONFIRMATION_TTL_SECONDS,
+                )
+            except StoreError as exc:
+                raise ToolProxyError(exc.code, str(exc)) from exc
+        try:
+            claim = self.store.claim_prepare_car_execute(conversation_key, message_id, target)
+        except StoreError as exc:
+            if exc.code in {"CONFIRMATION_MISSING", "CONFIRMATION_EXPIRED", "CONFIRMATION_ACTION_MISMATCH"}:
+                return {"status": "rejected", "error_code": exc.code, "target": target}
+            raise ToolProxyError(exc.code, str(exc)) from exc
+        if claim.get("status") != "executing":
+            replay = dict(claim)
+            replay["idempotent_replay"] = True
+            return replay
+        confirmation_id = claim["confirmation_id"]
+        try:
+            state = safe_entity_state(
+                self.request_home_assistant(
+                    "GET",
+                    f"/states/{PREPARE_CAR_ENTITY_ID}",
+                    self.home_assistant_token,
+                    None,
+                )
+            )
+        except HomeAssistantPrepareCarError as exc:
+            return self.store.finish_prepare_car_execute(
+                confirmation_id,
+                {"status": "failed", "error_code": exc.code, "target": target},
+            )
+        if state.get("status") != "available":
+            return self.store.finish_prepare_car_execute(
+                confirmation_id,
+                {"status": "failed", "error_code": "HA_ENTITY_UNAVAILABLE", "target": target},
+            )
+        if state.get("entity_state") == ("on" if target else "off") and state.get("command_state") == "confirmed":
+            return self.store.finish_prepare_car_execute(
+                confirmation_id,
+                {"status": "already_confirmed", "target": target},
+            )
+        try:
+            self.request_home_assistant(
+                "POST",
+                "/services/switch/turn_on" if target else "/services/switch/turn_off",
+                self.home_assistant_token,
+                {"entity_id": PREPARE_CAR_ENTITY_ID},
+            )
+        except HomeAssistantPrepareCarError as exc:
+            return self.store.finish_prepare_car_execute(
+                confirmation_id,
+                {
+                    "status": "unknown" if exc.outcome_unknown else "failed",
+                    "error_code": exc.code,
+                    "target": target,
+                },
+            )
+        return self.store.finish_prepare_car_execute(
+            confirmation_id,
+            {"status": "submitted", "target": target},
+        )
 
     def _memo_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name not in MEMO_TOOLS:

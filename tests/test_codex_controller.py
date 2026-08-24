@@ -1351,7 +1351,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.12"
+        expected = "0.5.14"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1625,7 +1625,7 @@ class ControllerToolApiTests(unittest.TestCase):
                 self.assertEqual(tools["result"]["revision"], 2)
                 by_name = {item["name"]: item for item in tools["result"]["tools"]}
                 self.assertFalse(by_name["ledger_summary"]["enabled"])
-                self.assertEqual(len(by_name), 37)
+                self.assertEqual(len(by_name), 40)
 
                 unauthorized, _ = request("GET", "/internal/v1/capabilities")
                 self.assertEqual(unauthorized, 401)
@@ -1880,7 +1880,7 @@ class ToolRouterTests(unittest.TestCase):
             )
 
     def test_tool_metadata_is_complete_unique_and_member_allowlist_is_exact(self) -> None:
-        self.assertEqual(len(ALL_TOOL_NAMES), 37)
+        self.assertEqual(len(ALL_TOOL_NAMES), 40)
         self.assertEqual(set(TOOL_BY_NAME), set(ALL_TOOL_NAMES))
         self.assertEqual(
             MEMBER_READ_ONLY_TOOL_NAMES,

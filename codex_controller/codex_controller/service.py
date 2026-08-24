@@ -11,6 +11,13 @@ from zoneinfo import ZoneInfo
 
 from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
+from .prepare_car import (
+    PREPARE_CAR_TOOL_NAMES,
+    execute_result_text,
+    prepare_car_intent,
+    request_result_text,
+    status_result_text,
+)
 from .runner_service import RunnerManagerService
 from .desktop_service import DesktopControllerService
 from .source_identity import runtime_source_identity
@@ -401,6 +408,7 @@ class ControllerService:
                 "job_artifacts_v1",
                 "runner_manager_v2",
                 "desktop_takeover_v1",
+                "aito_prepare_car_confirmation_v1",
             ],
         }
 
@@ -492,7 +500,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.12",
+            "version": "0.5.14",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -665,8 +673,72 @@ class ControllerService:
                     job["job_id"],
                     payload["message_id"],
                     capability_profile,
+                    conversation_key=job["conversation_key"],
                     media_archive_authorized=media_archive_authorized,
                 )
+            prepare_intent = prepare_car_intent(payload)
+            if (
+                self.tool_context is not None
+                and prepare_intent is None
+                and hasattr(self.tool_context, "cancel_pending_prepare_car")
+            ):
+                self.tool_context.cancel_pending_prepare_car(
+                    job["conversation_key"],
+                    payload["message_id"],
+                )
+            if prepare_intent is not None:
+                intent, target = prepare_intent
+                if (
+                    self.tool_context is not None
+                    and intent == "status"
+                    and hasattr(self.tool_context, "cancel_pending_prepare_car")
+                ):
+                    self.tool_context.cancel_pending_prepare_car(
+                        job["conversation_key"],
+                        payload["message_id"],
+                    )
+                if capability_profile != "owner":
+                    if self.tool_context is not None and hasattr(self.tool_context, "cancel_pending_prepare_car"):
+                        self.tool_context.cancel_pending_prepare_car(
+                            job["conversation_key"],
+                            payload["message_id"],
+                        )
+                    self.store.complete_direct_result(
+                        job["job_id"],
+                        "当前微信成员没有备车控制权限。",
+                        item_type="aitoPrepareCarRejected",
+                    )
+                    return
+                required_tool = {
+                    "status": "aito_prepare_car_status",
+                    "request": "aito_prepare_car_request",
+                    "execute": "aito_prepare_car_execute",
+                }[intent]
+                if required_tool not in effective_tools or required_tool not in PREPARE_CAR_TOOL_NAMES:
+                    self.store.complete_direct_result(
+                        job["job_id"],
+                        "AITO 备车控制当前不可用，未发送车辆命令。",
+                        item_type="aitoPrepareCarUnavailable",
+                    )
+                    return
+                if intent == "status":
+                    result = self.tool_context.call(required_tool, {})
+                    result_text = status_result_text(result)
+                    item_type = "aitoPrepareCarStatus"
+                elif intent == "request":
+                    result = self.tool_context.call(required_tool, {"target": target})
+                    result_text = request_result_text(result, bool(target))
+                    item_type = "aitoPrepareCarRequest"
+                else:
+                    result = self.tool_context.call(required_tool, {"target": target})
+                    result_text = execute_result_text(result, bool(target))
+                    item_type = "aitoPrepareCarExecute"
+                self.store.complete_direct_result(
+                    job["job_id"],
+                    result_text,
+                    item_type=item_type,
+                )
+                return
             direct_memo = direct_memo_create_arguments(payload)
             if (
                 direct_memo is not None

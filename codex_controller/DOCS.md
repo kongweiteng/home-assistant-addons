@@ -1,6 +1,14 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.12`。
+当前版本：`0.5.14`。
+
+## M8 微信两阶段备车
+
+- 只有显式 `owner` 作业可见并可调用三个固定工具：状态查询、创建确认、确认执行。`member_read_only` 和旧 `owner_legacy` fail closed。
+- “备车/开始备车/停止备车”等明确文本只创建 2 分钟持久确认；同一 `conversation_key` 的下一条消息必须是动作一致的“确认备车”或“确认停止备车”。其他任何下一条消息原子取消旧确认。
+- 请求 message ID 与确认 message ID 分别持久审计。相同 ID 重放返回原结果，不重复调用 Home Assistant；POST 结果未知时记录 `unknown` 并禁止自动重试。
+- Controller 通过 `homeassistant_api: true` 的运行时 Supervisor token，只调用 `http://supervisor/core/api` 下固定实体状态和固定 `switch.turn_on|turn_off`。没有任意 URL、实体、domain、service、温度或时间参数。
+- Home Assistant 2xx 只表示服务受理。微信必须明确提示以 AITO switch 的真实回读 `confirmed` 为准，不把提交成功当成车辆完成。
 
 ## Codex Desktop 原任务接管
 

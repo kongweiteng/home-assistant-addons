@@ -14,8 +14,10 @@ import sqlite3
 import tempfile
 from typing import Any
 import uuid
+from zoneinfo import ZoneInfo
 
 from .tool_catalog import (
+    AITO_PREPARE_CAR_DEFINITIONS,
     BOOTSTRAP_HUB_DEFINITIONS,
     MEMO_DEFINITIONS,
     OPERATION_DEFINITIONS,
@@ -41,10 +43,15 @@ DEFAULT_ARTIFACT_TTL_SECONDS = 86400
 DEFAULT_MAX_ARTIFACT_BYTES = 20 * 1024 * 1024
 DEFAULT_ARTIFACT_QUOTA_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_ARTIFACTS_PER_JOB = 4
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def shanghai_now() -> datetime:
+    return datetime.now(SHANGHAI)
 
 
 def canonical_json(value: Any) -> str:
@@ -223,6 +230,28 @@ class ControllerStore:
                     first_seen_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS aito_prepare_car_confirmations (
+                    confirmation_id TEXT PRIMARY KEY,
+                    conversation_key TEXT NOT NULL,
+                    request_message_id TEXT NOT NULL UNIQUE,
+                    execute_message_id TEXT UNIQUE,
+                    target_on INTEGER NOT NULL CHECK(target_on IN (0,1)),
+                    state TEXT NOT NULL CHECK(state IN (
+                        'pending','executing','submitted','failed','unknown','cancelled','expired'
+                    )),
+                    requested_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    completed_at TEXT,
+                    result_json TEXT,
+                    error_code TEXT,
+                    FOREIGN KEY(conversation_key) REFERENCES conversations(conversation_key)
+                );
+                CREATE INDEX IF NOT EXISTS aito_prepare_car_conversation_idx
+                    ON aito_prepare_car_confirmations(conversation_key, requested_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS aito_prepare_car_pending_idx
+                    ON aito_prepare_car_confirmations(conversation_key)
+                    WHERE state='pending';
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
@@ -353,6 +382,211 @@ class ControllerStore:
             row = connection.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             self._event(connection, job_id, "queued")
             return self._job_document(connection, row)
+
+    @staticmethod
+    def _prepare_car_document(row: sqlite3.Row, *, idempotent_replay: bool = False) -> dict[str, Any]:
+        result = None
+        if row["result_json"]:
+            try:
+                result = json.loads(row["result_json"])
+            except json.JSONDecodeError:
+                result = None
+        return {
+            "confirmation_id": row["confirmation_id"],
+            "status": "pending_confirmation" if row["state"] == "pending" else row["state"],
+            "target": bool(row["target_on"]),
+            "requested_at": row["requested_at"],
+            "expires_at": row["expires_at"],
+            "error_code": row["error_code"],
+            "result": result,
+            "idempotent_replay": idempotent_replay,
+        }
+
+    def prepare_car_request(
+        self,
+        conversation_key: str,
+        message_id: str,
+        target_on: bool,
+        *,
+        ttl_seconds: int,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not CONVERSATION_RE.fullmatch(conversation_key) or not isinstance(message_id, str) or not message_id:
+            raise StoreError("prepare_car_context_invalid", "备车确认上下文无效")
+        if not isinstance(target_on, bool) or not 30 <= ttl_seconds <= 300:
+            raise StoreError("prepare_car_request_invalid", "备车确认参数无效")
+        current = (now or shanghai_now()).astimezone(SHANGHAI)
+        requested_at = current.isoformat(timespec="seconds")
+        expires_at = (current + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM aito_prepare_car_confirmations WHERE request_message_id=? OR execute_message_id=?",
+                (message_id, message_id),
+            ).fetchone()
+            if existing is not None:
+                if existing["request_message_id"] != message_id or existing["conversation_key"] != conversation_key or bool(existing["target_on"]) is not target_on:
+                    raise StoreError("prepare_car_idempotency_conflict", "备车消息幂等冲突", status=409)
+                return self._prepare_car_document(existing, idempotent_replay=True)
+            connection.execute(
+                "UPDATE aito_prepare_car_confirmations SET state='cancelled',completed_at=?,error_code='SUPERSEDED' "
+                "WHERE conversation_key=? AND state='pending'",
+                (requested_at, conversation_key),
+            )
+            confirmation_id = f"PC-{uuid.uuid4().hex}"
+            connection.execute(
+                "INSERT INTO aito_prepare_car_confirmations(confirmation_id,conversation_key,request_message_id,target_on,state,requested_at,expires_at) "
+                "VALUES (?,?,?,?, 'pending', ?, ?)",
+                (confirmation_id, conversation_key, message_id, int(target_on), requested_at, expires_at),
+            )
+            row = connection.execute(
+                "SELECT * FROM aito_prepare_car_confirmations WHERE confirmation_id=?",
+                (confirmation_id,),
+            ).fetchone()
+            return self._prepare_car_document(row)
+
+    def cancel_prepare_car_pending(
+        self,
+        conversation_key: str,
+        next_message_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        current = (now or shanghai_now()).astimezone(SHANGHAI).isoformat(timespec="seconds")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT confirmation_id,request_message_id FROM aito_prepare_car_confirmations "
+                "WHERE conversation_key=? AND state='pending'",
+                (conversation_key,),
+            ).fetchone()
+            if row is None or row["request_message_id"] == next_message_id:
+                return False
+            connection.execute(
+                "UPDATE aito_prepare_car_confirmations SET state='cancelled',completed_at=?,error_code='NEXT_MESSAGE_CANCELLED' "
+                "WHERE confirmation_id=? AND state='pending'",
+                (current, row["confirmation_id"]),
+            )
+            return connection.total_changes == 1
+
+    def claim_prepare_car_execute(
+        self,
+        conversation_key: str,
+        message_id: str,
+        target_on: bool,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not CONVERSATION_RE.fullmatch(conversation_key) or not isinstance(message_id, str) or not message_id:
+            raise StoreError("prepare_car_context_invalid", "备车执行上下文无效")
+        if not isinstance(target_on, bool):
+            raise StoreError("prepare_car_request_invalid", "备车执行参数无效")
+        current_dt = (now or shanghai_now()).astimezone(SHANGHAI)
+        current = current_dt.isoformat(timespec="seconds")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            replay = connection.execute(
+                "SELECT * FROM aito_prepare_car_confirmations WHERE execute_message_id=?",
+                (message_id,),
+            ).fetchone()
+            if replay is not None:
+                if replay["conversation_key"] != conversation_key or bool(replay["target_on"]) is not target_on:
+                    raise StoreError("prepare_car_idempotency_conflict", "备车确认消息幂等冲突", status=409)
+                document = self._prepare_car_document(replay, idempotent_replay=True)
+                if document["result"] is not None:
+                    result = dict(document["result"])
+                    result["idempotent_replay"] = True
+                    return result
+                return document
+            request_reuse = connection.execute(
+                "SELECT 1 FROM aito_prepare_car_confirmations WHERE request_message_id=?",
+                (message_id,),
+            ).fetchone()
+            if request_reuse is not None:
+                raise StoreError("prepare_car_idempotency_conflict", "请求消息不能作为确认消息重用", status=409)
+            row = connection.execute(
+                "SELECT * FROM aito_prepare_car_confirmations WHERE conversation_key=? AND state='pending'",
+                (conversation_key,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("CONFIRMATION_MISSING", "没有待确认的备车请求", status=409)
+            try:
+                expires = datetime.fromisoformat(row["expires_at"])
+            except ValueError as exc:
+                raise StoreError("prepare_car_store_invalid", "备车确认记录无效", status=500) from exc
+            if expires.tzinfo is None or expires.astimezone(SHANGHAI) <= current_dt:
+                connection.execute(
+                    "UPDATE aito_prepare_car_confirmations SET state='expired',completed_at=?,error_code='CONFIRMATION_EXPIRED' "
+                    "WHERE confirmation_id=? AND state='pending'",
+                    (current, row["confirmation_id"]),
+                )
+                connection.commit()
+                raise StoreError("CONFIRMATION_EXPIRED", "备车确认已过期", status=409)
+            if bool(row["target_on"]) is not target_on:
+                connection.execute(
+                    "UPDATE aito_prepare_car_confirmations SET state='cancelled',completed_at=?,error_code='CONFIRMATION_ACTION_MISMATCH' "
+                    "WHERE confirmation_id=? AND state='pending'",
+                    (current, row["confirmation_id"]),
+                )
+                connection.commit()
+                raise StoreError("CONFIRMATION_ACTION_MISMATCH", "备车确认动作不一致", status=409)
+            connection.execute(
+                "UPDATE aito_prepare_car_confirmations SET state='executing',execute_message_id=?,consumed_at=? "
+                "WHERE confirmation_id=? AND state='pending'",
+                (message_id, current, row["confirmation_id"]),
+            )
+            return {
+                "confirmation_id": row["confirmation_id"],
+                "status": "executing",
+                "target": target_on,
+                "idempotent_replay": False,
+            }
+
+    def finish_prepare_car_execute(
+        self,
+        confirmation_id: str,
+        result: dict[str, Any],
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        status = result.get("status")
+        state_by_status = {
+            "submitted": "submitted",
+            "already_confirmed": "submitted",
+            "failed": "failed",
+            "unknown": "unknown",
+        }
+        state = state_by_status.get(status)
+        if state is None:
+            raise StoreError("prepare_car_result_invalid", "备车执行结果无效", status=500)
+        completed_at = (now or shanghai_now()).astimezone(SHANGHAI).isoformat(timespec="seconds")
+        serialized = canonical_json(result)
+        error_code = result.get("error_code")
+        if error_code is not None and (not isinstance(error_code, str) or len(error_code) > 128):
+            raise StoreError("prepare_car_result_invalid", "备车执行错误码无效", status=500)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state,result_json FROM aito_prepare_car_confirmations WHERE confirmation_id=?",
+                (confirmation_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("prepare_car_confirmation_missing", "备车确认记录不存在", status=404)
+            if row["state"] != "executing":
+                if row["result_json"]:
+                    try:
+                        replay = json.loads(row["result_json"])
+                    except json.JSONDecodeError as exc:
+                        raise StoreError("prepare_car_store_invalid", "备车结果记录无效", status=500) from exc
+                    replay["idempotent_replay"] = True
+                    return replay
+                raise StoreError("prepare_car_state_conflict", "备车确认状态冲突", status=409)
+            connection.execute(
+                "UPDATE aito_prepare_car_confirmations SET state=?,completed_at=?,result_json=?,error_code=? "
+                "WHERE confirmation_id=? AND state='executing'",
+                (state, completed_at, serialized, error_code, confirmation_id),
+            )
+            return dict(result)
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         with self._connect() as connection:
@@ -850,6 +1084,7 @@ class ControllerStore:
         return (
             hub_names
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
+            | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 
@@ -863,6 +1098,7 @@ class ControllerStore:
         return (
             frozenset(hub_names)
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
+            | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 

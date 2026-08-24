@@ -136,6 +136,27 @@ def _memo(
     )
 
 
+def _aito(
+    name: str,
+    display_name: str,
+    risk_type: str,
+    description: str,
+    schema: dict[str, Any],
+    *intent_examples: str,
+) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        display_name=display_name,
+        service="home_assistant_prepare_car",
+        risk_type=risk_type,
+        description=description,
+        intent_examples=tuple(intent_examples),
+        input_schema=schema,
+        requires_job_context=True,
+        idempotent_write=risk_type != "read_only",
+    )
+
+
 PAYMENT_TAG_DIMENSIONS = (
     "主题",
     "空间",
@@ -351,8 +372,51 @@ MEMO_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 
+AITO_PREPARE_CAR_DEFINITIONS: tuple[ToolDefinition, ...] = (
+    _aito(
+        "aito_prepare_car_status",
+        "查询 M8 备车状态",
+        "read_only",
+        "只读查询固定 AITO 备车实体及其命令回读状态；不接受实体、domain、service、温度或时间参数。仅 owner 可调用。",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        "查看 M8 备车状态",
+    ),
+    _aito(
+        "aito_prepare_car_request",
+        "请求 M8 备车确认",
+        "controlled",
+        "为固定默认立即出发备车计划创建会话绑定的短期确认；不会调用车辆。仅 owner 可调用。",
+        {
+            "type": "object",
+            "properties": {"target": {"type": "boolean"}},
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        "开始备车",
+        "停止备车",
+    ),
+    _aito(
+        "aito_prepare_car_execute",
+        "确认执行 M8 备车",
+        "controlled",
+        "单次消费同一微信会话中未过期且动作一致的备车确认，并仅调用固定 switch.turn_on 或 switch.turn_off。仅 owner 可调用。",
+        {
+            "type": "object",
+            "properties": {"target": {"type": "boolean"}},
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        "确认备车",
+        "确认停止备车",
+    ),
+)
+
+
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
-    BOOTSTRAP_HUB_DEFINITIONS + MEMO_DEFINITIONS + OPERATION_DEFINITIONS
+    BOOTSTRAP_HUB_DEFINITIONS
+    + MEMO_DEFINITIONS
+    + OPERATION_DEFINITIONS
+    + AITO_PREPARE_CAR_DEFINITIONS
 )
 
 
@@ -377,6 +441,9 @@ MEMBER_ALLOWED_TOOL_NAMES = MEMBER_READ_ONLY_TOOL_NAMES | MEMO_MEMBER_READ_ONLY_
 LEDGER_TOOLS = frozenset(name for name in ALL_TOOL_NAMES if name.startswith("ledger_"))
 RENOVATION_TOOLS = frozenset(name for name in ALL_TOOL_NAMES if name.startswith("renovation_"))
 OPERATIONS_TOOLS = frozenset(name for name in ALL_TOOL_NAMES if name.startswith("ha_operations_"))
+AITO_PREPARE_CAR_TOOLS = frozenset(
+    definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS
+)
 LEDGER_WRITE_TOOLS = frozenset(
     name for name in LEDGER_TOOLS if TOOL_BY_NAME[name].risk_type == "write"
 )

@@ -127,7 +127,7 @@ class DynamicMcpTests(unittest.TestCase):
         router = self.router(endpoint)
 
         self.assertEqual(len(BOOTSTRAP_MANIFEST.definitions), 27)
-        self.assertEqual(len(router.tool_definitions()), 37)
+        self.assertEqual(len(router.tool_definitions()), 40)
         self.assertIn("ledger_summary", router.available_tools())
         self.assertNotIn("ledger_attach", router.available_tools())
         self.assertNotIn("renovation_search", router.available_tools())

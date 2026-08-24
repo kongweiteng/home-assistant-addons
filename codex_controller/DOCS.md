@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.16`。
+当前版本：`0.5.17`。
 
 ## M8 微信两阶段备车
 
@@ -12,7 +12,7 @@
 
 ## Codex Desktop 原任务接管
 
-- `0.5.16` 完整保留 `0.5.15` 的 `/desktop` 独立 Ingress 工作台，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件、当前 App 模型目录和能力感知控制；手机采用单栏，桌面采用三栏。
+- `0.5.17` 完整保留 `0.5.16` 的 `/desktop` 独立 Ingress 工作台、Owner/IPC availability refresh 和 M8 owner-only 固定工具，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件、当前 App 模型目录和能力感知控制；手机采用单栏，桌面采用三栏。
 - Controller 恢复期对同 revision、同业务 snapshot 的 envelope 时间刷新按语义幂等处理；若只有顶层 `status/control_state` 因 Owner/IPC 可用性变化而改变，也按 semantic availability refresh 接受。去除这两个字段后仍有任何差异、精确 snapshot 未来 revision 缺失或绑定漂移时继续失败关闭；已被更新 revision 取代的旧 event 按 stale 消费。
 - Controller 只接收 `HS-*`、`PJ-*`、`TH-*`、`TR-*` 脱敏引用、容量受限快照、事件 cursor 和幂等收据。原始 App `threadId`、`turnId`、Socket、绝对路径、凭据、隐藏 reasoning 和 developer instructions 不得进入 HAOS。
 - Desktop host 必须来自 enabled、online、macOS 且声明 `desktop_takeover_v1` 的既有 Runner；Runner Center 全局关闭、Relay 未配置、host stale、协议降级、项目不在 Runner 白名单或缺少动作 capability 时全部拒绝写控制。
@@ -51,7 +51,7 @@
 
 ## Runner Center v2
 
-`0.5.16` 继续默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.17` 继续默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
@@ -205,7 +205,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.16` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的正式 `0.5.14` 源码树与运行摘要 `e241acaa420866bdd449e6f78d875b2c35954fd23558d7a5cbf5fc2005b9a5b7`；不能仅指定版本号，因为 `0.5.11` 曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。`0.5.14` 会重新暴露旧内置 Runner `0.3.6` manifest 与已配置 `0.3.11` 摘要不一致的问题，因此回滚后安装入口保持关闭属于已知降级结果，不得为恢复入口而放宽摘要校验。
+从 `0.5.17` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的 M8 `0.5.16` 源码树与运行摘要 `70267329cfdb18e7aa6331ae942e7cb0779cb51f44b282c0fe1ab0cfe108f7b0`；不能仅指定版本号。回滚不修改 Runner credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。`0.5.16` 内置 Runner `0.3.11` manifest，回滚时必须同时恢复 Relay `0.2.10` 与 Runner `0.3.11` 的精确兼容边界；不得为保留 `0.3.12` 安装入口而放宽摘要或版本校验。
 
 如果有意继续降级到不含 Desktop 的 `0.5.10`，先关闭 Desktop 页面入口和 Runner 的 `[desktop].enabled`，等待所有 Desktop 命令离开 `pending/submitted/accepted/unknown`，确认 Relay 与 Runner Desktop outbox 已排空，再同时回退 Relay 到 `0.2.7` 和 Runner manifest 到 `0.3.5`。旧版会忽略 additive Desktop 表，但不得删除 Controller 数据目录、Desktop 审计、Mac 本地 refs store 或任何 Codex 原 Thread；未知收据必须保留为只读核对证据。
 

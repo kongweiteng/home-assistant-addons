@@ -31,6 +31,10 @@ HOST_REF = "HS-" + "A" * 20
 PROJECT_REF = "PJ-" + "B" * 20
 THREAD_REF = "TH-" + "C" * 20
 TURN_REF = "TR-" + "D" * 20
+MODEL_CATALOG = [
+    {"id": "gpt-5.6-sol", "display_name": "GPT-5.6 Sol", "is_default": True},
+    {"id": "gpt-5.6-terra", "display_name": "GPT-5.6 Terra", "is_default": False},
+]
 
 
 class App:
@@ -102,6 +106,7 @@ def snapshot(
     title: str = "原桌面任务",
     status: str = "active",
     capabilities: list[str] | None = None,
+    models: list[dict] | None = None,
 ) -> dict:
     active_turn = TURN_REF if status == "active" else None
     thread = {
@@ -149,8 +154,10 @@ def snapshot(
                     "continue_same_thread",
                     "native_steer_racy",
                     "archive_control_v1",
+                    "model_override_v1",
                 ],
                 "control_enabled": True,
+                "models": list(MODEL_CATALOG if models is None else models),
                 "synced_at": NOW.isoformat(),
             },
         }
@@ -265,6 +272,35 @@ class DesktopProtocolTests(unittest.TestCase):
             validate_desktop_document("desktop_snapshot", document)
         self.assertEqual(context.exception.code, "desktop_time_zone_invalid")
 
+    def test_model_catalog_is_bounded_unique_and_backward_compatible(self) -> None:
+        runner_id = "RN-" + "E" * 20
+        legacy = snapshot(runner_id)
+        legacy["host"].pop("models")
+        legacy["host"]["capabilities"].remove("model_override_v1")
+        legacy["body_digest"] = body_digest(legacy)
+        self.assertNotIn("models", validate_desktop_document("desktop_snapshot", legacy)["host"])
+
+        duplicate = [dict(MODEL_CATALOG[0]), dict(MODEL_CATALOG[0])]
+        multiple_defaults = [dict(MODEL_CATALOG[0]), {**MODEL_CATALOG[1], "is_default": True}]
+        oversized = [
+            {"id": f"gpt-{index}", "display_name": f"GPT {index}", "is_default": index == 0}
+            for index in range(33)
+        ]
+        for name, models in (
+            ("duplicate", duplicate),
+            ("multiple-defaults", multiple_defaults),
+            ("oversized", oversized),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(DesktopProtocolError) as context:
+                    validate_desktop_document("desktop_snapshot", snapshot(runner_id, models=models))
+                self.assertEqual(context.exception.code, "desktop_host_invalid")
+
+        inconsistent = snapshot(runner_id, models=[])
+        with self.assertRaises(DesktopProtocolError) as context:
+            validate_desktop_document("desktop_snapshot", inconsistent)
+        self.assertEqual(context.exception.code, "desktop_host_invalid")
+
 
 class DesktopStoreServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -288,6 +324,7 @@ class DesktopStoreServiceTests(unittest.TestCase):
         hosts = self.service.hosts()
         self.assertTrue(hosts["hosts"][0]["online"])
         self.assertTrue(hosts["hosts"][0]["write_available"])
+        self.assertEqual(hosts["hosts"][0]["models"], MODEL_CATALOG)
         projects = self.service.projects()["projects"]
         self.assertEqual(projects[0]["counts"]["active"], 1)
         threads = self.service.threads(
@@ -412,6 +449,66 @@ class DesktopStoreServiceTests(unittest.TestCase):
             self.service.receive("desktop_receipt", conflicting_receipt)
         self.assertEqual(context.exception.code, "desktop_receipt_conflict")
         self.assertEqual(self.store.command(payload["request_id"])["state"], "confirmed")
+
+    def test_model_override_is_digest_bound_and_fails_closed_outside_catalog(self) -> None:
+        payload = {
+            "request_id": "desktop-model-safe-steer-0001",
+            "expected_turn_ref": TURN_REF,
+            "thread_revision": 7,
+            "input": "安全调整并切换运行模型",
+            "mode": "safe",
+            "model": "gpt-5.6-terra",
+        }
+        submitted = self.service.submit(THREAD_REF, "steer", payload)
+        self.assertEqual(submitted["state"], "submitted")
+        command = self.publisher.desktop_commands[-1][1]
+        self.assertEqual(command["model"], "gpt-5.6-terra")
+        self.assertEqual(command["thread_ref"], THREAD_REF)
+        self.assertEqual(self.service.submit(THREAD_REF, "steer", payload)["state"], "submitted")
+        with self.assertRaises(StoreError) as context:
+            self.service.submit(THREAD_REF, "steer", {**payload, "model": "gpt-5.6-sol"})
+        self.assertEqual(context.exception.code, "desktop_request_conflict")
+        self.service.receive(
+            "desktop_receipt",
+            receipt(self.runner_id, payload["request_id"], action="steer"),
+        )
+
+        for name, invalid, expected_code in (
+            (
+                "native",
+                {**payload, "request_id": "desktop-model-native-0001", "mode": "native"},
+                "desktop_model_invalid",
+            ),
+            (
+                "invalid-id",
+                {**payload, "request_id": "desktop-model-invalid-0001", "model": "provider/model"},
+                "desktop_model_invalid",
+            ),
+            (
+                "outside-catalog",
+                {**payload, "request_id": "desktop-model-missing-0001", "model": "gpt-5.6-missing"},
+                "desktop_model_unavailable",
+            ),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(StoreError) as context:
+                    self.service.submit(THREAD_REF, "steer", invalid)
+                self.assertEqual(context.exception.code, expected_code)
+
+        self.service.receive("desktop_snapshot", snapshot(self.runner_id, revision=8, status="idle"))
+        continued = self.service.submit(
+            THREAD_REF,
+            "continue",
+            {
+                "request_id": "desktop-model-continue-0001",
+                "thread_revision": 8,
+                "input": "继续同一个原任务",
+                "model": "gpt-5.6-sol",
+            },
+        )
+        self.assertEqual(continued["state"], "submitted")
+        self.assertEqual(self.publisher.desktop_commands[-1][1]["model"], "gpt-5.6-sol")
+        self.assertEqual(self.service.thread(THREAD_REF)["latest_command"]["model"], "gpt-5.6-sol")
 
     def test_action_capabilities_and_runner_authorization_gate_write_availability(self) -> None:
         limited = snapshot(
@@ -912,6 +1009,7 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("safe-area-inset-bottom", body)
         self.assertIn("#detailContent{display:flex;flex-direction:column}", body)
         self.assertIn(".composer{position:relative;bottom:auto;order:4", body)
+        self.assertIn('id="modelSelect"', body)
 
         status, headers, script = self.asset("/desktop/desktop.js")
         self.assertEqual(status, 200)
@@ -920,6 +1018,10 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("Asia/Shanghai", script)
         self.assertIn("X-CSRF-Token", script)
         self.assertIn("mode: state.mode", script)
+        self.assertIn("model_override_v1", script)
+        self.assertIn("state.selectedModel = ''", script)
+        self.assertIn("...(model ? {model} : {})", script)
+        self.assertIn("原生快速调整保持同一 Turn，不允许切换模型", script)
         self.assertIn("wait_seconds=20", script)
         self.assertNotIn("innerHTML", script)
         self.assertNotIn("localStorage", script)
@@ -939,8 +1041,91 @@ class DesktopApiTests(unittest.TestCase):
             "恢复归档",
             "recovery_required",
             "protocol_degraded",
+            "App 默认",
+            "最近命令模型",
+            "沿用原任务模型",
         ):
             self.assertIn(required, combined)
+
+    def test_desktop_api_model_override_keeps_same_thread_and_rejects_native_or_unknown(self) -> None:
+        callback_headers = {
+            "Authorization": "Bearer " + self.callback_token,
+            "X-Runner-Credential": self.credential,
+        }
+        status, result = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_snapshot",
+            snapshot(self.runner_id),
+            callback_headers,
+        )
+        self.assertEqual(status, 200, result)
+        csrf = self.csrf()
+        base = {
+            "expected_turn_ref": TURN_REF,
+            "thread_revision": 7,
+            "input": "调整当前方向",
+            "model": "gpt-5.6-terra",
+        }
+        status, result = self.request(
+            "POST",
+            f"/api/desktop/v1/threads/{THREAD_REF}/steer",
+            {**base, "request_id": "desktop-api-native-model-0001", "mode": "native"},
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(status, 400, result)
+        self.assertEqual(result["error"]["code"], "desktop_model_invalid")
+        status, result = self.request(
+            "POST",
+            f"/api/desktop/v1/threads/{THREAD_REF}/steer",
+            {**base, "request_id": "desktop-api-unknown-model-0001", "model": "gpt-5.6-missing"},
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(status, 409, result)
+        self.assertEqual(result["error"]["code"], "desktop_model_unavailable")
+        status, result = self.request(
+            "POST",
+            f"/api/desktop/v1/threads/{THREAD_REF}/steer",
+            {**base, "request_id": "desktop-api-safe-model-0001", "mode": "safe"},
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(status, 202, result)
+        safe_command = self.publisher.desktop_commands[-1][1]
+        self.assertEqual(safe_command["thread_ref"], THREAD_REF)
+        self.assertEqual(safe_command["model"], "gpt-5.6-terra")
+        status, result = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_receipt",
+            receipt(
+                self.runner_id,
+                "desktop-api-safe-model-0001",
+                revision=8,
+                action="steer",
+            ),
+            callback_headers,
+        )
+        self.assertEqual(status, 200, result)
+        status, result = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_snapshot",
+            snapshot(self.runner_id, revision=8, status="idle"),
+            callback_headers,
+        )
+        self.assertEqual(status, 200, result)
+        status, result = self.request(
+            "POST",
+            f"/api/desktop/v1/threads/{THREAD_REF}/continue",
+            {
+                "request_id": "desktop-api-continue-model-0001",
+                "thread_revision": 8,
+                "input": "继续同一个原任务",
+                "model": "gpt-5.6-sol",
+            },
+            {"X-CSRF-Token": csrf},
+        )
+        self.assertEqual(status, 202, result)
+        continued = self.publisher.desktop_commands[-1][1]
+        self.assertEqual(continued["thread_ref"], THREAD_REF)
+        self.assertEqual(continued["model"], "gpt-5.6-sol")
 
     def test_internal_relay_acl_ingress_queries_and_command_downlink(self) -> None:
         callback_headers = {

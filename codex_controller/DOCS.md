@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.14`。
+当前版本：`0.5.15`。
 
 ## M8 微信两阶段备车
 
@@ -12,12 +12,13 @@
 
 ## Codex Desktop 原任务接管
 
-- `0.5.13` 提供 `/desktop` 独立 Ingress 工作台，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件和能力感知控制；手机采用单栏，桌面采用三栏。
+- `0.5.15` 完整保留 `0.5.14` 的 `/desktop` 独立 Ingress 工作台，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件、当前 App 模型目录和能力感知控制；手机采用单栏，桌面采用三栏。
 - Controller 恢复期对同 revision、同业务 snapshot 的 envelope 时间刷新按语义幂等处理；精确 snapshot 已淘汰且当前 Thread revision 更高的旧 event 按 stale 消费。真正 revision 冲突和未来 revision 缺 snapshot 继续失败关闭。
 - Controller 只接收 `HS-*`、`PJ-*`、`TH-*`、`TR-*` 脱敏引用、容量受限快照、事件 cursor 和幂等收据。原始 App `threadId`、`turnId`、Socket、绝对路径、凭据、隐藏 reasoning 和 developer instructions 不得进入 HAOS。
 - Desktop host 必须来自 enabled、online、macOS 且声明 `desktop_takeover_v1` 的既有 Runner；Runner Center 全局关闭、Relay 未配置、host stale、协议降级、项目不在 Runner 白名单或缺少动作 capability 时全部拒绝写控制。
 - 页面或 API 每次写入必须提交随机 `request_id` 和当前 `thread_revision`；steer/interrupt 还必须提交 `expected_turn_ref`。相同 request ID 与相同正文幂等返回原结果，不同正文冲突；同一 Thread 存在 pending、submitted、accepted 或 unknown 命令时不接受第二个控制。
 - `steer` 默认 `mode=safe`：Runner 先按 expected Turn interrupt，独立读回，再在同一原 Thread 创建下一 Turn。`mode=native` 保持同 active Turn，但当前 App build 不强制调用方 expected Turn，只允许显式风险模式并要求前后快照对账。
+- 模型选择默认“沿用原任务模型”。Controller 只接受 host 最新 `models[]` 中的净化 ID，并仅对 `continue` 或 `mode=safe` 创建的新 Turn 提交；Runner 执行前重新读取当前 App `model/list`，目录缺失、漂移或模型已移除时拒绝。native steer、interrupt、archive/unarchive 不接受 model，页面和 API 不开放 provider、endpoint、credential、service tier 或 reasoning。
 - `continue` 只允许 idle/notLoaded/failed 且无 active Turn 的原 Thread；`archive` 只允许 idle，`unarchive` 只允许 archived。Runner 未配置固定非目标 archive 控制任务时不声明 `archive_control_v1`，Controller 因此直接拒绝 archive/unarchive。
 - 事件接口使用 `after_cursor` 恢复，最多等待 25 秒；事件对应的精确 revision 快照必须先入库。断线、超时或发布结果未知时只允许重新读取和对账，不自动重放控制。
 - 页面不使用 `localStorage`/`sessionStorage`，不接收原始 `thread_id`/`turn_id` 或原始 UUID；时间统一显示 `Asia/Shanghai`。390×844 与 1440×900 合成数据浏览器验收无水平溢出，native steer 竞态、recovery/protocol degraded、缺失 archive capability 和弱网重连均保持可见或 fail closed。
@@ -50,12 +51,12 @@
 
 ## Runner Center v2
 
-`0.5.13` 默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
+`0.5.15` 继续默认启用 Controller 内确定性的 Runner Manager 和中文 Ingress 管理页。它使用独立 additive SQLite 表保存 Runner 注册、一次性 enrollment、凭据摘要、心跳、Relay 连接事实、任务、lease 和审计，不修改普通 Codex job/Thread/MCP 队列。Controller 到 Relay 的内部 URL 只接受 `http://local-codex-runner-relay:8098`，旧短主机名会 fail closed。
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
-- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller 镜像内置与 Runner `0.3.6` 候选完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
-- manifest v2 固定 Runner `0.3.6`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。Runner 的结构化结果 Schema 要求全部属性都在 `required` 中，`error_code` 成功时为 `null`、失败时为稳定错误码。
+- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller 镜像内置与正式 Runner `0.3.11` Release 完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
+- manifest v2 固定 Runner `0.3.11`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。Runner 的结构化结果 Schema 要求全部属性都在 `required` 中，`error_code` 成功时为 `null`、失败时为稳定错误码。
 - Runner 在 Relay 返回 `controller_unavailable`、`controller_client_not_started` 或连接竞争时保留当前进程，并按配置执行指数退避重连；凭据错误和身份不匹配仍立即退出。已发送未 ACK 的心跳保留在持久 outbox，只替换未发送心跳；过期心跳清理后，其迟到 ACK 会安全忽略。Codex 执行在工作线程内进行，长任务期间 WSS 主循环持续发送 `busy` 心跳。
 - Runner 启动 Codex 前会读取任务 worktree 与本机登记仓库的绝对 Git common dir；只有两者完全相同时，才把该 Git metadata 目录通过 Codex `--add-dir` 加入 `workspace-write`。这使 linked worktree 可以创建 index、object、ref 和 reflog 并完成本地 commit，但不会开放 `danger-full-access`，远端消息仍不能注入路径或修改沙箱策略。
 - 创建 API 返回一次性 HTTPS 安装链接、完整的一行终端命令、平台/版本和过期时间，不返回独立 enrollment 字段。页面可复制链接、打开链接或复制命令；Clipboard API 不可用时使用受限回退。15 分钟倒计时归零、撤销或 enrollment 被领取后，页面立即清除内存中的链接和命令。
@@ -105,7 +106,7 @@
 | `runner_relay_api_token` | 仅供 Controller -> Relay 发布 request/control 的 bearer，至少 32 字符 |
 | `runner_relay_controller_api_token` | 仅供 Relay -> Controller 调用 enroll/authenticate/heartbeat/status/result 的 bearer，至少 32 字符 |
 | `runner_relay_public_url` | Runner 出站连接的公开 `wss://` URL；禁止凭据、query、fragment、内部域名或非公网解析结果 |
-| `runner_installer_manifest_url` | Runner `0.3.6` 自包含安装制品 manifest v2 的公开 HTTPS URL |
+| `runner_installer_manifest_url` | Runner `0.3.11` 自包含安装制品 manifest v2 的公开 HTTPS URL |
 | `runner_installer_manifest_sha256` | 对 manifest 原始字节固定的 64 位小写 SHA-256；不接受浮动 latest |
 | `runner_relay_timeout_seconds` | Relay 发布超时；兼容未内置 manifest 的旧目录读取，范围 2 到 60 秒 |
 
@@ -204,7 +205,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
 
-从 `0.5.14` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的源码树与摘要；不能仅指定版本号，因为 `0.5.11` 曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。
+从 `0.5.15` 回滚时，只允许恢复升级前 Controller-only 备份中精确记录的正式 `0.5.14` 源码树与运行摘要 `e241acaa420866bdd449e6f78d875b2c35954fd23558d7a5cbf5fc2005b9a5b7`；不能仅指定版本号，因为 `0.5.11` 曾对应两套不同源码。回滚不修改 Relay、Runner、credential、options、数据目录、Mac refs store 或任何 Codex 原 Thread，并必须在恢复后重新核对运行源码摘要。`0.5.14` 会重新暴露旧内置 Runner `0.3.6` manifest 与已配置 `0.3.11` 摘要不一致的问题，因此回滚后安装入口保持关闭属于已知降级结果，不得为恢复入口而放宽摘要校验。
 
 如果有意继续降级到不含 Desktop 的 `0.5.10`，先关闭 Desktop 页面入口和 Runner 的 `[desktop].enabled`，等待所有 Desktop 命令离开 `pending/submitted/accepted/unknown`，确认 Relay 与 Runner Desktop outbox 已排空，再同时回退 Relay 到 `0.2.7` 和 Runner manifest 到 `0.3.5`。旧版会忽略 additive Desktop 表，但不得删除 Controller 数据目录、Desktop 审计、Mac 本地 refs store 或任何 Codex 原 Thread；未知收据必须保留为只读核对证据。
 

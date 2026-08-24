@@ -13,6 +13,7 @@ TICKET_RE = re.compile(r"^[A-Za-z0-9_-]{32,512}$")
 PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+SUPPORTED_RUNNER_VERSIONS = frozenset({"0.3.6", "0.3.11"})
 EXPECTED_FIELDS = {
     "runner_id",
     "enrollment_token",
@@ -79,7 +80,7 @@ def render_install_script(value: dict[str, Any]) -> str:
     installer_size = _size(value["installer_size"], "installer size")
     asset_size = _size(value["asset_size"], "asset size")
     if (
-        value["runner_version"] != "0.3.6"
+        value["runner_version"] not in SUPPORTED_RUNNER_VERSIONS
         or value["codex_version"] != "0.146.0"
         or value["python_version"] != "3.11.13"
         or value["self_contained"] is not True
@@ -174,4 +175,9 @@ def _url(value: Any, scheme: str) -> str:
     return value
 
 
-__all__ = ["InstallRenderError", "TICKET_RE", "render_install_script"]
+__all__ = [
+    "InstallRenderError",
+    "SUPPORTED_RUNNER_VERSIONS",
+    "TICKET_RE",
+    "render_install_script",
+]

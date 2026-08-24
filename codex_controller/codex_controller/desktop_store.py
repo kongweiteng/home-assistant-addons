@@ -487,6 +487,7 @@ class DesktopStore:
                     "cli_version": document.get("cli_version"),
                     "schema_digest": document.get("schema_digest"),
                     "capabilities": list(document.get("capabilities") or []),
+                    "models": list(document.get("models") or []),
                     "synced_at": row["synced_at"],
                     "updated_at": row["updated_at"],
                 }
@@ -939,6 +940,7 @@ class DesktopStore:
             "thread_ref": row["thread_ref"],
             "action": row["action"],
             "mode": command.get("mode"),
+            "model": command.get("model"),
             "expected_turn_ref": command.get("expected_turn_ref"),
             "expected_thread_revision": command.get("expected_thread_revision"),
             "state": row["state"],

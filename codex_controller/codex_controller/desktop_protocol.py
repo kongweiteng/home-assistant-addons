@@ -17,6 +17,7 @@ RUNNER_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
 REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 REF_RE = re.compile(r"^(HS|PJ|TH|TR)-[A-Z2-7]{20,52}$")
 DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 UUID_RE = re.compile(
     r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
 )
@@ -134,6 +135,7 @@ def build_desktop_command(
     expected_turn_ref: str | None = None,
     input_text: str | None = None,
     mode: str | None = None,
+    model: str | None = None,
     ttl_seconds: int = 120,
 ) -> dict[str, Any]:
     _runner(runner_id)
@@ -164,6 +166,8 @@ def build_desktop_command(
         document["input"] = input_text
     if mode is not None:
         document["mode"] = mode
+    if model is not None:
+        document["model"] = model
     document["body_digest"] = body_digest(document)
     return validate_desktop_command(document, now=current)
 
@@ -182,7 +186,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         "expires_at",
         "body_digest",
     }
-    optional = {"expected_turn_ref", "input", "mode"}
+    optional = {"expected_turn_ref", "input", "mode", "model"}
     document = _exact_mapping(value, required, optional)
     _base(document, "desktop_command")
     _request(document["request_id"])
@@ -217,6 +221,15 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
             raise DesktopProtocolError("desktop_mode_invalid", "Desktop steer 模式无效")
     elif mode is not None:
         raise DesktopProtocolError("desktop_mode_invalid", "该 Desktop 动作不允许 mode")
+    model = document.get("model")
+    if model is not None:
+        _model_id(model)
+        if action == "continue":
+            pass
+        elif action == "steer" and mode == "safe":
+            pass
+        else:
+            raise DesktopProtocolError("desktop_model_invalid", "该 Desktop 动作不允许 model")
     _digest(document)
     return document
 
@@ -289,6 +302,15 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host control flag 无效")
         if host.get("control_enabled") is True and host.get("state") != "normal":
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host control/state 不一致")
+        models = host.get("models", [])
+        _model_catalog(models)
+        if "model_override_v1" in capabilities and (
+            host.get("control_enabled") is not True or not models
+        ):
+            raise DesktopProtocolError(
+                "desktop_host_invalid",
+                "Desktop host model capability 与目录不一致",
+            )
         listener_count = host.get("tcp_listener_count")
         if not isinstance(listener_count, int) or isinstance(listener_count, bool) or listener_count < -1:
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host listener count 无效")
@@ -412,6 +434,39 @@ def _request(value: Any) -> None:
 def _ref(value: Any, prefix: str) -> None:
     if not isinstance(value, str) or not REF_RE.fullmatch(value) or not value.startswith(prefix + "-"):
         raise DesktopProtocolError("desktop_ref_invalid", f"Desktop {prefix} ref 无效")
+
+
+def _model_id(value: Any) -> None:
+    if not isinstance(value, str) or not MODEL_ID_RE.fullmatch(value):
+        raise DesktopProtocolError("desktop_model_invalid", "Desktop model 无效")
+
+
+def _model_catalog(value: Any) -> None:
+    if not isinstance(value, list) or len(value) > 32:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host models 无效")
+    seen: set[str] = set()
+    default_count = 0
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {"id", "display_name", "is_default"}:
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host model entry 无效")
+        model_id = item.get("id")
+        _model_id(model_id)
+        display_name = item.get("display_name")
+        is_default = item.get("is_default")
+        if (
+            model_id in seen
+            or not isinstance(display_name, str)
+            or not display_name
+            or display_name != display_name.strip()
+            or len(display_name) > 100
+            or any(ord(character) < 32 for character in display_name)
+            or not isinstance(is_default, bool)
+        ):
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host model entry 无效")
+        seen.add(model_id)
+        default_count += int(is_default)
+        if default_count > 1:
+            raise DesktopProtocolError("desktop_host_invalid", "Desktop host default model 无效")
 
 
 def _revision(value: Any) -> None:

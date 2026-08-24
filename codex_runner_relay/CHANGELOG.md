@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.2.10
+
+- `/install/<ticket>` 当前固定目录升级为正式 Runner `0.3.11`，与 Controller `0.5.15` 的内置 manifest、公开 Release 字节和 SHA-256 一致。
+- 为允许先升级 Relay、再升级 Controller，安装 renderer 只接受精确版本集合 `0.3.6` 与 `0.3.11`；其他版本、Codex/Python 漂移、摘要或大小不匹配继续 fail closed。
+- WSS、Desktop stale ACK、IPv4 Controller 客户端、ticket/enrollment 不落盘、Registry/lease 所有权、现有 Runner 与网络边界不变。
+
 ## 0.2.9
 
 - Controller 已保存更高 Desktop event sequence 并返回 `desktop_event_sequence_stale` 时，Relay 对精确的 `desktop_event` 返回传输 ACK，使恢复期旧 event 可从 Runner outbox 安全删除，不再反复关闭 WSS 连接。

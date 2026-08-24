@@ -1,11 +1,20 @@
 # 更新记录
 
-## 0.5.14
+## 0.5.15
 
 - 新增 owner-only M8 备车状态、请求和执行三个固定 MCP 工具，以及微信精确意图的确定性直达路由。
 - 新增 `conversation_key` 绑定的 2 分钟持久确认、下一消息取消、动作匹配、TTL、单次消费、message ID 幂等和 unknown-outcome 防重放。
 - 仅通过运行时 Supervisor token 访问固定 AITO switch 状态与 `switch.turn_on|turn_off`；不开放任意 HA API，并保持 `member_read_only`/`owner_legacy` 禁止备车。
 - Add-on 声明 `homeassistant_api: true`；HA service 受理与 AITO 车辆回读成功继续严格区分。
+- 完整保留 `0.5.14` 的 Desktop 实时模型目录、同 Thread 新 Turn 模型覆盖和双层目录校验；M8 固定工具不改变原 Thread、原 `threadId`/`turnId`、Runner/Relay 或模型选择边界。
+- 镜像内置 manifest 升级为正式 Runner `0.3.11` Release 的精确字节与 SHA-256，修复生产已配置 `0.3.11` 摘要但容器仍读取旧 `0.3.6` manifest 导致的 `installer_manifest_digest_mismatch`；不安装、不升级或重启现有 Runner。
+
+## 0.5.14
+
+- `/desktop` 现从既有 Mac Runner host 快照展示当前 Codex App 严格净化后的运行模型目录；默认“沿用原任务模型”，并标明 App 默认模型。
+- `continue` 与安全调整可选择目录内模型，模型进入请求 intent/body digest，Controller 入队前与 Runner 执行前分别校验；native same-Turn steer、非法模型、缺失能力和目录漂移全部 fail closed。
+- 模型覆盖只作用于同一 `thread_ref` 对应原 `threadId` 的新 Turn，不创建、复制或 fork Thread；最近命令 DTO 显示所选模型 ID，不公开 provider、endpoint、credential 或 reasoning 参数。
+- Relay 保持 `0.2.9`；配套 Runner `0.3.11` 增加 `model/list` 目录、`turnStartParams.model` 与立即终态新 Turn 启动收据。
 
 ## 0.5.13
 

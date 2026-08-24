@@ -4,6 +4,7 @@ import datetime as dt
 from http.client import HTTPConnection
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 import time
@@ -350,12 +351,76 @@ class DesktopStoreServiceTests(unittest.TestCase):
             "refreshed",
         )
         self.assertEqual(self.service.thread(THREAD_REF)["title"], "原桌面任务")
-        conflicting = snapshot(self.runner_id, revision=7, title="冲突快照")
-        with self.assertRaises(StoreError) as context:
-            self.service.receive("desktop_snapshot", conflicting)
-        self.assertEqual(context.exception.code, "desktop_revision_conflict")
+        availability = snapshot(self.runner_id)
+        availability["snapshot"]["status"] = "recovery_required"
+        availability["snapshot"]["control_state"] = "recovery_required"
+        availability["body_digest"] = body_digest(availability)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", availability)["status"],
+            "refreshed",
+        )
+        current = self.service.thread(THREAD_REF)
+        self.assertEqual(current["status"], "recovery_required")
+        self.assertEqual(current["control_state"], "recovery_required")
+
+        business_conflicts = {
+            "title": "冲突快照",
+            "preview": "不同公开摘要",
+            "turns": [{"turn_ref": TURN_REF, "status": "completed"}],
+            "active_turn_ref": None,
+            "history_incomplete": True,
+            "project_alias": "other-project",
+            "updated_at": (NOW + dt.timedelta(seconds=1)).isoformat(),
+        }
+        for field, value in business_conflicts.items():
+            with self.subTest(field=field):
+                conflicting = json.loads(json.dumps(availability))
+                conflicting["snapshot"][field] = value
+                conflicting["body_digest"] = body_digest(conflicting)
+                with self.assertRaises(StoreError) as context:
+                    self.service.receive("desktop_snapshot", conflicting)
+                self.assertEqual(context.exception.code, "desktop_revision_conflict")
         encoded = json.dumps(self.service.thread(THREAD_REF), ensure_ascii=False)
         self.assertNotIn(self.runner_id, encoded)
+
+    def test_same_revision_availability_refresh_handles_551_document_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sqlite3"
+            service = DesktopControllerService(
+                DesktopStore(path),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            statuses: list[str] = []
+            for index in range(551):
+                document = snapshot(self.runner_id)
+                if index % 2:
+                    document["snapshot"]["status"] = "recovery_required"
+                    document["snapshot"]["control_state"] = "recovery_required"
+                envelope_time = (NOW + dt.timedelta(milliseconds=index)).isoformat()
+                document["created_at"] = envelope_time
+                document["host"]["synced_at"] = envelope_time
+                document["body_digest"] = body_digest(document)
+                statuses.append(service.receive("desktop_snapshot", document)["status"])
+
+            self.assertEqual(statuses.count("stored"), 1)
+            self.assertEqual(statuses.count("refreshed"), 550)
+            with sqlite3.connect(path) as connection:
+                snapshot_count = connection.execute(
+                    "SELECT COUNT(*) FROM desktop_snapshots WHERE thread_ref=? AND thread_revision=?",
+                    (THREAD_REF, 7),
+                ).fetchone()[0]
+            self.assertEqual(snapshot_count, 1)
+
+    def test_same_revision_binding_drift_still_fails_closed(self) -> None:
+        conflicting = snapshot(self.runner_id)
+        conflicting["project_ref"] = "PJ-" + "Z" * 20
+        conflicting["snapshot"]["project_ref"] = conflicting["project_ref"]
+        conflicting["body_digest"] = body_digest(conflicting)
+        with self.assertRaises(StoreError) as context:
+            self.service.receive("desktop_snapshot", conflicting)
+        self.assertEqual(context.exception.code, "desktop_thread_binding_conflict")
 
     def test_event_cursor_duplicate_and_sequence_conflict(self) -> None:
         first = self.service.receive("desktop_event", event(self.runner_id))

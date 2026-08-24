@@ -20,6 +20,7 @@ SNAPSHOTS_PER_THREAD = 3
 EVENTS_PER_HOST = 5000
 MAX_COMMANDS = 5000
 MAX_RECEIPTS = 5000
+SAME_REVISION_AVAILABILITY_FIELDS = frozenset({"status", "control_state"})
 
 
 class DesktopStore:
@@ -77,7 +78,10 @@ class DesktopStore:
                 if revision < previous_revision:
                     return {"status": "stale_ignored", "thread": self._thread_row(connection, thread_ref)}
                 if revision == previous_revision and existing["snapshot_digest"] not in {None, digest}:
-                    if existing["snapshot_json"] == encoded_snapshot:
+                    if existing["snapshot_json"] == encoded_snapshot or _same_revision_availability_refresh(
+                        str(existing["snapshot_json"]),
+                        body,
+                    ):
                         semantic_refresh = True
                     else:
                         raise StoreError(
@@ -965,6 +969,23 @@ class DesktopStore:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+
+def _same_revision_availability_refresh(existing_json: str, incoming: Mapping[str, Any]) -> bool:
+    """Accept only derived availability changes when the App revision is unchanged."""
+
+    try:
+        existing = json.loads(existing_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(existing, dict):
+        return False
+    existing_business = dict(existing)
+    incoming_business = dict(incoming)
+    for field in SAME_REVISION_AVAILABILITY_FIELDS:
+        existing_business.pop(field, None)
+        incoming_business.pop(field, None)
+    return existing_business == incoming_business
 
 
 __all__ = [

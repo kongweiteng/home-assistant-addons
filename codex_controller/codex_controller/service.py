@@ -23,6 +23,12 @@ from .desktop_service import DesktopControllerService
 from .source_identity import runtime_source_identity
 from .store import ControllerStore, StoreError
 from .tool_proxy import ToolProxyError
+from .turn_retry import (
+    classify_turn_error,
+    item_observations,
+    retry_delay_seconds,
+    turn_observations,
+)
 
 
 NEW_THREAD_COMMANDS = frozenset({"打开新会话", "/new"})
@@ -500,7 +506,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.17",
+            "version": "0.5.19",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -570,12 +576,54 @@ class ControllerService:
     def handle_notification(self, message: dict[str, Any], *, allow_buffer: bool = True) -> None:
         method = message.get("method")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
-        if method == "item/completed":
+        if method == "error":
+            turn_id = params.get("turnId")
+            if isinstance(turn_id, str):
+                classification = classify_turn_error(params.get("error"))
+                handled = self.store.observe_turn_error(
+                    turn_id,
+                    error_type=classification.error_type,
+                    error_code=classification.error_code,
+                    upstream_http_status=classification.upstream_http_status,
+                    retryable=classification.retryable,
+                    will_retry=params.get("willRetry") is True,
+                )
+                if not handled and allow_buffer:
+                    self._buffer_event(turn_id, message)
+        elif method == "item/agentMessage/delta":
+            turn_id = params.get("turnId")
+            delta = params.get("delta")
+            if isinstance(turn_id, str) and isinstance(delta, str) and delta:
+                handled = self.store.observe_turn_activity(
+                    turn_id,
+                    output_observed=True,
+                    item_type="agentMessage",
+                )
+                if not handled and allow_buffer:
+                    self._buffer_event(turn_id, message)
+        elif method in {"item/started", "item/completed"}:
             item = params.get("item") if isinstance(params.get("item"), dict) else {}
             turn_id = params.get("turnId")
-            if isinstance(turn_id, str) and item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
-                handled = self.store.set_result_text(turn_id, item["text"], item_type="agentMessage")
-                if not handled and allow_buffer:
+            if isinstance(turn_id, str):
+                output, activity, artifact, item_type = item_observations(item)
+                handled = False
+                relevant = output or activity or artifact
+                if (
+                    method == "item/completed"
+                    and item.get("type") == "agentMessage"
+                    and isinstance(item.get("text"), str)
+                ):
+                    relevant = True
+                    handled = self.store.set_result_text(turn_id, item["text"], item_type="agentMessage")
+                if output or activity or artifact:
+                    handled = self.store.observe_turn_activity(
+                        turn_id,
+                        output_observed=output,
+                        tool_activity_observed=activity,
+                        artifact_observed=artifact,
+                        item_type=item_type,
+                    ) or handled
+                if relevant and not handled and allow_buffer:
                     self._buffer_event(turn_id, message)
         elif method == "turn/completed":
             turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
@@ -594,10 +642,27 @@ class ControllerService:
                 if self.turn_media is not None:
                     self.turn_media.cleanup_turn(turn_id)
                 error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
-                error_code = "turn_failed" if status == "failed" else None
-                if error.get("codexErrorInfo") == "contextWindowExceeded":
-                    error_code = "context_window_exceeded"
-                handled = self.store.complete_turn(turn_id, status, error_code=error_code)
+                classification = (
+                    classify_turn_error(error)
+                    if error and error.get("codexErrorInfo") is not None
+                    else None
+                )
+                output, activity, artifact = turn_observations(turn.get("items"))
+                attempt = self.store.turn_attempt(turn_id) or 1
+                handled = self.store.complete_turn(
+                    turn_id,
+                    status,
+                    error_code=None if classification is None else classification.error_code,
+                    error_type=None if classification is None else classification.error_type,
+                    upstream_http_status=(
+                        None if classification is None else classification.upstream_http_status
+                    ),
+                    retryable=None if classification is None else classification.retryable,
+                    retry_delay_seconds=retry_delay_seconds(attempt) if status == "failed" else None,
+                    output_observed=output,
+                    tool_activity_observed=activity,
+                    artifact_observed=artifact,
+                )
                 if not handled and allow_buffer:
                     self._buffer_event(turn_id, message)
         elif method == "account/updated":
@@ -814,8 +879,14 @@ class ControllerService:
             self.store.assign_turn(job["job_id"], turn_id)
             self._flush_turn_events(turn_id)
         except AppServerError as exc:
-            if exc.code == "app_server_overloaded" and exc.definitive and self.store.retry_overloaded(job["job_id"]):
-                time.sleep(min(2 ** max(job["attempt"], 1), 8))
+            if (
+                exc.code == "app_server_overloaded"
+                and exc.definitive
+                and self.store.retry_overloaded(
+                    job["job_id"],
+                    retry_delay_seconds=retry_delay_seconds(job["attempt"]),
+                )
+            ):
                 return
             self.store.fail_claimed(job["job_id"], exc.code, uncertain=not exc.definitive)
         except StoreError as exc:

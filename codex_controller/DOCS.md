@@ -1,6 +1,13 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.17`。
+当前版本：`0.5.19`。
+
+## 瞬态 Turn 安全重试
+
+- `0.5.19` 从正式运行 `0.5.17` 的精确源码重基，完整保留 M8 owner-only 备车、Desktop availability refresh、Runner `0.3.12` manifest、装修报价媒体意图和现有工具目录。
+- 只有 Codex `0.146.0` 明确分类为瞬态、当前尝试没有 agent 输出、工具/命令/文件/Web/子代理活动或 artifact，且总尝试少于 3 次时才持久延迟重排；其他错误明确终止或进入人工恢复。
+- 重排保留 Thread、清除旧 Turn ID，并使用带 `+08:00` 的 `retry_not_before`。SQLite 迁移只增加列；raw error、详情、URL、prompt 和 token 不落库、不进入普通日志或微信回复。
+- 回滚到 `0.5.17` 前必须关闭 intake，并确认不存在带 `retry_not_before` 的 queued 作业；回滚必须核对精确运行源码摘要，不能用旧 `0.5.14` 或已失效的 `0.5.18` 候选替代。
 
 ## M8 微信两阶段备车
 

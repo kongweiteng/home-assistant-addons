@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.19
+
+- 从正式运行 `0.5.17` 的精确源码和 Runner `0.3.12` manifest 形成重基候选，完整保留 M8 owner-only 备车、Desktop availability refresh、装修报价媒体意图和现有 53 个工具边界。
+- 按 Codex `0.146.0` 的 `codexErrorInfo` 分类 Turn 失败；只有明确瞬态、没有任何 agent 输出、工具/命令/文件/Web/子代理活动或 artifact，且总尝试少于 3 次时才持久延迟重排。
+- SQLite 以 additive 列保存错误分类、HTTP 状态、重试时间和副作用证据；raw message、`additionalDetails`、URL、prompt 和 token 不落库、不写普通日志、不进入微信回复。
+
 ## 0.5.17
 
 - 在 M8 `0.5.16` 的 Desktop availability refresh 与 owner-only 备车能力之上，同步内置 Runner `0.3.12` 四平台 manifest。

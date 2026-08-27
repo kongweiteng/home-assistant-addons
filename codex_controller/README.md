@@ -55,6 +55,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.5.9` 固定 Runner `0.3.5`，并让有效 active-task `busy` heartbeat 原子续期任务和 active lease。已运行任务只有在 Runner offline 且 lease 过期后才进入 `recovery_required`；默认 lease 为 600 秒，保持原 assignment/epoch、不自动转移，既有迟到结果和人工恢复边界不变。
 - `0.5.10` 将 `awaiting_confirmation` 明确视为已经接收结果的等待状态，不再参与离线 sweep；真正 recovery 会保持 task/Runner 关联。旧版本形成的孤立 recovery 仅在 task 仍属于该 Runner、Runner idle 且没有其他活动任务时允许审计式确认失败。
 - `0.5.14` 在既有 macOS Codex Desktop 原任务接管上增加当前 App 实时模型目录与同 Thread 新 Turn 模型覆盖：默认沿用原任务模型，仅允许 `continue` 和安全调整从净化目录选择模型，Controller 与 Runner 双层校验；native steer、非法/过期模型和目录漂移全部失败关闭。装修报价媒体意图、恢复期幂等与 Relay `0.2.9` 边界保持不变。
+- `0.5.18` 是从正式运行 `0.5.14` 精确源码基线形成的独立热修复，不包含未部署的 `0.5.15`～`0.5.17` 候选功能。它按 Codex `0.146.0` 的 `codexErrorInfo` 分类失败，只在明确瞬态、没有任何 agent 输出、工具/命令/文件活动或 artifact，且总尝试少于 3 次时持久延迟重排；其他失败继续明确终止或进入人工恢复核对。
+- 自动重排保留原 Thread，但会清除旧 Turn ID，并使用 `Asia/Shanghai` 的 `retry_not_before` 执行指数退避和 jitter。`clientUserMessageId` 仅保留来源消息关联，不被视为 app-server 幂等键；原始错误 message、`additionalDetails`、URL、prompt 和 token 不进入 SQLite、日志或 Gateway 回复。
 - Desktop 写控制仅对 enabled、online、macOS 且声明 `desktop_takeover_v1` 的既有 Runner 开放；Runner Center 全局关闭时 Desktop 状态和写 API 同时禁用。默认 steer 是 interrupt + 独立读回 + 同 Thread continue，native steer 仅作为显式竞态模式；archive capability 只有 Runner 配置固定非目标控制任务后才可发布。
 - `/api/status` 发布运行包实际 Python 源码的 `source_identity` SHA-256；部署和回滚必须核对版本与摘要，不能再以相同版本号替代源码身份。历史上两个不同源码的 `0.5.11` 候选已由 `0.5.12` 收敛。
 - 当前候选已完成 P1～P4 本地代码和自动化验证，并提供独立 `/desktop` Ingress 工作台；390×844 手机单栏与 1440×900 桌面三栏合成数据视觉/交互验收通过。正式 HAOS Controller-only 修复、真实 2 项目×2 Thread 和手机 E2E 仍未完成。
@@ -78,6 +80,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
 - 当前动态发布的内部 MCP 工具逐个使用 `approve`，因此微信路径不依赖 Codex UI 审批；这不是权限放宽。manifest 校验、`member_read_only` 固定 allowlist、逐工具策略、当前作业/Turn、稳定幂等键、Hub 单 writer 以及 Broker 的提案、Passkey、一次性收据、allowlist 和 execution gate 继续在服务端强制。
 - Controller 重启后，状态不确定的运行中作业进入 `recovery_required`，不会自动重放写操作。
+- `tool_invocations` 以 additive 字段关联当前 `job_id`/`turn_id`；任何 MCP、动态工具、命令、文件变更、Web 搜索、子代理或其他非纯推理 item 都会阻断自动重排，避免在失败边界重复外部副作用。
 - 写工具只在当前活动 Turn 的上下文中可调用；Turn 结束后上下文立即清除，同一微信消息的同语义调用复用相同幂等键，不同消息生成不同幂等键。
 
 ## 本地验证

@@ -35,6 +35,7 @@ from weixin_gateway.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
 from weixin_gateway.service import (
     ControllerClient,
     GatewayService,
+    controller_failure_message,
     split_text,
     validate_controller_ingress_base_url,
     with_thread_short,
@@ -94,6 +95,17 @@ class CompletedController(StubController):
     async def job(self, _job_id: str) -> dict:
         self.job_calls += 1
         return {"state": "completed", "result": "完成", "thread_short": "TH-ABCDEFGHIJ"}
+
+
+class FailedController(StubController):
+    configured = True
+
+    async def job(self, _job_id: str) -> dict:
+        return {
+            "state": "failed",
+            "error_code": "response_stream_disconnected",
+            "thread_short": "TH-ABCDEFGHIJ",
+        }
 
 
 class LegacySubmittingController(StubController):
@@ -219,7 +231,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.6"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.7"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -2120,6 +2132,44 @@ class ServiceTests(unittest.TestCase):
         reopened = GatewayStore(self.store.database_path, data_dir=self.root / "data")
         submitted = reopened.submitted()
         self.assertEqual(submitted[0]["controller_job_id"], "fixture-controller-job")
+
+    def test_controller_failure_mapping_is_specific_and_does_not_echo_internal_code(self) -> None:
+        self.assertIn(
+            "对话内容过长",
+            controller_failure_message("failed", "context_window_exceeded"),
+        )
+        self.assertIn(
+            "自动重试后仍未完成",
+            controller_failure_message("failed", "response_stream_disconnected"),
+        )
+        self.assertEqual(controller_failure_message("cancelled", "ignored"), "任务已取消。")
+
+        message = self.store.store_message(
+            message_id="fixture-controller-transient-failure",
+            sender_id="fixture-owner",
+            conversation_key="sha256:fixture",
+            text="查询",
+            media=[],
+        )
+        self.store.mark_submitted(message["message_id"], "fixture-controller-job")
+        service = self.service()
+        service.controller = FailedController()  # type: ignore[assignment]
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        sent_text = service.client.sent[0]["text"]  # type: ignore[union-attr]
+        self.assertIn("自动重试后仍未完成", sent_text)
+        self.assertNotIn("response_stream_disconnected", sent_text)
+        self.assertEqual(
+            self.store.get_message(message["message_id"])["error_code"],
+            "response_stream_disconnected",
+        )
 
     def test_session_expired_keeps_completed_result_pending_without_weixin_retry(self) -> None:
         message = self.store.store_message(

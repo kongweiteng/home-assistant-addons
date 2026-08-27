@@ -45,6 +45,7 @@ from codex_controller.tool_proxy import (
     _stream_gateway_to_hub,
     validate_base_url,
 )
+from codex_controller.turn_retry import classify_turn_error
 
 
 def fixture_job(message_id: str = "fixture-message-1", text: str = "查询装修支出") -> dict:
@@ -1351,7 +1352,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.14"
+        expected = "0.5.18"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -2652,6 +2653,312 @@ class ControllerServiceRaceTests(unittest.TestCase):
             with self.assertRaises(ToolProxyError) as context:
                 router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
             self.assertEqual(context.exception.code, "tool_context_unavailable")
+
+
+class ControllerTurnRetryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.store = ControllerStore(self.root / "controller.sqlite3")
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    @staticmethod
+    def service(store: ControllerStore) -> ControllerService:
+        class StubApp:
+            notification_handler = None
+
+        return ControllerService(
+            store,
+            StubApp(),  # type: ignore[arg-type]
+            intake_enabled=False,
+        )
+
+    def running_turn(self, message_id: str, turn_id: str) -> dict:
+        created = self.store.create_job(fixture_job(message_id))
+        running = self.store.claim_next()
+        assert running is not None
+        self.store.assign_thread(running["job_id"], "thread-" + message_id)
+        self.store.assign_turn(running["job_id"], turn_id)
+        return created
+
+    def test_codex_error_shapes_are_safely_classified(self) -> None:
+        cases = (
+            ({"codexErrorInfo": "contextWindowExceeded"}, ("context_window_exceeded", None, False)),
+            ({"codexErrorInfo": "serverOverloaded"}, ("server_overloaded", None, True)),
+            ({"codexErrorInfo": "unauthorized"}, ("unauthorized", None, False)),
+            (
+                {"codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 503}}},
+                ("response_stream_disconnected", 503, True),
+            ),
+            (
+                {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": 400}}},
+                ("http_connection_failed", 400, False),
+            ),
+            (
+                {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": None}}},
+                ("http_connection_failed", None, True),
+            ),
+        )
+        for error, expected in cases:
+            with self.subTest(error=error):
+                classification = classify_turn_error(error)
+                self.assertEqual(
+                    (classification.error_type, classification.upstream_http_status, classification.retryable),
+                    expected,
+                )
+
+    def test_app_server_internal_retry_does_not_trigger_outer_requeue(self) -> None:
+        created = self.running_turn("retry-internal-0001", "turn-retry-internal")
+        service = self.service(self.store)
+        raw_error = {
+            "message": "temporary upstream disconnect",
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 503}},
+            "additionalDetails": None,
+        }
+        service.handle_notification(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread-retry-internal-0001",
+                    "turnId": "turn-retry-internal",
+                    "error": raw_error,
+                    "willRetry": True,
+                },
+            }
+        )
+        running = self.store.get_job(created["job_id"])
+        self.assertEqual(running["state"], "running")
+        self.assertEqual(running["turn_id"], "turn-retry-internal")
+        self.assertTrue(running["retryable"])
+        self.assertIsNone(running["retry_not_before"])
+
+        service.handle_notification(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-retry-internal-0001",
+                    "turn": {
+                        "id": "turn-retry-internal",
+                        "status": "completed",
+                        "items": [],
+                        "error": None,
+                    },
+                },
+            }
+        )
+        completed = self.store.get_job(created["job_id"])
+        self.assertEqual(completed["state"], "completed")
+        self.assertEqual(completed["attempt"], 1)
+        self.assertFalse(completed["retryable"])
+        self.assertIsNone(completed["retry_not_before"])
+
+    def test_terminal_transient_failure_is_delayed_without_persisting_raw_error(self) -> None:
+        created = self.running_turn("retry-transient-0001", "turn-retry-transient")
+        service = self.service(self.store)
+        raw_error = {
+            "message": "RAW-SENSITIVE-PROMPT",
+            "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": 503}},
+            "additionalDetails": "RAW-SENSITIVE-DETAILS https://private.invalid/token",
+        }
+        service.handle_notification(
+            {
+                "method": "error",
+                "params": {
+                    "threadId": "thread-retry-transient-0001",
+                    "turnId": "turn-retry-transient",
+                    "error": raw_error,
+                    "willRetry": False,
+                },
+            }
+        )
+        service.handle_notification(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-retry-transient-0001",
+                    "turn": {
+                        "id": "turn-retry-transient",
+                        "status": "failed",
+                        "items": [],
+                        "error": raw_error,
+                    },
+                },
+            }
+        )
+        queued = self.store.get_job(created["job_id"])
+        self.assertEqual(queued["state"], "queued")
+        self.assertEqual(queued["error_type"], "response_stream_disconnected")
+        self.assertEqual(queued["error_code"], "response_stream_disconnected")
+        self.assertEqual(queued["upstream_http_status"], 503)
+        self.assertTrue(queued["retryable"])
+        self.assertIsNone(queued["turn_id"])
+        self.assertRegex(queued["retry_not_before"], r"\+08:00$")
+        self.assertIsNone(self.store.claim_next())
+        database_files = [self.store.database_path, self.store.database_path.with_name(self.store.database_path.name + "-wal")]
+        persisted = b"".join(path.read_bytes() for path in database_files if path.exists())
+        self.assertNotIn(b"RAW-SENSITIVE", persisted)
+        self.assertNotIn(b"private.invalid", persisted)
+
+    def test_retry_is_exhausted_after_three_total_attempts(self) -> None:
+        created = self.store.create_job(fixture_job("retry-attempt-limit"))
+        classification = classify_turn_error(
+            {"codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 503}}}
+        )
+        for attempt in range(1, 4):
+            running = self.store.claim_next()
+            assert running is not None
+            self.store.assign_thread(running["job_id"], "thread-attempt-limit")
+            turn_id = f"turn-attempt-{attempt}"
+            self.store.assign_turn(running["job_id"], turn_id)
+            self.store.complete_turn(
+                turn_id,
+                "failed",
+                error_code=classification.error_code,
+                error_type=classification.error_type,
+                upstream_http_status=classification.upstream_http_status,
+                retryable=classification.retryable,
+                retry_delay_seconds=0,
+            )
+            current = self.store.get_job(created["job_id"])
+            self.assertEqual(current["attempt"], attempt)
+            self.assertEqual(current["state"], "queued" if attempt < 3 else "failed")
+
+    def test_output_tool_and_artifact_evidence_each_block_automatic_retry(self) -> None:
+        classification = classify_turn_error(
+            {"codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}}}
+        )
+        for suffix, observation in (
+            ("output", {"output_observed": True}),
+            ("tool", {"tool_activity_observed": True}),
+            ("artifact", {"artifact_observed": True}),
+        ):
+            with self.subTest(evidence=suffix):
+                turn_id = "turn-evidence-" + suffix
+                created = self.running_turn("retry-evidence-" + suffix, turn_id)
+                self.store.observe_turn_activity(turn_id, item_type="commandExecution", **observation)
+                self.store.complete_turn(
+                    turn_id,
+                    "failed",
+                    error_code=classification.error_code,
+                    error_type=classification.error_type,
+                    retryable=True,
+                    retry_delay_seconds=0,
+                )
+                failed = self.store.get_job(created["job_id"])
+                self.assertEqual(failed["state"], "failed")
+
+    def test_agent_delta_and_command_start_are_retry_safety_evidence(self) -> None:
+        for suffix, notification in (
+            (
+                "delta",
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {"turnId": "turn-notification-delta", "itemId": "item-1", "delta": "开始处理"},
+                },
+            ),
+            (
+                "command",
+                {
+                    "method": "item/started",
+                    "params": {
+                        "turnId": "turn-notification-command",
+                        "item": {"type": "commandExecution", "id": "item-2", "command": "true"},
+                    },
+                },
+            ),
+        ):
+            with self.subTest(notification=suffix):
+                turn_id = "turn-notification-" + suffix
+                created = self.running_turn("retry-notification-" + suffix, turn_id)
+                service = self.service(self.store)
+                service.handle_notification(notification)
+                service.handle_notification(
+                    {
+                        "method": "turn/completed",
+                        "params": {
+                            "turn": {
+                                "id": turn_id,
+                                "status": "failed",
+                                "items": [],
+                                "error": {
+                                    "message": "redacted",
+                                    "codexErrorInfo": {"responseStreamDisconnected": {"httpStatusCode": None}},
+                                    "additionalDetails": None,
+                                },
+                            }
+                        },
+                    }
+                )
+                failed = self.store.get_job(created["job_id"])
+                self.assertEqual(failed["state"], "failed")
+                self.assertEqual(failed["output_observed"], suffix == "delta")
+                self.assertEqual(failed["tool_activity_observed"], suffix == "command")
+
+    def test_tool_invocation_is_linked_to_job_and_turn_and_blocks_retry(self) -> None:
+        created = self.running_turn("retry-tool-linkage", "turn-tool-linkage")
+        router = ToolRouter(
+            operations_base_url="http://ha-operations-broker:8098",
+            operations_token="o" * 32,
+            request_json=lambda *_args: {"version": 1, "result": {"ok": True}},
+            store=self.store,
+        )
+        router.begin_job(created["job_id"], "retry-tool-linkage")
+        router.bind_turn(created["job_id"], "turn-tool-linkage")
+        router.call("ha_operations_propose_restart", {"target": "local_renovation_hub"})
+        with self.store._connect() as connection:
+            invocation = connection.execute(
+                "SELECT job_id,turn_id FROM tool_invocations ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        self.assertEqual(dict(invocation), {"job_id": created["job_id"], "turn_id": "turn-tool-linkage"})
+        classification = classify_turn_error({"codexErrorInfo": "internalServerError"})
+        self.store.complete_turn(
+            "turn-tool-linkage",
+            "failed",
+            error_code=classification.error_code,
+            error_type=classification.error_type,
+            retryable=True,
+            retry_delay_seconds=0,
+        )
+        self.assertEqual(self.store.get_job(created["job_id"])["state"], "failed")
+
+    def test_additive_schema_migrates_controller_0514_tables(self) -> None:
+        legacy_path = self.root / "legacy.sqlite3"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE jobs (
+                    job_id TEXT PRIMARY KEY,message_id TEXT NOT NULL UNIQUE,conversation_key TEXT NOT NULL,
+                    thread_id TEXT,turn_id TEXT UNIQUE,state TEXT NOT NULL,input_digest TEXT NOT NULL,
+                    input_json TEXT NOT NULL,result_text TEXT,result_summary TEXT,error_code TEXT,
+                    attempt INTEGER NOT NULL DEFAULT 0,capability_profile TEXT NOT NULL DEFAULT 'owner_legacy',
+                    created_at TEXT NOT NULL,started_at TEXT,finished_at TEXT
+                );
+                CREATE TABLE tool_invocations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,tool_name TEXT NOT NULL,outcome TEXT NOT NULL,
+                    error_code TEXT,duration_ms INTEGER NOT NULL,created_at TEXT NOT NULL
+                );
+                """
+            )
+        migrated = ControllerStore(legacy_path)
+        with migrated._connect() as connection:
+            job_columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
+            invocation_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(tool_invocations)")
+            }
+        self.assertTrue(
+            {
+                "error_type",
+                "upstream_http_status",
+                "retryable",
+                "output_observed",
+                "tool_activity_observed",
+                "artifact_observed",
+                "retry_not_before",
+            }.issubset(job_columns)
+        )
+        self.assertTrue({"job_id", "turn_id"}.issubset(invocation_columns))
 
 
 if __name__ == "__main__":

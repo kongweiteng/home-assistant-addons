@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.5.18
+
+- 从正式运行 Controller `0.5.14` 精确源码基线形成独立热修复；版本号避开已占用但未部署的 `0.5.15`～`0.5.17`，不包含其功能。
+- 按 Codex `0.146.0` v2 `codexErrorInfo` 的字符串与对象变体分类 context、额度、认证、请求、连接、响应流、内部服务、sandbox 和其他错误，只持久化有界错误类型、HTTP 状态、重试标志与内部错误码。
+- 明确瞬态且没有 agent 输出、MCP/动态工具/命令/文件活动或 artifact 时，最多执行 3 次总尝试；重排清除旧 Turn ID、保留 Thread，并通过 `Asia/Shanghai` `retry_not_before`、指数退避和 jitter 由 scheduler 延迟领取，不在通知 reader 中等待。
+- `tool_invocations` additive 关联 `job_id`/`turn_id`，Turn item 与 artifact 形成持久安全证据。原始 error message、`additionalDetails`、URL、prompt、token 和任务正文不会进入错误审计。
+- `clientUserMessageId` 继续只作来源消息关联，不作为 `turn/start` 幂等或重复执行保护。
+
 ## 0.5.14
 
 - `/desktop` 现从既有 Mac Runner host 快照展示当前 Codex App 严格净化后的运行模型目录；默认“沿用原任务模型”，并标明 App 默认模型。

@@ -504,6 +504,8 @@ class ToolRouter:
         started = time.monotonic()
         outcome = "failed"
         error_code: str | None = None
+        with self._context_lock:
+            invocation_context = None if self._active_context is None else dict(self._active_context)
         try:
             definition = self._authorize_tool(name)
             if name == "ledger_generate_chart":
@@ -534,6 +536,8 @@ class ToolRouter:
                         outcome=outcome,
                         error_code=error_code,
                         duration_ms=int((time.monotonic() - started) * 1000),
+                        job_id=None if invocation_context is None else invocation_context.get("job_id"),
+                        turn_id=None if invocation_context is None else invocation_context.get("turn_id") or None,
                     )
                 except (StoreError, sqlite3.DatabaseError, OSError):
                     pass

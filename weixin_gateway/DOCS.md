@@ -1,6 +1,8 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.6`。
+当前版本：`0.4.7`。
+
+`0.4.7` 将 Controller 最终错误码映射为有界中文提示：context/预算/额度要求缩短内容、新开会话或检查额度；认证失效要求重新登录；bad request、cyber policy 与 sandbox 不自动重试；连接、响应流、连续失败和内部服务器错误只在 Controller 最多 3 次总尝试耗尽后提示稍后再试。Gateway 不读取或发送 app-server raw message、`additionalDetails`、URL、prompt 或 token。
 
 ## 配置
 
@@ -206,6 +208,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 从 `0.4.4` 回退到 `0.4.3` 前先确认 Runner Manager v2 的 active 跟踪为 0，或明确接受旧版本暂时不再自动查询这些 task。`0.4.3` 会忽略 additive `runner_manager_v2_watches` 表，不会删除记录；恢复 `0.4.4` 后可继续跟踪。回退不会影响 Poller、多身份、普通聊天、通知、附件、Remote Work v1、Controller、Relay 或 Runner。
 
 从 `0.4.5` 回退到 `0.4.4` 不涉及数据库降级；旧版本会继续读取同一 Runner watch，但会重新把陈旧上下文 `-2 + unknown error` 当作普通限流并高频重试。回退前应确认 active 跟踪为 0，或先恢复当前用户的有效上下文，避免重新触发该缺陷。
+
+从 `0.4.7` 回退到 `0.4.6` 不涉及数据库降级；旧版本仍会接收 Controller 的有界 `error_code`，但会重新发送统一失败提示。回退不影响 Poller、身份、上下文、消息、artifact、Runner Manager 或通知台账。
 
 从 `0.4.6` 回退到 `0.4.5` 不涉及数据库降级；旧版本仍能读取现有 watch 和出站分块，但首次立即回复与后台 watch 会重新使用不同发送键。回退前应确认没有新启动的 active Runner task，避免重新出现 `dispatched` 并发重复通知。
 

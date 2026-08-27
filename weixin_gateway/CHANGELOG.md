@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.4.7
+
+- 将 Controller context、预算/额度、认证、bad request、cyber policy、sandbox 和瞬态上游错误码映射为简洁中文失败提示。
+- 瞬态提示只在 Controller 自动重试耗尽后发送；Gateway 不接收或回显 app-server raw message、`additionalDetails`、URL、prompt 或 token。
+
 ## 0.4.6
 
 - 修复 Runner Manager v2 首次 `dispatched` 回复与后台 watch 同时发送时的竞态：同一 watch 代次现在按 `task_id + 安全结果指纹 + source_message_id` 复用同一持久出站作业和 iLink client ID。

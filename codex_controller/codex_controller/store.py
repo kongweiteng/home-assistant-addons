@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 from typing import Any
 import uuid
+from zoneinfo import ZoneInfo
 
 from .tool_catalog import (
     BOOTSTRAP_HUB_DEFINITIONS,
@@ -41,10 +42,19 @@ DEFAULT_ARTIFACT_TTL_SECONDS = 86400
 DEFAULT_MAX_ARTIFACT_BYTES = 20 * 1024 * 1024
 DEFAULT_ARTIFACT_QUOTA_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_ARTIFACTS_PER_JOB = 4
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def shanghai_now() -> str:
+    return datetime.now(SHANGHAI).isoformat()
+
+
+def shanghai_after(seconds: float) -> str:
+    return (datetime.now(SHANGHAI) + timedelta(seconds=max(0.0, float(seconds)))).isoformat()
 
 
 def canonical_json(value: Any) -> str:
@@ -129,6 +139,13 @@ class ControllerStore:
                     result_text TEXT,
                     result_summary TEXT,
                     error_code TEXT,
+                    error_type TEXT,
+                    upstream_http_status INTEGER,
+                    retryable INTEGER NOT NULL DEFAULT 0 CHECK(retryable IN (0,1)),
+                    output_observed INTEGER NOT NULL DEFAULT 0 CHECK(output_observed IN (0,1)),
+                    tool_activity_observed INTEGER NOT NULL DEFAULT 0 CHECK(tool_activity_observed IN (0,1)),
+                    artifact_observed INTEGER NOT NULL DEFAULT 0 CHECK(artifact_observed IN (0,1)),
+                    retry_not_before TEXT,
                     attempt INTEGER NOT NULL DEFAULT 0,
                     capability_profile TEXT NOT NULL DEFAULT 'owner_legacy'
                         CHECK(capability_profile IN ('owner_legacy','owner','member_read_only')),
@@ -192,6 +209,8 @@ class ControllerStore:
                 );
                 CREATE TABLE IF NOT EXISTS tool_invocations (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT,
+                    turn_id TEXT,
                     tool_name TEXT NOT NULL,
                     outcome TEXT NOT NULL CHECK(outcome IN ('succeeded','rejected','failed')),
                     error_code TEXT,
@@ -232,6 +251,29 @@ class ControllerStore:
                 )
             if "result_summary" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN result_summary TEXT")
+            job_additions = {
+                "error_type": "TEXT",
+                "upstream_http_status": "INTEGER",
+                "retryable": "INTEGER NOT NULL DEFAULT 0",
+                "output_observed": "INTEGER NOT NULL DEFAULT 0",
+                "tool_activity_observed": "INTEGER NOT NULL DEFAULT 0",
+                "artifact_observed": "INTEGER NOT NULL DEFAULT 0",
+                "retry_not_before": "TEXT",
+            }
+            for name, declaration in job_additions.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            invocation_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(tool_invocations)")
+            }
+            if "job_id" not in invocation_columns:
+                connection.execute("ALTER TABLE tool_invocations ADD COLUMN job_id TEXT")
+            if "turn_id" not in invocation_columns:
+                connection.execute("ALTER TABLE tool_invocations ADD COLUMN turn_id TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS tool_invocations_job_turn_idx "
+                "ON tool_invocations(job_id, turn_id, created_at DESC, id DESC)"
+            )
             now = utc_now()
             if "controller_meta" not in existing_tables:
                 connection.execute(
@@ -371,9 +413,15 @@ class ControllerStore:
             row = connection.execute("SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at, job_id LIMIT 1").fetchone()
             if row is None:
                 return None
+            retry_not_before = row["retry_not_before"]
+            if isinstance(retry_not_before, str) and retry_not_before > shanghai_now():
+                return None
             now = utc_now()
             connection.execute(
-                "UPDATE jobs SET state='running', started_at=?, attempt=attempt+1, error_code=NULL WHERE job_id=? AND state='queued'",
+                "UPDATE jobs SET state='running',started_at=?,finished_at=NULL,attempt=attempt+1,"
+                "error_code=NULL,error_type=NULL,upstream_http_status=NULL,retryable=0,"
+                "output_observed=0,tool_activity_observed=0,artifact_observed=0,retry_not_before=NULL "
+                "WHERE job_id=? AND state='queued'",
                 (now, row["job_id"]),
             )
             self._event(connection, row["job_id"], "dispatching")
@@ -464,6 +512,14 @@ class ControllerStore:
             ).fetchone()
             return None if row is None else row["thread_id"]
 
+    def turn_attempt(self, turn_id: str) -> int | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT attempt FROM jobs WHERE turn_id=? AND state='running'",
+                (turn_id,),
+            ).fetchone()
+            return None if row is None else int(row["attempt"])
+
     def assign_turn(self, job_id: str, turn_id: str) -> None:
         if not turn_id:
             raise StoreError("turn_state_unknown", "Turn ID 为空", status=502)
@@ -484,22 +540,184 @@ class ControllerStore:
             row = connection.execute("SELECT job_id FROM jobs WHERE turn_id=? AND state='running'", (turn_id,)).fetchone()
             if row is None:
                 return False
-            connection.execute("UPDATE jobs SET result_text=? WHERE job_id=?", (bounded, row["job_id"]))
+            connection.execute(
+                "UPDATE jobs SET result_text=?,output_observed=1 WHERE job_id=?",
+                (bounded, row["job_id"]),
+            )
             self._event(connection, row["job_id"], "item_completed", item_type=item_type, content_length=len(text))
             return True
 
-    def complete_turn(self, turn_id: str, turn_status: str, *, error_code: str | None = None) -> bool:
-        state = "completed" if turn_status == "completed" else "cancelled" if turn_status == "interrupted" else "failed"
+    def observe_turn_activity(
+        self,
+        turn_id: str,
+        *,
+        output_observed: bool = False,
+        tool_activity_observed: bool = False,
+        artifact_observed: bool = False,
+        item_type: str | None = None,
+    ) -> bool:
+        safe_item_type = item_type if isinstance(item_type, str) and re.fullmatch(r"[A-Za-z0-9_]{1,64}", item_type) else None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT job_id FROM jobs WHERE turn_id=? AND state='running'", (turn_id,)).fetchone()
+            row = connection.execute(
+                "SELECT job_id,output_observed,tool_activity_observed,artifact_observed "
+                "FROM jobs WHERE turn_id=? AND state='running'",
+                (turn_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            next_output = bool(row["output_observed"]) or bool(output_observed)
+            next_tool = bool(row["tool_activity_observed"]) or bool(tool_activity_observed)
+            next_artifact = bool(row["artifact_observed"]) or bool(artifact_observed)
+            changed = (
+                next_output != bool(row["output_observed"])
+                or next_tool != bool(row["tool_activity_observed"])
+                or next_artifact != bool(row["artifact_observed"])
+            )
+            connection.execute(
+                "UPDATE jobs SET output_observed=?,tool_activity_observed=?,artifact_observed=? WHERE job_id=?",
+                (int(next_output), int(next_tool), int(next_artifact), row["job_id"]),
+            )
+            if changed:
+                self._event(connection, row["job_id"], "turn_activity_observed", item_type=safe_item_type)
+            return True
+
+    def observe_turn_error(
+        self,
+        turn_id: str,
+        *,
+        error_type: str,
+        error_code: str,
+        upstream_http_status: int | None,
+        retryable: bool,
+        will_retry: bool,
+    ) -> bool:
+        safe_type = error_type if re.fullmatch(r"[a-z0-9_]{1,64}", error_type) else "unknown"
+        safe_code = error_code if re.fullmatch(r"[a-z0-9_]{1,64}", error_code) else "turn_failed"
+        safe_status = (
+            upstream_http_status
+            if isinstance(upstream_http_status, int)
+            and not isinstance(upstream_http_status, bool)
+            and 100 <= upstream_http_status <= 599
+            else None
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT job_id FROM jobs WHERE turn_id=? AND state='running'",
+                (turn_id,),
+            ).fetchone()
             if row is None:
                 return False
             connection.execute(
-                "UPDATE jobs SET state=?,error_code=?,finished_at=? WHERE job_id=?",
-                (state, error_code, utc_now(), row["job_id"]),
+                "UPDATE jobs SET error_type=?,error_code=?,upstream_http_status=?,retryable=? WHERE job_id=?",
+                (safe_type, safe_code, safe_status, int(bool(retryable)), row["job_id"]),
             )
-            self._event(connection, row["job_id"], state, error_code=error_code)
+            self._event(
+                connection,
+                row["job_id"],
+                "turn_error_retrying" if will_retry else "turn_error_terminal",
+                item_type=safe_type,
+                error_code=safe_code,
+            )
+            return True
+
+    def complete_turn(
+        self,
+        turn_id: str,
+        turn_status: str,
+        *,
+        error_code: str | None = None,
+        error_type: str | None = None,
+        upstream_http_status: int | None = None,
+        retryable: bool | None = None,
+        retry_delay_seconds: float | None = None,
+        max_attempts: int = 3,
+        output_observed: bool = False,
+        tool_activity_observed: bool = False,
+        artifact_observed: bool = False,
+    ) -> bool:
+        state = "completed" if turn_status == "completed" else "cancelled" if turn_status == "interrupted" else "failed"
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE turn_id=? AND state='running'", (turn_id,)).fetchone()
+            if row is None:
+                return False
+            safe_type = (
+                error_type
+                if isinstance(error_type, str) and re.fullmatch(r"[a-z0-9_]{1,64}", error_type)
+                else row["error_type"] or "unknown"
+            )
+            safe_code = (
+                error_code
+                if isinstance(error_code, str) and re.fullmatch(r"[a-z0-9_]{1,64}", error_code)
+                else row["error_code"] or ("turn_failed" if state == "failed" else None)
+            )
+            safe_status = (
+                upstream_http_status
+                if isinstance(upstream_http_status, int)
+                and not isinstance(upstream_http_status, bool)
+                and 100 <= upstream_http_status <= 599
+                else row["upstream_http_status"]
+            )
+            effective_retryable = bool(row["retryable"]) if retryable is None else bool(retryable)
+            effective_output = bool(row["output_observed"]) or bool(output_observed)
+            effective_tool = bool(row["tool_activity_observed"]) or bool(tool_activity_observed)
+            effective_artifact = bool(row["artifact_observed"]) or bool(artifact_observed)
+            has_artifact = connection.execute(
+                "SELECT 1 FROM job_artifacts WHERE job_id=? LIMIT 1",
+                (row["job_id"],),
+            ).fetchone() is not None
+            can_retry = bool(
+                state == "failed"
+                and retry_delay_seconds is not None
+                and effective_retryable
+                and row["attempt"] < max(1, int(max_attempts))
+                and not effective_output
+                and not effective_tool
+                and not effective_artifact
+                and not has_artifact
+            )
+            if can_retry:
+                connection.execute(
+                    "UPDATE jobs SET state='queued',turn_id=NULL,started_at=NULL,finished_at=NULL,"
+                    "result_text=NULL,result_summary=NULL,error_code=?,error_type=?,upstream_http_status=?,"
+                    "retryable=1,output_observed=0,tool_activity_observed=0,artifact_observed=0,"
+                    "retry_not_before=? WHERE job_id=?",
+                    (
+                        safe_code,
+                        safe_type,
+                        safe_status,
+                        shanghai_after(float(retry_delay_seconds)),
+                        row["job_id"],
+                    ),
+                )
+                self._event(
+                    connection,
+                    row["job_id"],
+                    "requeued",
+                    item_type=safe_type,
+                    error_code=safe_code,
+                )
+                return True
+            connection.execute(
+                "UPDATE jobs SET state=?,error_code=?,error_type=?,upstream_http_status=?,retryable=?,"
+                "output_observed=?,tool_activity_observed=?,artifact_observed=?,retry_not_before=NULL,finished_at=? "
+                "WHERE job_id=?",
+                (
+                    state,
+                    safe_code if state == "failed" else error_code,
+                    safe_type if state == "failed" else None,
+                    safe_status if state == "failed" else None,
+                    int(effective_retryable) if state == "failed" else 0,
+                    int(effective_output),
+                    int(effective_tool),
+                    int(effective_artifact or has_artifact),
+                    utc_now(),
+                    row["job_id"],
+                ),
+            )
+            self._event(connection, row["job_id"], state, item_type=safe_type if state == "failed" else None, error_code=safe_code if state == "failed" else error_code)
             return True
 
     def capture_chart_artifact(
@@ -573,7 +791,10 @@ class ControllerStore:
                     (job_id, actual_digest),
                 ).fetchone()
                 if existing is not None:
-                    connection.execute("UPDATE jobs SET result_summary=? WHERE job_id=?", (result_summary, job_id))
+                    connection.execute(
+                        "UPDATE jobs SET result_summary=?,artifact_observed=1 WHERE job_id=?",
+                        (result_summary, job_id),
+                    )
                     return self._artifact_public_document(connection, existing)
                 artifact_count = connection.execute(
                     "SELECT COUNT(*) FROM job_artifacts WHERE job_id=?",
@@ -606,7 +827,10 @@ class ControllerStore:
                         now,
                     ),
                 )
-                connection.execute("UPDATE jobs SET result_summary=? WHERE job_id=?", (result_summary, job_id))
+                connection.execute(
+                    "UPDATE jobs SET result_summary=?,artifact_observed=1 WHERE job_id=?",
+                    (result_summary, job_id),
+                )
                 row = connection.execute("SELECT * FROM job_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
                 self._event(connection, job_id, "artifact_captured", item_type="image", content_length=size_bytes)
                 return self._artifact_public_document(connection, row)
@@ -681,14 +905,31 @@ class ControllerStore:
             )
             self._event(connection, job_id, state, error_code=error_code)
 
-    def retry_overloaded(self, job_id: str, *, max_attempts: int = 3) -> bool:
+    def retry_overloaded(
+        self,
+        job_id: str,
+        *,
+        max_attempts: int = 3,
+        retry_delay_seconds: float = 0.0,
+    ) -> bool:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT attempt FROM jobs WHERE job_id=? AND state='running'", (job_id,)).fetchone()
             if row is None or row["attempt"] >= max_attempts:
                 return False
-            connection.execute("UPDATE jobs SET state='queued',started_at=NULL,error_code='app_server_overloaded' WHERE job_id=?", (job_id,))
-            self._event(connection, job_id, "requeued", error_code="app_server_overloaded")
+            connection.execute(
+                "UPDATE jobs SET state='queued',turn_id=NULL,started_at=NULL,finished_at=NULL,"
+                "error_code='app_server_overloaded',error_type='server_overloaded',retryable=1,"
+                "retry_not_before=? WHERE job_id=?",
+                (shanghai_after(retry_delay_seconds), job_id),
+            )
+            self._event(
+                connection,
+                job_id,
+                "requeued",
+                item_type="server_overloaded",
+                error_code="app_server_overloaded",
+            )
             return True
 
     def recover_running(self) -> int:
@@ -1089,6 +1330,8 @@ class ControllerStore:
         outcome: str,
         error_code: str | None,
         duration_ms: int,
+        job_id: str | None = None,
+        turn_id: str | None = None,
     ) -> None:
         try:
             known_names = set(self.historical_tool_names())
@@ -1102,9 +1345,23 @@ class ControllerStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "INSERT INTO tool_invocations(tool_name,outcome,error_code,duration_ms,created_at) VALUES (?,?,?,?,?)",
-                (tool_name, outcome, bounded_error, max(0, min(int(duration_ms), 86_400_000)), utc_now()),
+                "INSERT INTO tool_invocations(job_id,turn_id,tool_name,outcome,error_code,duration_ms,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    job_id,
+                    turn_id,
+                    tool_name,
+                    outcome,
+                    bounded_error,
+                    max(0, min(int(duration_ms), 86_400_000)),
+                    utc_now(),
+                ),
             )
+            if isinstance(job_id, str) and job_id:
+                connection.execute(
+                    "UPDATE jobs SET tool_activity_observed=1 WHERE job_id=? AND state='running'",
+                    (job_id,),
+                )
             connection.execute(
                 "DELETE FROM tool_invocations WHERE id NOT IN (SELECT id FROM tool_invocations ORDER BY id DESC LIMIT 1000)"
             )
@@ -1217,6 +1474,13 @@ class ControllerStore:
             "result": row["result_text"],
             "result_summary": row["result_summary"],
             "error_code": row["error_code"],
+            "error_type": row["error_type"],
+            "upstream_http_status": row["upstream_http_status"],
+            "retryable": bool(row["retryable"]),
+            "output_observed": bool(row["output_observed"]),
+            "tool_activity_observed": bool(row["tool_activity_observed"]),
+            "artifact_observed": bool(row["artifact_observed"]),
+            "retry_not_before": row["retry_not_before"],
             "attempt": row["attempt"],
             "capability_profile": row["capability_profile"],
             "created_at": row["created_at"],

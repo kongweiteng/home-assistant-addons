@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.14`。
+当前版本：`0.5.18`。
 
 ## Codex Desktop 原任务接管
 
@@ -14,6 +14,15 @@
 - `continue` 只允许 idle/notLoaded/failed 且无 active Turn 的原 Thread；`archive` 只允许 idle，`unarchive` 只允许 archived。Runner 未配置固定非目标 archive 控制任务时不声明 `archive_control_v1`，Controller 因此直接拒绝 archive/unarchive。
 - 事件接口使用 `after_cursor` 恢复，最多等待 25 秒；事件对应的精确 revision 快照必须先入库。断线、超时或发布结果未知时只允许重新读取和对账，不自动重放控制。
 - 页面不使用 `localStorage`/`sessionStorage`，不接收原始 `thread_id`/`turn_id` 或原始 UUID；时间统一显示 `Asia/Shanghai`。390×844 与 1440×900 合成数据浏览器验收无水平溢出，native steer 竞态、recovery/protocol degraded、缺失 archive capability 和弱网重连均保持可见或 fail closed。
+
+## Turn 瞬态失败与自动重排
+
+- `0.5.18` 从正式运行 `0.5.14` 的精确源码基线形成，版本跳过仅用于避开已被其他未部署候选占用的 `0.5.15`～`0.5.17`，不表示包含这些候选功能。
+- Controller 监听 Codex `0.146.0` 的 `error`、`item/agentMessage/delta`、`item/started`、`item/completed` 和 `turn/completed`。只保存有界 `error_type`、上游 HTTP 状态、`retryable` 与内部错误码；不保存 raw message、`additionalDetails`、URL、prompt、token 或任务正文副本。
+- 可自动重排的瞬态类别限定为服务过载、HTTP 连接失败（无状态码或 `408/429/5xx`）、响应流连接/断开、响应连续失败和内部服务器错误。认证、bad request、context window、会话预算、usage limit、cyber policy、sandbox、rollback、不可 steer、unknown/other 都不自动重排。
+- 自动重排必须同时满足：没有 agent delta 或最终输出、没有 MCP/动态工具/命令/文件变更/Web 搜索/子代理等活动、没有 artifact，并且当前总尝试数小于 3。任一证据存在即终止自动重排；Controller 重启时仍将不确定的 running Turn 置为 `recovery_required`。
+- 重排保留原 Thread 映射，清除旧 `turn_id`，持久化 `retry_not_before`，按 2 秒、4 秒级指数退避叠加小幅 jitter 后由 scheduler 再次领取；app-server reader 不等待或 sleep。`clientUserMessageId` 只用于关联原微信消息，不提供 `turn/start` 去重。
+- `tool_invocations` additive 增加 `job_id` 与 `turn_id`。旧 SQLite 会自动补列；回退到 `0.5.14` 时旧版本忽略这些新增列，不删除作业、Thread、artifact 或调用审计。
 
 ## 运行源码身份
 
@@ -191,6 +200,8 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 镜像构建直接下载 npm 官方注册表中的 Linux 平台包，并使用锁文件对应的 SHA-512 校验；运行镜像只包含原生 Codex 二进制，不安装 Node 或 npm。升级版本时必须同步更新 `package.json`、`package-lock.json`、Dockerfile 中两个 Linux 平台摘要和真实 app-server smoke 基线。
 
 ## 回滚
+
+从 `0.5.18` 回滚到 `0.5.14` 前必须停止 intake，并确认没有处于 `queued` 且带 `retry_not_before` 的自动重排作业。旧版本会忽略 additive 错误分类、活动证据、重排时间和工具关联字段，但不会删除它们；应先将待重排作业完成或按人工恢复流程核对，避免旧版本立即领取。回滚必须恢复升级前精确 `0.5.14` 源码摘要，不能使用未部署的 `0.5.15`～`0.5.17` 候选替代。
 
 1. 关闭新作业入口并记录活动作业、队列和 `recovery_required`。
 2. 停止 Controller，保留 `/data/controller.sqlite3` 与 `/data/codex-home` 冷备份。

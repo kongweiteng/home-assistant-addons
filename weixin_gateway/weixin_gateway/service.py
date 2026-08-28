@@ -63,6 +63,35 @@ TYPING_TICKET_TTL_SECONDS = 23 * 60 * 60
 POLLER_MAINTENANCE_MIN_SECONDS = 30
 POLLER_MAINTENANCE_MAX_SECONDS = 30 * 60
 RUNNER_MANAGER_V2_TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "expired"})
+CONTROLLER_FAILURE_MESSAGES = {
+    "context_window_exceeded": "这次对话内容过长，已停止处理。请新开一个对话或缩短问题后重试。",
+    "session_budget_exceeded": "Codex 当前会话预算已用完，任务未完成。请新开一个对话后再试。",
+    "usage_limit_exceeded": "Codex 当前使用额度受限，任务未完成。请稍后再试或检查账户额度。",
+    "codex_unauthorized": "Codex 登录已失效，任务未执行完成。请在 Controller 页面重新登录后再试。",
+    "codex_bad_request": "本次请求不受支持，且未自动重试。请调整问题后再试。",
+    "cyber_policy_rejected": "该请求未通过安全策略，未执行。",
+    "sandbox_error": "任务受运行环境限制未完成，请调整请求或在 Controller 页面核对。",
+    "thread_rollback_failed": "Codex 会话恢复失败，任务未完成。请新开一个对话后再试。",
+    "active_turn_not_steerable": "当前 Codex 任务状态不允许继续处理，请等待现有任务结束后再试。",
+    "app_server_overloaded": "上游服务暂时不稳定，自动重试后仍未完成。请稍后再试。",
+    "upstream_http_connection_failed": "上游连接暂时不稳定，自动重试后仍未完成。请稍后再试。",
+    "response_stream_connection_failed": "上游响应连接中断，自动重试后仍未完成。请稍后再试。",
+    "response_stream_disconnected": "上游响应流中断，自动重试后仍未完成。请稍后再试。",
+    "response_too_many_failed_attempts": "上游连续失败，自动重试后仍未完成。请稍后再试。",
+    "upstream_internal_server_error": "上游服务发生内部错误，自动重试后仍未完成。请稍后再试。",
+}
+
+
+def controller_failure_message(state: str, error_code: Any) -> str:
+    if state == "recovery_required":
+        return "任务状态需要人工核对，请在 Codex Controller 页面查看。"
+    if state == "cancelled":
+        return "任务已取消。"
+    if isinstance(error_code, str):
+        mapped = CONTROLLER_FAILURE_MESSAGES.get(error_code)
+        if mapped is not None:
+            return mapped
+    return "任务未完成，请在 Codex Controller 页面查看错误状态。"
 
 
 def validate_controller_url(value: str) -> str:
@@ -1264,7 +1293,11 @@ class GatewayService:
             "controller_job_id": self._runner_manager_v2_controller_job_id(
                 result.task_id,
                 notification_key,
-                seed=f"{result.operation}:{message['message_id']}",
+                seed=(
+                    f"status:{message['message_id']}"
+                    if command.operation == "status"
+                    else f"watch:{message['message_id']}"
+                ),
             ),
         }
         suppression = await self._send_result(outbound, text)
@@ -1607,7 +1640,7 @@ class GatewayService:
                                     continue
                                 self.store.mark_finished(message["message_id"], success=True)
                             elif job["state"] in {"failed", "cancelled", "recovery_required"}:
-                                text = "任务状态需要人工核对，请在 Codex Controller 页面查看。" if job["state"] == "recovery_required" else "任务未完成，请在 Codex Controller 页面查看错误状态。"
+                                text = controller_failure_message(job["state"], job.get("error_code"))
                                 outbound = dict(message)
                                 outbound["thread_short"] = job.get("thread_short")
                                 try:
@@ -1684,7 +1717,7 @@ class GatewayService:
                 "controller_job_id": self._runner_manager_v2_controller_job_id(
                     task_id,
                     notification_key,
-                    seed="automatic-status",
+                    seed=f"watch:{watch['source_message_id']}",
                 ),
             }
             try:
@@ -2735,7 +2768,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.5",
+            "version": "0.4.7",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

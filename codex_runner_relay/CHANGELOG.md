@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.12
+
+- 安装 renderer 新增 Runner `0.3.13` 的精确滚动兼容，用于已审计 Codex App `26.818.41509` / bundled CLI `0.149.0-alpha.4.1` profile；既有 `0.3.6/0.3.11/0.3.12` 回滚入口保持。
+- WSS、Desktop stale ACK、Controller 拒绝失败关闭、双 Token、IPv4 客户端、ticket/enrollment 不落盘、Registry/lease 所有权和网络边界不变。
+
 ## 0.2.11
 
 - 安装 renderer 与 Controller `0.5.16` 的内置目录同步到 Runner `0.3.12`，并保留 `0.3.6/0.3.11` 的精确滚动兼容，使 Relay 可先升级、Runner 再原位升级。

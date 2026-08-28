@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.13
+
+- 安装 renderer 新增 Runner `0.3.14` 的精确滚动兼容，用于修复 Runner、Desktop refs 与 executor SQLite 连接未及时关闭导致的文件描述符耗尽和 LaunchAgent 自重启；既有 `0.3.6/0.3.11/0.3.12/0.3.13` 回滚入口保持。
+- WSS、Desktop stale ACK、Controller 拒绝失败关闭、双 Token、IPv4 客户端、ticket/enrollment 不落盘、Registry/lease 所有权和网络边界不变。
+
 ## 0.2.12
 
 - 安装 renderer 新增 Runner `0.3.13` 的精确滚动兼容，用于已审计 Codex App `26.818.41509` / bundled CLI `0.149.0-alpha.4.1` profile；既有 `0.3.6/0.3.11/0.3.12` 回滚入口保持。

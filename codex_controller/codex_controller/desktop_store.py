@@ -20,7 +20,16 @@ SNAPSHOTS_PER_THREAD = 3
 EVENTS_PER_HOST = 5000
 MAX_COMMANDS = 5000
 MAX_RECEIPTS = 5000
-SAME_REVISION_AVAILABILITY_FIELDS = frozenset({"status", "control_state", "control_revision"})
+SAME_REVISION_CONTROL_FIELDS = frozenset(
+    {
+        "status",
+        "active_turn_ref",
+        "control_revision",
+        "control_state",
+        "history_incomplete",
+        "turns",
+    }
+)
 
 
 class DesktopStore:
@@ -78,10 +87,13 @@ class DesktopStore:
                 if revision < previous_revision:
                     return {"status": "stale_ignored", "thread": self._thread_row(connection, thread_ref)}
                 if revision == previous_revision and existing["snapshot_digest"] not in {None, digest}:
-                    if existing["snapshot_json"] == encoded_snapshot or _same_revision_availability_refresh(
-                        str(existing["snapshot_json"]),
-                        body,
-                    ):
+                    refresh = _same_revision_refresh(str(existing["snapshot_json"]), body)
+                    if refresh == "stale_ignored":
+                        return {
+                            "status": "stale_ignored",
+                            "thread": self._thread_row(connection, thread_ref),
+                        }
+                    if existing["snapshot_json"] == encoded_snapshot or refresh == "refreshed":
                         semantic_refresh = True
                     else:
                         raise StoreError(
@@ -982,21 +994,43 @@ class DesktopStore:
         return connection
 
 
-def _same_revision_availability_refresh(existing_json: str, incoming: Mapping[str, Any]) -> bool:
-    """Accept only derived availability changes when the App revision is unchanged."""
+def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> str | None:
+    """Classify exact availability or monotonic IPC-control refreshes."""
 
     try:
         existing = json.loads(existing_json)
     except (TypeError, json.JSONDecodeError):
-        return False
+        return None
     if not isinstance(existing, dict):
-        return False
-    existing_business = dict(existing)
-    incoming_business = dict(incoming)
-    for field in SAME_REVISION_AVAILABILITY_FIELDS:
-        existing_business.pop(field, None)
-        incoming_business.pop(field, None)
-    return existing_business == incoming_business
+        return None
+    changed = {
+        field
+        for field in set(existing) | set(incoming)
+        if existing.get(field) != incoming.get(field)
+    }
+    if not changed <= SAME_REVISION_CONTROL_FIELDS:
+        return None
+    incoming_control_revision = incoming.get("control_revision")
+    existing_control_revision = existing.get("control_revision")
+    if (
+        not isinstance(incoming_control_revision, int)
+        or isinstance(incoming_control_revision, bool)
+        or incoming_control_revision < 0
+    ):
+        return None
+    if existing_control_revision is None:
+        return "refreshed"
+    if (
+        not isinstance(existing_control_revision, int)
+        or isinstance(existing_control_revision, bool)
+        or existing_control_revision < 0
+    ):
+        return None
+    if incoming_control_revision < existing_control_revision:
+        return "stale_ignored"
+    if incoming_control_revision == existing_control_revision:
+        return None
+    return "refreshed"
 
 
 __all__ = [

@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.24
+
+- 修复双 revision 域迁移的同 revision 控制历史刷新：仅当变化字段严格属于 `status/active_turn_ref/control_revision/control_state/history_incomplete/turns` 且整数 `control_revision` 单调前进时接受；旧快照缺控制 revision 可一次迁移，较旧控制快照按 stale 消费，相同控制 revision 的不同历史及任何同步域字段漂移继续失败关闭。
+- 保持 Relay、Runner manifest、53 个工具、Ingress API、SQLite 人工零写入和车辆边界不变；正式 561 条 outbox 脱敏复放在 Relay `0.2.17` 精确 stale-event ACK 语义下可 `561/561` 排空。
+
 ## 0.5.23
 
 - 将 app-server 同步 revision 与 Desktop IPC Owner 控制 revision 分域；新增 nullable `control_revision` 无损迁移、同 revision 派生可用性刷新与旧 snapshot 控制失败关闭。

@@ -355,7 +355,7 @@ class DesktopStoreServiceTests(unittest.TestCase):
             "refreshed",
         )
         self.assertEqual(self.service.thread(THREAD_REF)["title"], "原桌面任务")
-        availability = snapshot(self.runner_id)
+        availability = snapshot(self.runner_id, control_revision=8)
         availability["snapshot"]["status"] = "recovery_required"
         availability["snapshot"]["control_state"] = "recovery_required"
         availability["body_digest"] = body_digest(availability)
@@ -367,33 +367,88 @@ class DesktopStoreServiceTests(unittest.TestCase):
         self.assertEqual(current["status"], "recovery_required")
         self.assertEqual(current["control_state"], "recovery_required")
 
-        recovered = snapshot(self.runner_id, control_revision=8)
+        recovered = snapshot(self.runner_id, control_revision=9)
         recovered["body_digest"] = body_digest(recovered)
         self.assertEqual(
             self.service.receive("desktop_snapshot", recovered)["status"],
             "refreshed",
         )
         current = self.service.thread(THREAD_REF)
-        self.assertEqual(current["control_revision"], 8)
+        self.assertEqual(current["control_revision"], 9)
         self.assertEqual(current["control_state"], "ready")
+
+        live = snapshot(self.runner_id, control_revision=10, status="active")
+        live["snapshot"]["turns"] = [
+            {"turn_ref": TURN_REF, "status": "inProgress", "items": []}
+        ]
+        live["snapshot"]["active_turn_ref"] = TURN_REF
+        live["snapshot"]["history_incomplete"] = True
+        live["body_digest"] = body_digest(live)
+        self.assertEqual(self.service.receive("desktop_snapshot", live)["status"], "refreshed")
+        current = self.service.thread(THREAD_REF)
+        self.assertEqual(current["control_revision"], 10)
+        self.assertEqual(current["active_turn_ref"], TURN_REF)
+
+        stale_control = snapshot(self.runner_id, control_revision=9, status="idle")
+        stale_control["snapshot"]["turns"] = []
+        stale_control["snapshot"]["active_turn_ref"] = None
+        stale_control["body_digest"] = body_digest(stale_control)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", stale_control)["status"],
+            "stale_ignored",
+        )
+        self.assertEqual(self.service.thread(THREAD_REF)["control_revision"], 10)
+
+        stale_availability = json.loads(json.dumps(live))
+        stale_availability["snapshot"]["control_revision"] = 9
+        stale_availability["snapshot"]["status"] = "idle"
+        stale_availability["snapshot"]["control_state"] = "recovery_required"
+        stale_availability["body_digest"] = body_digest(stale_availability)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", stale_availability)["status"],
+            "stale_ignored",
+        )
+
+        same_revision_availability = json.loads(json.dumps(live))
+        same_revision_availability["snapshot"]["status"] = "idle"
+        same_revision_availability["snapshot"]["control_state"] = "recovery_required"
+        same_revision_availability["body_digest"] = body_digest(same_revision_availability)
+        with self.assertRaises(StoreError) as context:
+            self.service.receive("desktop_snapshot", same_revision_availability)
+        self.assertEqual(context.exception.code, "desktop_revision_conflict")
 
         business_conflicts = {
             "title": "冲突快照",
             "preview": "不同公开摘要",
-            "turns": [{"turn_ref": TURN_REF, "status": "completed"}],
-            "active_turn_ref": None,
-            "history_incomplete": True,
             "project_alias": "other-project",
             "updated_at": (NOW + dt.timedelta(seconds=1)).isoformat(),
+            "can_accept_direct_input": False,
         }
         for field, value in business_conflicts.items():
             with self.subTest(field=field):
-                conflicting = json.loads(json.dumps(availability))
+                conflicting = snapshot(self.runner_id, control_revision=11)
                 conflicting["snapshot"][field] = value
                 conflicting["body_digest"] = body_digest(conflicting)
                 with self.assertRaises(StoreError) as context:
                     self.service.receive("desktop_snapshot", conflicting)
                 self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+        same_control_revision = json.loads(json.dumps(live))
+        same_control_revision["snapshot"]["turns"] = []
+        same_control_revision["snapshot"]["active_turn_ref"] = None
+        same_control_revision["body_digest"] = body_digest(same_control_revision)
+        with self.assertRaises(StoreError) as context:
+            self.service.receive("desktop_snapshot", same_control_revision)
+        self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+        missing_control_revision = json.loads(json.dumps(live))
+        missing_control_revision["snapshot"]["control_revision"] = None
+        missing_control_revision["snapshot"]["turns"] = []
+        missing_control_revision["snapshot"]["active_turn_ref"] = None
+        missing_control_revision["body_digest"] = body_digest(missing_control_revision)
+        with self.assertRaises(StoreError) as context:
+            self.service.receive("desktop_snapshot", missing_control_revision)
+        self.assertEqual(context.exception.code, "desktop_revision_conflict")
         encoded = json.dumps(self.service.thread(THREAD_REF), ensure_ascii=False)
         self.assertNotIn(self.runner_id, encoded)
 
@@ -461,7 +516,9 @@ class DesktopStoreServiceTests(unittest.TestCase):
             self.assertIn("control_revision", columns)
             self.assertEqual(row, ("legacy", None))
 
-    def test_same_revision_availability_refresh_handles_551_document_scale(self) -> None:
+    def test_same_revision_availability_refresh_requires_monotonic_control_revision_at_551_document_scale(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "controller.sqlite3"
             service = DesktopControllerService(
@@ -472,7 +529,7 @@ class DesktopStoreServiceTests(unittest.TestCase):
             )
             statuses: list[str] = []
             for index in range(551):
-                document = snapshot(self.runner_id)
+                document = snapshot(self.runner_id, control_revision=7 + index)
                 if index % 2:
                     document["snapshot"]["status"] = "recovery_required"
                     document["snapshot"]["control_state"] = "recovery_required"
@@ -490,6 +547,52 @@ class DesktopStoreServiceTests(unittest.TestCase):
                     (THREAD_REF, 7),
                 ).fetchone()[0]
             self.assertEqual(snapshot_count, 1)
+
+    def test_same_revision_control_history_refresh_handles_561_document_scale(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sqlite3"
+            service = DesktopControllerService(
+                DesktopStore(path),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            first = snapshot(self.runner_id, revision=1788009802, control_revision=None, status="idle")
+            first["snapshot"]["active_turn_ref"] = None
+            first["snapshot"]["turns"] = []
+            first["snapshot"]["control_state"] = "load_required"
+            first["body_digest"] = body_digest(first)
+            self.assertEqual(service.receive("desktop_snapshot", first)["status"], "stored")
+
+            recovered = snapshot(
+                self.runner_id,
+                revision=1788009802,
+                control_revision=550,
+                status="active",
+            )
+            recovered["snapshot"]["turns"] = [
+                {"turn_ref": TURN_REF, "status": "inProgress", "items": []}
+            ]
+            recovered["snapshot"]["active_turn_ref"] = TURN_REF
+            recovered["body_digest"] = body_digest(recovered)
+            self.assertEqual(service.receive("desktop_snapshot", recovered)["status"], "refreshed")
+
+            statuses: list[str] = []
+            for index in range(560):
+                document = json.loads(json.dumps(recovered))
+                document["snapshot"]["control_revision"] = 551 + index
+                document["snapshot"]["turns"][0]["status"] = (
+                    "inProgress" if index % 2 == 0 else "completed"
+                )
+                document["snapshot"]["status"] = "active" if index % 2 == 0 else "idle"
+                document["snapshot"]["active_turn_ref"] = TURN_REF if index % 2 == 0 else None
+                document["body_digest"] = body_digest(document)
+                statuses.append(service.receive("desktop_snapshot", document)["status"])
+
+            self.assertEqual(statuses, ["refreshed"] * 560)
+            current = service.thread(THREAD_REF)
+            self.assertEqual(current["thread_revision"], 1788009802)
+            self.assertEqual(current["control_revision"], 1110)
 
     def test_same_revision_binding_drift_still_fails_closed(self) -> None:
         conflicting = snapshot(self.runner_id)

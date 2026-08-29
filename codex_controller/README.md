@@ -17,6 +17,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
+- `0.5.24` 补齐 Desktop 双 revision 域迁移：同一 `thread_revision` 下，仅允许单调前进的 `control_revision` 刷新 IPC 派生的 status、active Turn、history 与 turns；旧控制快照 stale 消费，相同控制 revision 的不同历史和任何 app-server 同步域差异继续失败关闭。Ingress 双字段协议降级阻断、Runner `0.3.18` manifest 与其余业务表面不变。
 - `0.5.23` 将 Desktop `thread_revision` 与 `control_revision` 分域持久化和校验：旧 snapshot 缺控制 revision 时仍可读，但 steer/interrupt/ready continue 失败关闭；同一同步 revision 只允许 status/control_state/control_revision 的派生可用性刷新。Ingress 同时显式阻断 `control_state=protocol_degraded`，并内置 Runner `0.3.18` manifest。
 - `0.5.22` 完整保留 `0.5.21` 的 53 个工具、瞬态 Turn 重试、M8 owner-only 备车、Desktop availability refresh 与极速 agent 结果绑定修复；本次只把 Controller 内置 pinned manifest 与 Runner 版本常量精确同步到 Runner `0.3.17`，用于恢复已审计 Codex App `26.820.60940` / build `7119` / CLI `0.150.0-alpha.8` 的原任务写控制。仅修改 options URL/SHA 不能替换内置 manifest；版本、原始字节 SHA-256 或四平台目录任一不匹配仍 fail closed。
 - `0.5.19` 从正式运行 `0.5.17` 的精确源码重基，只叠加明确瞬态 Turn 的安全有界重排；完整保留 M8 owner-only 备车、Desktop availability refresh、Runner `0.3.12` manifest、装修报价媒体意图和现有工具目录。任何 agent 输出、工具/命令/文件/Web/子代理活动或 artifact 都会阻断自动重试。

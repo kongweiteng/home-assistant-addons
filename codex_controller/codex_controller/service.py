@@ -506,7 +506,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.20",
+            "version": "0.5.21",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -550,7 +550,7 @@ class ControllerService:
                     "installer": {
                         "ready": False,
                         "error_code": "runner_manager_unavailable",
-                        "runner_version": "0.3.15",
+                        "runner_version": "0.3.16",
                     },
                     "last_error": None,
                     "summary": {
@@ -608,21 +608,29 @@ class ControllerService:
                 output, activity, artifact, item_type = item_observations(item)
                 handled = False
                 relevant = output or activity or artifact
-                if (
+                agent_message = bool(
                     method == "item/completed"
                     and item.get("type") == "agentMessage"
                     and isinstance(item.get("text"), str)
+                )
+                if (
+                    agent_message
                 ):
                     relevant = True
                     handled = self.store.set_result_text(turn_id, item["text"], item_type="agentMessage")
                 if output or activity or artifact:
-                    handled = self.store.observe_turn_activity(
+                    activity_handled = self.store.observe_turn_activity(
                         turn_id,
                         output_observed=output,
                         tool_activity_observed=activity,
                         artifact_observed=artifact,
                         item_type=item_type,
-                    ) or handled
+                    )
+                    # If turn binding races between the result-text write and
+                    # activity update, the activity write must not make us drop
+                    # the agent text. Buffer the full notification and replay it.
+                    if not agent_message:
+                        handled = activity_handled or handled
                 if relevant and not handled and allow_buffer:
                     self._buffer_event(turn_id, message)
         elif method == "turn/completed":

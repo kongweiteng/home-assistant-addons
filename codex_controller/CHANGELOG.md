@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.21
+
+- 完整保留 `0.5.20` 的 53 个工具、M8 owner-only 备车、Desktop availability refresh、同原任务控制和瞬态 Turn 重试边界。
+- 将镜像内置 pinned manifest 与 Runner 版本常量精确同步到 `0.3.16`，只补齐 `desktop-refs.sqlite3` 的 WAL anchor/显式生命周期修复；options URL/SHA、内置原始 manifest 和四平台资产仍逐项 fail closed。
+- 修复极速 `item/completed` 与 Turn 绑定交错时，activity 写入成功却丢失 agent 文本的竞态；未绑定的完整 agent 消息现在保留并在 Turn 绑定后重放，避免作业显示 completed 但结果为空。
+
 ## 0.5.20
 
 - 完整保留正式 `0.5.19` 的瞬态 Turn 重试、M8 owner-only 备车、Desktop availability refresh、装修报价媒体意图和 53 个工具边界。

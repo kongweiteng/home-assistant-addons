@@ -1352,7 +1352,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.20"
+        expected = "0.5.21"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -2615,6 +2615,56 @@ class TurnMediaManagerTests(unittest.TestCase):
 
 
 class ControllerServiceRaceTests(unittest.TestCase):
+    def test_agent_text_is_replayed_when_turn_binding_wins_between_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = ControllerStore(root / "controller.sqlite3")
+            job = store.create_job(fixture_job("fixture-agent-text-binding-race"))
+            running = store.claim_next()
+            assert running is not None
+
+            class StubApp:
+                notification_handler = None
+
+            service = ControllerService(
+                store,
+                StubApp(),  # type: ignore[arg-type]
+                intake_enabled=False,
+            )
+            original_observe = store.observe_turn_activity
+            bound = False
+
+            def bind_then_observe(turn_id: str, **kwargs: object) -> bool:
+                nonlocal bound
+                if not bound:
+                    bound = True
+                    store.assign_thread(running["job_id"], "thread-binding-race")
+                    store.assign_turn(running["job_id"], turn_id)
+                return original_observe(turn_id, **kwargs)  # type: ignore[arg-type]
+
+            store.observe_turn_activity = bind_then_observe  # type: ignore[method-assign]
+            item = {
+                "method": "item/completed",
+                "params": {
+                    "turnId": "turn-binding-race",
+                    "item": {"type": "agentMessage", "text": "竞态结果已保留"},
+                },
+            }
+            service.handle_notification(item)
+            self.assertEqual(service._pending_turn_events["turn-binding-race"], [item])
+            service.handle_notification(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "turn": {"id": "turn-binding-race", "status": "completed"}
+                    },
+                }
+            )
+            service._flush_turn_events("turn-binding-race")
+            completed = store.get_job(job["job_id"])
+            self.assertEqual(completed["state"], "completed")
+            self.assertEqual(completed["result"], "竞态结果已保留")
+
     def test_fast_notifications_are_replayed_after_turn_binding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

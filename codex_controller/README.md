@@ -17,7 +17,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
-- `0.5.20` 完整保留正式 `0.5.19` 的业务源码、53 个工具、瞬态 Turn 重试、M8 owner-only 备车和 Desktop availability refresh；当前 P5-R8 候选把 Controller 内置 pinned manifest 与 Runner 版本常量精确同步到 Runner `0.3.15`。仅修改 options URL/SHA 不能替换内置 manifest；版本、原始字节 SHA-256 或四平台目录任一不匹配仍 fail closed。
+- `0.5.21` 完整保留 `0.5.20` 的 53 个工具、瞬态 Turn 重试、M8 owner-only 备车和 Desktop availability refresh；当前 P5-R8 v11 候选把 Controller 内置 pinned manifest 与 Runner 版本常量精确同步到 Runner `0.3.16`，并保证极速 agent 完成通知在 Turn 绑定竞态中不会只记录 activity 而丢失结果文本。仅修改 options URL/SHA 不能替换内置 manifest；版本、原始字节 SHA-256 或四平台目录任一不匹配仍 fail closed。
 - `0.5.19` 从正式运行 `0.5.17` 的精确源码重基，只叠加明确瞬态 Turn 的安全有界重排；完整保留 M8 owner-only 备车、Desktop availability refresh、Runner `0.3.12` manifest、装修报价媒体意图和现有工具目录。任何 agent 输出、工具/命令/文件/Web/子代理活动或 artifact 都会阻断自动重试。
 - `0.1.3` 增加微信图片的受控 `localImage` 输入：Controller 通过 Gateway 非消费预览读取图片，在私有目录校验并暂存，Turn 完成后自动清理；原附件引用仍可由装修工具一次性消费。
 - `0.1.4` 明确微信是通用 Codex 入口：普通问答、讨论、分析、写作和规划默认直接回答，只有确实需要装修账本或 Home Assistant 操作时才调用对应结构化工具。

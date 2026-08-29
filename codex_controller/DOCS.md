@@ -1,9 +1,10 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.24`。
+当前版本：`0.5.25`。
 
 ## 瞬态 Turn 安全重试
 
+- `0.5.25` 补齐同 revision semantic-null 重连边界：`control_revision: null` 与省略该可选键、且其他快照字段完全一致时按无操作刷新接受；已有整数 revision 后省略键、非单调 revision、相同整数 revision 的不同历史和同步域漂移继续拒绝。内置 Runner 仍固定 `0.3.18`。
 - `0.5.24` 补齐双 revision 域的控制历史迁移：同一 `thread_revision` 下，只有 `control_revision` 单调前进且差异严格限于 IPC 派生的状态、active Turn、历史完整性和 Turns 时才刷新；旧控制快照被 stale 消费，相同控制 revision 的不同历史与任何同步域差异继续拒绝。内置 Runner 仍固定 `0.3.18`。
 - `0.5.23` 在 `0.5.22` 上增加 Desktop 双 revision 域：公开 `thread_revision` 继续绑定 app-server 同步顺序，可空 `control_revision` 只绑定 IPC Owner CAS。旧 snapshot 可滚动读取但控制失败关闭；同 revision 的派生可用性刷新与 Ingress 双字段协议降级阻断同时生效。内置 pinned manifest 与 Runner 版本常量升级为 `0.3.18`。
 - `0.5.22` 从 `0.5.21` 精确重基；只把 Controller 内置 pinned manifest 与 Runner 版本常量升级为 `0.3.17`，用于登记已审计 Codex App `26.820.60940` / build `7119` / CLI `0.150.0-alpha.8` 的精确 runtime profile；M8 owner-only 备车、Desktop availability refresh、瞬态 Turn 重试、装修报价媒体意图、极速 agent 结果绑定修复和 53 个工具边界不变。

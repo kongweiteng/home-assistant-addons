@@ -182,7 +182,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.5.24",
+                "User-Agent": "codex-controller/0.5.25",
             },
             method="POST",
         )
@@ -282,7 +282,7 @@ class RunnerInstallerCatalog:
             return manifest
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.24"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.25"},
             method="GET",
         )
         try:

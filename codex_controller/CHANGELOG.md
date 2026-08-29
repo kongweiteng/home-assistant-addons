@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.25
+
+- 修复同一 `thread_revision`、控制 revision 仍为空时的无操作快照等价判定：`control_revision: null` 与省略该可选键、且其余字段完全一致时在整数单调性检查前按 `refreshed` 接受，避免重连边界把语义相同快照误判为 `desktop_revision_conflict`。
+- 现有失败关闭边界不变：已有整数 control revision 后省略键、revision 回退、相同整数 revision 的不同控制历史及任意同步域字段漂移仍拒绝；Relay `0.2.17`、Runner `0.3.18`、SQLite schema、身份、凭据和车辆行为不变。
+- 使用正式 Controller 备份与只读 Runner online backup 的脱敏副本验证：旧 `0.5.24` 在当前 556 条 backlog 第 1 个 snapshot 稳定拒绝，新语义按 snapshot `271 refreshed + 5 stale`、event `7 stored + 273 stale ACK` 达到 `556/556` 可消费、remaining=0；未输出正文或修改生产数据库。
+
 ## 0.5.24
 
 - 修复双 revision 域迁移的同 revision 控制历史刷新：仅当变化字段严格属于 `status/active_turn_ref/control_revision/control_state/history_incomplete/turns` 且整数 `control_revision` 单调前进时接受；旧快照缺控制 revision 可一次迁移，较旧控制快照按 stale 消费，相同控制 revision 的不同历史及任何同步域字段漂移继续失败关闭。

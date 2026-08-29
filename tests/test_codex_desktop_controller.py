@@ -473,6 +473,71 @@ class DesktopStoreServiceTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, "desktop_snapshot_refresh_required")
 
+    def test_same_revision_null_and_omitted_control_revision_are_semantically_equal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sqlite3"
+            service = DesktopControllerService(
+                DesktopStore(path),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            explicit_null = snapshot(
+                self.runner_id,
+                revision=1788010200,
+                control_revision=None,
+                status="idle",
+            )
+            explicit_null["snapshot"]["active_turn_ref"] = None
+            explicit_null["snapshot"]["control_state"] = "load_required"
+            explicit_null["body_digest"] = body_digest(explicit_null)
+            self.assertEqual(
+                service.receive("desktop_snapshot", explicit_null)["status"],
+                "stored",
+            )
+
+            omitted = json.loads(json.dumps(explicit_null))
+            omitted["snapshot"].pop("control_revision")
+            omitted["body_digest"] = body_digest(omitted)
+            self.assertEqual(
+                service.receive("desktop_snapshot", omitted)["status"],
+                "refreshed",
+            )
+
+            explicit_null_again = json.loads(json.dumps(omitted))
+            explicit_null_again["snapshot"]["control_revision"] = None
+            explicit_null_again["body_digest"] = body_digest(explicit_null_again)
+            self.assertEqual(
+                service.receive("desktop_snapshot", explicit_null_again)["status"],
+                "refreshed",
+            )
+            self.assertIsNone(service.thread(THREAD_REF)["control_revision"])
+            with sqlite3.connect(path) as connection:
+                snapshot_count = connection.execute(
+                    "SELECT COUNT(*) FROM desktop_snapshots WHERE thread_ref=? AND thread_revision=?",
+                    (THREAD_REF, 1788010200),
+                ).fetchone()[0]
+            self.assertEqual(snapshot_count, 1)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DesktopControllerService(
+                DesktopStore(Path(temporary) / "controller.sqlite3"),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            integer_revision = snapshot(self.runner_id, control_revision=8)
+            self.assertEqual(
+                service.receive("desktop_snapshot", integer_revision)["status"],
+                "stored",
+            )
+            omitted_after_integer = json.loads(json.dumps(integer_revision))
+            omitted_after_integer["snapshot"].pop("control_revision")
+            omitted_after_integer["body_digest"] = body_digest(omitted_after_integer)
+            with self.assertRaises(StoreError) as context:
+                service.receive("desktop_snapshot", omitted_after_integer)
+            self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
     def test_legacy_desktop_threads_schema_migrates_without_row_loss(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "legacy.sqlite3"

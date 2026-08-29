@@ -1010,6 +1010,8 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
     }
     if not changed <= SAME_REVISION_CONTROL_FIELDS:
         return None
+    if not changed:
+        return "refreshed"
     incoming_control_revision = incoming.get("control_revision")
     existing_control_revision = existing.get("control_revision")
     if (

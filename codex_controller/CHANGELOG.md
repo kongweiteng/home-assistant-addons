@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.23
+
+- 将 app-server 同步 revision 与 Desktop IPC Owner 控制 revision 分域；新增 nullable `control_revision` 无损迁移、同 revision 派生可用性刷新与旧 snapshot 控制失败关闭。
+- Ingress 的恢复统计、提示和按钮门禁同时识别 `status=protocol_degraded` 与 `control_state=protocol_degraded`，不再接受 status-only 假绿。
+- 内置 pinned manifest 与 Runner 版本常量同步到 `0.3.18`，其余 53 工具、M8、重试、身份、队列和车辆边界不变。
+
 ## 0.5.22
 
 - 完整保留 `0.5.21` 的 53 个工具、M8 owner-only 备车、Desktop availability refresh、同原任务控制、瞬态 Turn 重试与极速 agent 结果绑定修复。

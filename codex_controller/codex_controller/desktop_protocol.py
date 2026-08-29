@@ -130,6 +130,7 @@ def build_desktop_command(
     host_ref: str,
     thread_ref: str,
     expected_thread_revision: int,
+    expected_control_revision: int | None,
     action: str,
     now: dt.datetime,
     expected_turn_ref: str | None = None,
@@ -143,6 +144,7 @@ def build_desktop_command(
     _ref(host_ref, "HS")
     _ref(thread_ref, "TH")
     _revision(expected_thread_revision)
+    _nullable_revision(expected_control_revision)
     if action not in ACTIONS:
         raise DesktopProtocolError("desktop_action_invalid", "Desktop 动作无效")
     if not 5 <= ttl_seconds <= 600:
@@ -156,6 +158,7 @@ def build_desktop_command(
         "host_ref": host_ref,
         "thread_ref": thread_ref,
         "expected_thread_revision": expected_thread_revision,
+        "expected_control_revision": expected_control_revision,
         "action": action,
         "created_at": current.isoformat(),
         "expires_at": (current + dt.timedelta(seconds=ttl_seconds)).isoformat(),
@@ -181,6 +184,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         "host_ref",
         "thread_ref",
         "expected_thread_revision",
+        "expected_control_revision",
         "action",
         "created_at",
         "expires_at",
@@ -193,6 +197,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
     _ref(document["host_ref"], "HS")
     _ref(document["thread_ref"], "TH")
     _revision(document["expected_thread_revision"])
+    _nullable_revision(document["expected_control_revision"])
     action = document["action"]
     if action not in ACTIONS:
         raise DesktopProtocolError("desktop_action_invalid", "Desktop 动作无效")
@@ -265,6 +270,8 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
         raise DesktopProtocolError("desktop_identity_mismatch", "Desktop snapshot ref 不一致")
     if snapshot.get("thread_revision") != document["thread_revision"]:
         raise DesktopProtocolError("desktop_revision_mismatch", "Desktop snapshot revision 不一致")
+    if "control_revision" in snapshot:
+        _nullable_revision(snapshot.get("control_revision"))
     alias = snapshot.get("project_alias")
     if not isinstance(alias, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", alias):
         raise DesktopProtocolError("desktop_project_invalid", "Desktop 项目别名无效")
@@ -472,6 +479,11 @@ def _model_catalog(value: Any) -> None:
 def _revision(value: Any) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise DesktopProtocolError("desktop_revision_invalid", "Desktop revision 无效")
+
+
+def _nullable_revision(value: Any) -> None:
+    if value is not None:
+        _revision(value)
 
 
 def _shanghai_time(value: Any, name: str) -> dt.datetime:

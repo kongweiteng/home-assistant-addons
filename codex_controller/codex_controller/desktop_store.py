@@ -20,7 +20,7 @@ SNAPSHOTS_PER_THREAD = 3
 EVENTS_PER_HOST = 5000
 MAX_COMMANDS = 5000
 MAX_RECEIPTS = 5000
-SAME_REVISION_AVAILABILITY_FIELDS = frozenset({"status", "control_state"})
+SAME_REVISION_AVAILABILITY_FIELDS = frozenset({"status", "control_state", "control_revision"})
 
 
 class DesktopStore:
@@ -58,7 +58,7 @@ class DesktopStore:
                 observed_at,
             )
             existing = connection.execute(
-                "SELECT id,host_ref,project_ref,runner_id,thread_revision,snapshot_digest,snapshot_json "
+                "SELECT id,host_ref,project_ref,runner_id,thread_revision,control_revision,snapshot_digest,snapshot_json "
                 "FROM desktop_threads WHERE thread_ref=?",
                 (thread_ref,),
             ).fetchone()
@@ -95,11 +95,12 @@ class DesktopStore:
             connection.execute(
                 "INSERT INTO desktop_threads("
                 "thread_ref,host_ref,project_ref,runner_id,title,status,active_turn_ref,thread_revision,"
-                "control_state,snapshot_digest,snapshot_json,source_created_at,source_updated_at,observed_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "control_revision,control_state,snapshot_digest,snapshot_json,source_created_at,source_updated_at,observed_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(thread_ref) DO UPDATE SET "
                 "title=excluded.title,status=excluded.status,active_turn_ref=excluded.active_turn_ref,"
-                "thread_revision=excluded.thread_revision,control_state=excluded.control_state,"
+                "thread_revision=excluded.thread_revision,control_revision=excluded.control_revision,"
+                "control_state=excluded.control_state,"
                 "snapshot_digest=excluded.snapshot_digest,snapshot_json=excluded.snapshot_json,"
                 "source_created_at=excluded.source_created_at,source_updated_at=excluded.source_updated_at,"
                 "observed_at=excluded.observed_at",
@@ -112,6 +113,7 @@ class DesktopStore:
                     str(body["status"]),
                     body.get("active_turn_ref"),
                     revision,
+                    body.get("control_revision"),
                     str(body.get("control_state") or "recovery_required")[:64],
                     digest,
                     encoded_snapshot,
@@ -695,6 +697,7 @@ class DesktopStore:
                     status TEXT NOT NULL,
                     active_turn_ref TEXT,
                     thread_revision INTEGER NOT NULL,
+                    control_revision INTEGER,
                     control_state TEXT NOT NULL,
                     snapshot_digest TEXT,
                     snapshot_json TEXT NOT NULL,
@@ -767,6 +770,12 @@ class DesktopStore:
                     ON desktop_receipts(request_id);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(desktop_threads)").fetchall()
+            }
+            if "control_revision" not in columns:
+                connection.execute("ALTER TABLE desktop_threads ADD COLUMN control_revision INTEGER")
 
     def _recover_pending_commands(self) -> None:
         current = dt.datetime.now(dt.timezone.utc).astimezone(dt.timezone(dt.timedelta(hours=8))).isoformat()
@@ -923,6 +932,7 @@ class DesktopStore:
             "status": row["status"],
             "active_turn_ref": row["active_turn_ref"],
             "thread_revision": int(row["thread_revision"]),
+            "control_revision": row["control_revision"],
             "control_state": row["control_state"],
             "created_at": row["source_created_at"],
             "updated_at": row["source_updated_at"],
@@ -947,6 +957,7 @@ class DesktopStore:
             "model": command.get("model"),
             "expected_turn_ref": command.get("expected_turn_ref"),
             "expected_thread_revision": command.get("expected_thread_revision"),
+            "expected_control_revision": command.get("expected_control_revision"),
             "state": row["state"],
             "error_code": row["error_code"],
             "created_at": row["created_at"],

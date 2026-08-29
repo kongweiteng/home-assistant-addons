@@ -81,7 +81,7 @@ function renderMetrics() {
   q('metricProjects').textContent = state.projects.length;
   q('metricThreads').textContent = state.threads.length;
   q('metricActive').textContent = state.threads.filter(thread => thread.status === 'active').length;
-  q('metricRecovery').textContent = state.threads.filter(thread => ['failed', 'recovery_required', 'protocol_degraded'].includes(thread.status)).length;
+  q('metricRecovery').textContent = state.threads.filter(thread => ['failed', 'recovery_required', 'protocol_degraded'].includes(thread.status) || thread.control_state === 'protocol_degraded').length;
 }
 
 function renderHosts() {
@@ -217,7 +217,7 @@ function renderNotice(detail) {
   const notice = q('detailNotice');
   notice.className = 'notice hidden';
   notice.textContent = '';
-  if (detail.status === 'protocol_degraded') {
+  if (detail.status === 'protocol_degraded' || detail.control_state === 'protocol_degraded') {
     notice.className = 'notice bad';
     notice.textContent = 'App/CLI/Schema 能力不匹配，当前只允许读取；升级兼容性重新核验前禁止控制。';
   } else if (detail.status === 'recovery_required' || detail.control_state === 'recovery_required') {
@@ -242,7 +242,7 @@ function writeAvailable() { return currentHost()?.write_available === true; }
 
 function renderActionState(detail) {
   const active = detail.status === 'active' && Boolean(detail.active_turn_ref);
-  const blocked = !writeAvailable() || ['recovery_required', 'protocol_degraded'].includes(detail.status) || ['recovery_required', 'refresh_required'].includes(detail.control_state);
+  const blocked = !writeAvailable() || ['recovery_required', 'protocol_degraded'].includes(detail.status) || ['recovery_required', 'refresh_required', 'protocol_degraded'].includes(detail.control_state);
   q('interruptButton').classList.toggle('hidden', !active);
   q('interruptButton').disabled = blocked || !hasCapability('interrupt_expected_turn');
   q('archiveButton').classList.toggle('hidden', detail.status !== 'idle');
@@ -415,7 +415,7 @@ function renderComposer(detail) {
   const action = composerAction(detail);
   const blockedCommand = detail.latest_command && ['pending', 'submitted', 'accepted', 'unknown'].includes(detail.latest_command.state);
   const capability = action === 'steer' ? (state.mode === 'native' ? hasCapability('native_steer_racy') : hasCapability('interrupt_expected_turn') && hasCapability('continue_same_thread')) : action === 'continue' ? hasCapability('continue_same_thread') : false;
-  const enabled = Boolean(action && writeAvailable() && capability && !blockedCommand && !['recovery_required', 'protocol_degraded'].includes(detail.status) && ['ready', 'load_required'].includes(detail.control_state));
+  const enabled = Boolean(action && writeAvailable() && capability && !blockedCommand && !['recovery_required', 'protocol_degraded'].includes(detail.status) && detail.control_state !== 'protocol_degraded' && ['ready', 'load_required'].includes(detail.control_state));
   q('composer').classList.toggle('hidden', !action);
   q('composerInput').disabled = !enabled;
   q('safeMode').disabled = detail.status !== 'active';

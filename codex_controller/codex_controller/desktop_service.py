@@ -230,6 +230,7 @@ class DesktopControllerService:
             host_ref=str(thread["host_ref"]),
             thread_ref=thread_ref,
             expected_thread_revision=int(normalized["thread_revision"]),
+            expected_control_revision=thread.get("control_revision"),
             action=action,
             expected_turn_ref=normalized.get("expected_turn_ref"),
             input_text=normalized.get("input"),
@@ -320,6 +321,7 @@ class DesktopControllerService:
         active_turn = thread["active_turn_ref"]
         expected_turn = payload.get("expected_turn_ref")
         control_state = thread.get("control_state")
+        control_revision = thread.get("control_revision")
         allowed_control_states = {
             "steer": {"ready"},
             "interrupt": {"ready"},
@@ -333,6 +335,13 @@ class DesktopControllerService:
                 "Desktop Thread 必须先刷新最新 App 快照",
                 status=409,
             )
+        if action in {"steer", "interrupt"} or (action == "continue" and control_state == "ready"):
+            if not isinstance(control_revision, int) or isinstance(control_revision, bool):
+                raise StoreError(
+                    "desktop_snapshot_refresh_required",
+                    "Desktop Thread 缺少当前控制 revision",
+                    status=409,
+                )
         if action in {"steer", "interrupt"}:
             if status != "active" or active_turn is None or active_turn != expected_turn:
                 raise StoreError("desktop_turn_conflict", "Desktop active Turn 与请求不一致", status=409)

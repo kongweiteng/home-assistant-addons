@@ -36,6 +36,7 @@ MODEL_CATALOG = [
     {"id": "gpt-5.6-sol", "display_name": "GPT-5.6 Sol", "is_default": True},
     {"id": "gpt-5.6-terra", "display_name": "GPT-5.6 Terra", "is_default": False},
 ]
+_DEFAULT_CONTROL_REVISION = object()
 
 
 class App:
@@ -108,8 +109,10 @@ def snapshot(
     status: str = "active",
     capabilities: list[str] | None = None,
     models: list[dict] | None = None,
+    control_revision: int | None | object = _DEFAULT_CONTROL_REVISION,
 ) -> dict:
     active_turn = TURN_REF if status == "active" else None
+    effective_control_revision = revision if control_revision is _DEFAULT_CONTROL_REVISION else control_revision
     thread = {
         "project_alias": "demo-project",
         "project_ref": PROJECT_REF,
@@ -119,6 +122,7 @@ def snapshot(
         "status": status,
         "active_turn_ref": active_turn,
         "thread_revision": revision,
+        "control_revision": effective_control_revision,
         "created_at": "2026-08-20T09:00:00+08:00",
         "updated_at": NOW.isoformat(),
         "can_accept_direct_input": True,
@@ -363,6 +367,16 @@ class DesktopStoreServiceTests(unittest.TestCase):
         self.assertEqual(current["status"], "recovery_required")
         self.assertEqual(current["control_state"], "recovery_required")
 
+        recovered = snapshot(self.runner_id, control_revision=8)
+        recovered["body_digest"] = body_digest(recovered)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", recovered)["status"],
+            "refreshed",
+        )
+        current = self.service.thread(THREAD_REF)
+        self.assertEqual(current["control_revision"], 8)
+        self.assertEqual(current["control_state"], "ready")
+
         business_conflicts = {
             "title": "冲突快照",
             "preview": "不同公开摘要",
@@ -382,6 +396,70 @@ class DesktopStoreServiceTests(unittest.TestCase):
                 self.assertEqual(context.exception.code, "desktop_revision_conflict")
         encoded = json.dumps(self.service.thread(THREAD_REF), ensure_ascii=False)
         self.assertNotIn(self.runner_id, encoded)
+
+    def test_old_snapshot_without_control_revision_is_readable_but_control_fails_closed(self) -> None:
+        legacy = snapshot(self.runner_id, revision=8)
+        legacy["snapshot"].pop("control_revision")
+        legacy["body_digest"] = body_digest(legacy)
+        self.assertEqual(self.service.receive("desktop_snapshot", legacy)["status"], "stored")
+        current = self.service.thread(THREAD_REF)
+        self.assertIsNone(current["control_revision"])
+        with self.assertRaises(StoreError) as context:
+            self.service.submit(
+                THREAD_REF,
+                "steer",
+                {
+                    "request_id": "desktop-legacy-control-0001",
+                    "expected_turn_ref": TURN_REF,
+                    "thread_revision": 8,
+                    "input": "legacy snapshot must refresh",
+                    "mode": "safe",
+                },
+            )
+        self.assertEqual(context.exception.code, "desktop_snapshot_refresh_required")
+
+    def test_legacy_desktop_threads_schema_migrates_without_row_loss(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "legacy.sqlite3"
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "CREATE TABLE desktop_threads("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,thread_ref TEXT NOT NULL UNIQUE,"
+                    "host_ref TEXT NOT NULL,project_ref TEXT NOT NULL,runner_id TEXT NOT NULL,"
+                    "title TEXT NOT NULL,status TEXT NOT NULL,active_turn_ref TEXT,"
+                    "thread_revision INTEGER NOT NULL,control_state TEXT NOT NULL,"
+                    "snapshot_digest TEXT,snapshot_json TEXT NOT NULL,source_created_at TEXT,"
+                    "source_updated_at TEXT,observed_at TEXT NOT NULL)"
+                )
+                connection.execute(
+                    "INSERT INTO desktop_threads("
+                    "thread_ref,host_ref,project_ref,runner_id,title,status,active_turn_ref,"
+                    "thread_revision,control_state,snapshot_digest,snapshot_json,observed_at"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        THREAD_REF,
+                        HOST_REF,
+                        PROJECT_REF,
+                        self.runner_id,
+                        "legacy",
+                        "idle",
+                        None,
+                        7,
+                        "load_required",
+                        None,
+                        "{}",
+                        NOW.isoformat(),
+                    ),
+                )
+            DesktopStore(path)
+            with sqlite3.connect(path) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(desktop_threads)")}
+                row = connection.execute(
+                    "SELECT title,control_revision FROM desktop_threads WHERE thread_ref=?",
+                    (THREAD_REF,),
+                ).fetchone()
+            self.assertIn("control_revision", columns)
+            self.assertEqual(row, ("legacy", None))
 
     def test_same_revision_availability_refresh_handles_551_document_scale(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -492,6 +570,7 @@ class DesktopStoreServiceTests(unittest.TestCase):
         self.assertEqual(len(self.publisher.desktop_commands), 1)
         command = self.publisher.desktop_commands[0][1]
         self.assertEqual(command["mode"], "safe")
+        self.assertEqual(command["expected_control_revision"], 7)
         replay = self.service.submit(THREAD_REF, "steer", payload)
         self.assertEqual(replay["state"], "submitted")
         self.assertEqual(len(self.publisher.desktop_commands), 1)
@@ -1095,6 +1174,7 @@ class DesktopApiTests(unittest.TestCase):
         self.assertNotIn("turn_id", script)
         self.assertNotIn("01a01f1b-b2cb-7762-b352-590ea7a3ae57", script)
         self.assertIn("同一个 threadId", script)
+        self.assertIn("detail.control_state === 'protocol_degraded'", script)
 
         combined = DESKTOP_DASHBOARD_HTML + DESKTOP_DASHBOARD_JS
         for required in (

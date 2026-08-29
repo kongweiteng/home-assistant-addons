@@ -295,7 +295,7 @@ def main() -> None:
             installer_manifest_sha256,
             relay_public_url,
             timeout_seconds=int(os.environ.get("CONTROLLER_RUNNER_RELAY_TIMEOUT_SECONDS", "10")),
-            pinned_manifest_body=(Path(__file__).with_name("runner_manifest_v0317.json").read_bytes()),
+            pinned_manifest_body=(Path(__file__).with_name("runner_manifest_v0318.json").read_bytes()),
         )
         if installer_manifest_url
         else None

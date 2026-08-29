@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.22
+
+- 完整保留 `0.5.21` 的 53 个工具、M8 owner-only 备车、Desktop availability refresh、同原任务控制、瞬态 Turn 重试与极速 agent 结果绑定修复。
+- 将镜像内置 pinned manifest 与 Runner 版本常量精确同步到 `0.3.17`，只新增 Codex App `26.820.60940` / build `7119` / CLI `0.150.0-alpha.8` / 已审计 schema digest 的 runtime profile；options URL/SHA、内置原始 manifest 与四平台资产继续逐项 fail closed。
+
 ## 0.5.21
 
 - 完整保留 `0.5.20` 的 53 个工具、M8 owner-only 备车、Desktop availability refresh、同原任务控制和瞬态 Turn 重试边界。

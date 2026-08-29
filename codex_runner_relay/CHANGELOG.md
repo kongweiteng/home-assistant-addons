@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.16
+
+- 安装 renderer 新增 Runner `0.3.17` 精确滚动兼容，用于登记已审计 Codex App `26.820.60940` / build `7119` / CLI `0.150.0-alpha.8` runtime profile；既有 `0.3.6/0.3.11/0.3.12/0.3.13/0.3.14/0.3.15/0.3.16` 回滚入口保持。
+- WSS、Desktop stale ACK、Controller 拒绝失败关闭、双 Token、IPv4 客户端、ticket/enrollment 不落盘、Registry/lease 所有权和网络边界不变。
+
 ## 0.2.15
 
 - 安装 renderer 新增 Runner `0.3.16` 精确滚动兼容，用于补齐 Desktop refs WAL anchor、双库 online backup 和显式关闭；既有 `0.3.6/0.3.11/0.3.12/0.3.13/0.3.14/0.3.15` 回滚入口保持。

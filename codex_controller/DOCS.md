@@ -4,7 +4,7 @@
 
 ## 瞬态 Turn 安全重试
 
-- `0.5.20` 从正式 `0.5.19` 精确重基，只把 Controller 内置 pinned manifest 与 Runner 版本常量升级为 `0.3.14`；M8 owner-only 备车、Desktop availability refresh、瞬态 Turn 重试、装修报价媒体意图和 53 个工具边界不变。
+- `0.5.20` 从正式 `0.5.19` 精确重基；当前 P5-R8 候选只把 Controller 内置 pinned manifest 与 Runner 版本常量升级为 `0.3.15`，M8 owner-only 备车、Desktop availability refresh、瞬态 Turn 重试、装修报价媒体意图和 53 个工具边界不变。
 - `0.5.19` 从正式运行 `0.5.17` 的精确源码重基，完整保留 M8 owner-only 备车、Desktop availability refresh、Runner `0.3.12` manifest、装修报价媒体意图和现有工具目录。
 - 只有 Codex `0.146.0` 明确分类为瞬态、当前尝试没有 agent 输出、工具/命令/文件/Web/子代理活动或 artifact，且总尝试少于 3 次时才持久延迟重排；其他错误明确终止或进入人工恢复。
 - 重排保留 Thread、清除旧 Turn ID，并使用带 `+08:00` 的 `retry_not_before`。SQLite 迁移只增加列；raw error、详情、URL、prompt 和 token 不落库、不进入普通日志或微信回复。
@@ -63,8 +63,8 @@
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
-- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller 镜像内置与 Runner `0.3.14` 四平台候选完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
-- manifest v2 固定 Runner `0.3.14`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。Runner 的结构化结果 Schema 要求全部属性都在 `required` 中，`error_code` 成功时为 `null`、失败时为稳定错误码。
+- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller 镜像内置与 Runner `0.3.15` 四平台候选完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
+- manifest v2 固定 Runner `0.3.15`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。Runner 的结构化结果 Schema 要求全部属性都在 `required` 中，`error_code` 成功时为 `null`、失败时为稳定错误码。
 - Runner 在 Relay 返回 `controller_unavailable`、`controller_client_not_started` 或连接竞争时保留当前进程，并按配置执行指数退避重连；凭据错误和身份不匹配仍立即退出。已发送未 ACK 的心跳保留在持久 outbox，只替换未发送心跳；过期心跳清理后，其迟到 ACK 会安全忽略。Codex 执行在工作线程内进行，长任务期间 WSS 主循环持续发送 `busy` 心跳。
 - Runner 启动 Codex 前会读取任务 worktree 与本机登记仓库的绝对 Git common dir；只有两者完全相同时，才把该 Git metadata 目录通过 Codex `--add-dir` 加入 `workspace-write`。这使 linked worktree 可以创建 index、object、ref 和 reflog 并完成本地 commit，但不会开放 `danger-full-access`，远端消息仍不能注入路径或修改沙箱策略。
 - 创建 API 返回一次性 HTTPS 安装链接、完整的一行终端命令、平台/版本和过期时间，不返回独立 enrollment 字段。页面可复制链接、打开链接或复制命令；Clipboard API 不可用时使用受限回退。15 分钟倒计时归零、撤销或 enrollment 被领取后，页面立即清除内存中的链接和命令。
@@ -114,7 +114,7 @@
 | `runner_relay_api_token` | 仅供 Controller -> Relay 发布 request/control 的 bearer，至少 32 字符 |
 | `runner_relay_controller_api_token` | 仅供 Relay -> Controller 调用 enroll/authenticate/heartbeat/status/result 的 bearer，至少 32 字符 |
 | `runner_relay_public_url` | Runner 出站连接的公开 `wss://` URL；禁止凭据、query、fragment、内部域名或非公网解析结果 |
-| `runner_installer_manifest_url` | Runner `0.3.14` 自包含安装制品 manifest v2 的公开 HTTPS URL |
+| `runner_installer_manifest_url` | Runner `0.3.15` 自包含安装制品 manifest v2 的公开 HTTPS URL |
 | `runner_installer_manifest_sha256` | 对 manifest 原始字节固定的 64 位小写 SHA-256；不接受浮动 latest |
 | `runner_relay_timeout_seconds` | Relay 发布超时；兼容未内置 manifest 的旧目录读取，范围 2 到 60 秒 |
 

@@ -14,7 +14,7 @@ PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 SUPPORTED_RUNNER_VERSIONS = frozenset(
-    {"0.3.6", "0.3.11", "0.3.12", "0.3.13", "0.3.14"}
+    {"0.3.6", "0.3.11", "0.3.12", "0.3.13", "0.3.14", "0.3.15"}
 )
 EXPECTED_FIELDS = {
     "runner_id",

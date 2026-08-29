@@ -550,7 +550,7 @@ class ControllerService:
                     "installer": {
                         "ready": False,
                         "error_code": "runner_manager_unavailable",
-                        "runner_version": "0.3.14",
+                        "runner_version": "0.3.15",
                     },
                     "last_error": None,
                     "summary": {

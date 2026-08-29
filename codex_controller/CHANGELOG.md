@@ -3,7 +3,7 @@
 ## 0.5.20
 
 - 完整保留正式 `0.5.19` 的瞬态 Turn 重试、M8 owner-only 备车、Desktop availability refresh、装修报价媒体意图和 53 个工具边界。
-- 将镜像内置 pinned manifest、Runner 版本常量和运行表面精确同步到已发布 Runner `0.3.14`；options URL/SHA 与内置原始字节必须同时匹配，避免只切 pin 后稳定触发 `installer_manifest_digest_mismatch`。
+- 将镜像内置 pinned manifest、Runner 版本常量和运行表面精确同步到 P5-R8 Runner `0.3.15` 候选；options URL/SHA 与内置原始字节必须同时匹配，避免只切 pin 后稳定触发 `installer_manifest_digest_mismatch`。
 
 ## 0.5.19
 

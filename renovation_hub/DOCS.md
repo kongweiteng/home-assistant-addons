@@ -42,9 +42,21 @@ Add-on 使用管理员 Ingress，不映射 `8101/tcp` 到宿主机，也不申�
 
 原始媒体不写入 SQLite 或便携账本 ZIP。正式部署前必须单独确认 `/media` 后端、容量、备份与恢复方式。
 
+## 微信装修进度连续采集
+
+Controller 使用受认证的 `POST /internal/v1/progress-captures/action` 管理采集草稿。`progress_capture_sessions`、`progress_capture_items` 和 `progress_capture_notes` 只记录采集过程；最终事实仍是 `events`、`media_assets` 与 `media_links`。
+
+- `start` 根据明确文字、上海日期和当前有效项目推断项目、阶段、空间与标题；无法唯一确定时保留附件并返回可纠正错误，不猜测。
+- `register_items` 单批最多 16 项、单会话最多 256 项；每项绑定来源消息摘要、附件引用摘要、正文 SHA-256、类型、大小和稳定序号。
+- 媒体仍走 `/internal/v1/media/ingest` 原始二进制流；采集元数据必须匹配 session、item、project、event 与 source ref，成功后原子回写 item 状态。
+- 处理失败时原件已内容寻址保存，item 标记 failed 并阻断完成；重试只重新处理原件，不生成重复媒体。
+- `finalize` 仅在 received、registered、stored、linked 相等且 failed/pending 为 0 时完成；取消只 void 草稿事件，已安全保存的原件继续保留。
+
+从 `0.3.4` 回退前先关闭 Gateway Poller 与 Controller intake，并确认没有 active、paused 或 finalizing 采集；与 Controller `0.5.26`、Gateway `0.4.8` 成组回退。不得删除采集表、媒体原件或草稿事件。
+
 ## 便携包只读影子导入
 
-正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.3.2` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
+正式 Hermes 包使用 `format_id=kanhuwan-renovation-ledger`、`currency=CNY` 和 `amount_unit=integer_cents`。Hub `0.3.4` 支持 `format_version=1` 与 `2`，导入时不会运行 ZIP 内的 `verify.py`，而是使用自身固定实现完成以下检查：
 
 - ZIP 路径、重复项、符号链接、文件数量、解压大小和压缩率限制。
 - manifest 文件全集、每个普通文件的大小和 SHA-256。

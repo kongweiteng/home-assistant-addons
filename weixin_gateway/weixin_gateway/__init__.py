@@ -3,6 +3,6 @@
 from .protocol import IlinkClient, ProtocolError
 from .store import GatewayStore, IdentityStore
 
-__version__ = "0.4.7"
+__version__ = "0.4.8"
 
 __all__ = ["GatewayStore", "IdentityStore", "IlinkClient", "ProtocolError"]

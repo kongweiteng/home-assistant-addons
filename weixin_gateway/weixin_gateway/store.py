@@ -59,6 +59,23 @@ MEDIA_ARCHIVE_CONTEXT_STATUSES = frozenset(
         "too_many_attachments",
     }
 )
+PROGRESS_CAPTURE_MAX_ITEMS = 256
+PROGRESS_CAPTURE_CONFIRM_TTL_SECONDS = 15 * 60
+PROGRESS_CAPTURE_START_RE = re.compile(
+    r"(?:开始|接下来|现在|帮我|请|我要|我想|我准备|麻烦).{0,8}(?:记录|保存|归档|收录).{0,12}(?:装修|施工|工地|现场|进度|照片|图片|视频)"
+    r"|(?:装修|施工|工地|现场|进度).{0,12}(?:开始记录|连续记录|连续保存|持续记录)"
+)
+PROGRESS_CAPTURE_SAME_MESSAGE_START_RE = re.compile(
+    r"(?:记录|保存|归档|收录).{0,16}(?:装修|施工|工地|进度|水电|泥木|瓦工|木工|油漆|吊顶)"
+)
+PROGRESS_CAPTURE_CONFIRM_RE = re.compile(r"^(?:是|是的|对|对的|确认|好的|好|可以|开始记录|继续保存|需要)(?:[，。！!\s].*)?$")
+PROGRESS_CAPTURE_AMBIGUOUS_RE = re.compile(r"(?:装修|施工|工地|现场|进度|水电|泥木|瓦工|木工|油漆|吊顶|厨房|卫生间|露台|凉亭)")
+PROGRESS_CAPTURE_FINALIZE_RE = re.compile(r"^(?:记录|保存|归档)?(?:完成|完毕)|^(?:结束|完成)(?:记录|保存|归档)$")
+PROGRESS_CAPTURE_PAUSE_RE = re.compile(r"^(?:暂停|先停|停止)(?:记录|保存|归档)?$")
+PROGRESS_CAPTURE_RESUME_RE = re.compile(r"^(?:继续|恢复)(?:记录|保存|归档)?$")
+PROGRESS_CAPTURE_CANCEL_RE = re.compile(r"^(?:取消|不要|放弃|撤销)(?:本次|这次)?(?:记录|保存|归档)?$")
+PROGRESS_CAPTURE_STATUS_RE = re.compile(r"^(?:记录|保存|归档)?(?:状态|进度|了几张|了多少)|^(?:现在)?(?:记录|保存)了(?:几张|多少)$")
+PROGRESS_CAPTURE_NEGATION_RE = re.compile(r"(?:不要|不用|无需|别).{0,8}(?:记录|保存|归档)")
 RUNNER_MANAGER_V2_TASK_STATES = frozenset(
     {
         "waiting_runner",
@@ -118,6 +135,33 @@ def media_archive_instruction(text: str, *, has_attachments: bool) -> dict[str, 
         and (expected_count is not None or MEDIA_ARCHIVE_BACKWARD_RE.search(normalized))
     ):
         return {"kind": "image_first", "expected_count": expected_count}
+    return None
+
+
+def progress_capture_instruction(text: str, *, has_attachments: bool) -> dict[str, Any] | None:
+    """Recognize friendly renovation capture controls without persisting ordinary media."""
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+    normalized = re.sub(r"\s+", "", text).strip("，。！？!?,")
+    if PROGRESS_CAPTURE_PAUSE_RE.fullmatch(normalized):
+        return {"kind": "pause"}
+    if PROGRESS_CAPTURE_RESUME_RE.fullmatch(normalized):
+        return {"kind": "resume"}
+    if PROGRESS_CAPTURE_FINALIZE_RE.fullmatch(normalized):
+        return {"kind": "finalize"}
+    if PROGRESS_CAPTURE_CANCEL_RE.fullmatch(normalized):
+        return {"kind": "cancel"}
+    if PROGRESS_CAPTURE_STATUS_RE.search(normalized):
+        return {"kind": "status"}
+    if PROGRESS_CAPTURE_NEGATION_RE.search(normalized):
+        return None
+    if PROGRESS_CAPTURE_START_RE.search(normalized):
+        return {"kind": "start"}
+    if has_attachments and PROGRESS_CAPTURE_SAME_MESSAGE_START_RE.search(normalized):
+        return {"kind": "start"}
+    if has_attachments and PROGRESS_CAPTURE_AMBIGUOUS_RE.search(normalized):
+        return {"kind": "confirm"}
     return None
 
 
@@ -718,6 +762,39 @@ class GatewayStore:
                 );
                 CREATE INDEX IF NOT EXISTS media_archive_request_attachment_ref_idx
                     ON media_archive_request_attachments(attachment_ref);
+                CREATE TABLE IF NOT EXISTS progress_capture_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    identity_scope TEXT NOT NULL,
+                    principal_scope TEXT NOT NULL,
+                    conversation_key TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('confirmation_required','active','paused','finalizing','completed','cancelled','expired')),
+                    intent_text TEXT NOT NULL,
+                    start_message_id TEXT NOT NULL,
+                    received_count INTEGER NOT NULL DEFAULT 0 CHECK(received_count >= 0 AND received_count <= 256),
+                    expires_at TEXT,
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS progress_capture_scope_idx
+                    ON progress_capture_sessions(identity_scope,principal_scope,conversation_key,state,created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS progress_capture_scope_open_idx
+                    ON progress_capture_sessions(identity_scope,principal_scope,conversation_key)
+                    WHERE state IN ('confirmation_required','active','paused','finalizing');
+                CREATE TABLE IF NOT EXISTS progress_capture_attachments (
+                    session_id TEXT NOT NULL REFERENCES progress_capture_sessions(session_id),
+                    position INTEGER NOT NULL CHECK(position >= 1 AND position <= 256),
+                    attachment_ref TEXT NOT NULL REFERENCES attachments(attachment_ref),
+                    message_id TEXT NOT NULL,
+                    source_message_hash TEXT NOT NULL,
+                    source_ref_hash TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    PRIMARY KEY(session_id,position),
+                    UNIQUE(session_id,attachment_ref),
+                    UNIQUE(session_id,source_ref_hash)
+                );
+                CREATE INDEX IF NOT EXISTS progress_capture_attachment_ref_idx
+                    ON progress_capture_attachments(attachment_ref);
                 CREATE TABLE IF NOT EXISTS outbound_chunks (
                     job_id TEXT NOT NULL,
                     chunk_index INTEGER NOT NULL,
@@ -945,6 +1022,12 @@ class GatewayStore:
                 connection,
                 "inbound_messages",
                 "media_archive_context_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
+            self._ensure_column(
+                connection,
+                "inbound_messages",
+                "progress_capture_context_json",
                 "TEXT NOT NULL DEFAULT '{}'",
             )
             self._ensure_column(connection, "remote_work_tasks", "identity_id", "TEXT")
@@ -3038,6 +3121,522 @@ class GatewayStore:
         }
 
     @staticmethod
+    def _progress_capture_scope_hash(
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+    ) -> str:
+        material = f"weixin-progress-capture-scope-v1\n{identity_scope}\n{principal_scope}\n{conversation_key_value}"
+        return "sha256:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _progress_capture_session_id(
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+        message_id: str,
+    ) -> str:
+        digest = hashlib.sha256(
+            f"weixin-progress-capture-v1\n{identity_scope}\n{principal_scope}\n{conversation_key_value}\n{message_id}".encode("utf-8")
+        ).digest()[:16]
+        token = base64.b32encode(digest).decode("ascii").rstrip("=")
+        return f"PCS-{token}"
+
+    @staticmethod
+    def _open_progress_capture(
+        connection: sqlite3.Connection,
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT * FROM progress_capture_sessions "
+            "WHERE identity_scope=? AND principal_scope=? AND conversation_key=? "
+            "AND state IN ('confirmation_required','active','paused','finalizing') "
+            "ORDER BY created_at DESC LIMIT 1",
+            (identity_scope, principal_scope, conversation_key_value),
+        ).fetchone()
+
+    @staticmethod
+    def _expire_progress_capture_confirmation(connection: sqlite3.Connection, now: str) -> None:
+        connection.execute(
+            "UPDATE progress_capture_sessions SET state='expired',updated_at=? "
+            "WHERE state='confirmation_required' AND expires_at IS NOT NULL AND expires_at<=?",
+            (now, now),
+        )
+
+    @staticmethod
+    def _capture_source_message_hash(message_id: str) -> str:
+        return "sha256:" + hashlib.sha256(f"weixin-progress-message-v1\n{message_id}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _capture_source_ref_hash(reference: str) -> str:
+        return "sha256:" + hashlib.sha256(reference.encode("utf-8")).hexdigest()
+
+    def _append_progress_capture_attachments(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+        message_id: str,
+        attachment_documents: list[dict[str, Any]],
+    ) -> None:
+        if not attachment_documents:
+            return
+        current = connection.execute(
+            "SELECT received_count FROM progress_capture_sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        if current is None:
+            raise StoreError("capture_session_not_found", "采集会话不存在", status=404)
+        position = int(current["received_count"])
+        for attachment in attachment_documents:
+            if attachment.get("media_type") not in {"image", "video"}:
+                continue
+            reference = str(attachment["attachment_ref"])
+            source = connection.execute(
+                "SELECT message_id FROM attachments WHERE attachment_ref=?",
+                (reference,),
+            ).fetchone()
+            if source is None:
+                raise StoreError("attachment_not_found", "采集附件引用不存在", status=404)
+            attachment_message_id = str(source["message_id"])
+            existing = connection.execute(
+                "SELECT 1 FROM progress_capture_attachments WHERE session_id=? AND attachment_ref=?",
+                (session_id, reference),
+            ).fetchone()
+            if existing is not None:
+                continue
+            position += 1
+            if position > PROGRESS_CAPTURE_MAX_ITEMS:
+                break
+            connection.execute(
+                "INSERT INTO progress_capture_attachments(session_id,position,attachment_ref,message_id,source_message_hash,source_ref_hash,sha256) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    position,
+                    reference,
+                    attachment_message_id,
+                    self._capture_source_message_hash(attachment_message_id),
+                    self._capture_source_ref_hash(reference),
+                    str(attachment["sha256"]),
+                ),
+            )
+        connection.execute(
+            "UPDATE progress_capture_sessions SET received_count=?,updated_at=? WHERE session_id=?",
+            (position, utc_now(), session_id),
+        )
+
+    def _progress_capture_source_attachments(
+        self,
+        connection: sqlite3.Connection,
+        session_id: str,
+    ) -> list[dict[str, Any]]:
+        now = utc_now()
+        rows = connection.execute(
+            "SELECT mapped.position,mapped.source_message_hash,mapped.source_ref_hash,mapped.sha256,"
+            "attachments.attachment_ref,attachments.original_filename,attachments.mime_type,attachments.size_bytes "
+            "FROM progress_capture_attachments mapped "
+            "JOIN attachments ON attachments.attachment_ref=mapped.attachment_ref "
+            "WHERE mapped.session_id=? AND attachments.consumed_at IS NULL AND attachments.expires_at>? "
+            "ORDER BY mapped.position",
+            (session_id, now),
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            mime_type = str(row["mime_type"])
+            media_type = "image" if mime_type.startswith("image/") else "video" if mime_type.startswith("video/") else "file"
+            if media_type not in {"image", "video"}:
+                continue
+            digest = str(row["sha256"])
+            result.append(
+                {
+                    "position": int(row["position"]),
+                    "attachment_ref": str(row["attachment_ref"]),
+                    "source_message_hash": str(row["source_message_hash"]),
+                    "source_ref_hash": str(row["source_ref_hash"]),
+                    "sha256": digest if digest.startswith("sha256:") else f"sha256:{digest}",
+                    "media_type": media_type,
+                    "size_bytes": int(row["size_bytes"]),
+                    "display_name": str(row["original_filename"]),
+                }
+            )
+        return result
+
+    def _progress_capture_context(
+        self,
+        connection: sqlite3.Connection,
+        session: sqlite3.Row,
+        *,
+        action: str,
+        message_id: str,
+        note_text: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "session_id": str(session["session_id"]),
+            "scope_hash": self._progress_capture_scope_hash(
+                str(session["identity_scope"]),
+                str(session["principal_scope"]),
+                str(session["conversation_key"]),
+            ),
+            "state": str(session["state"]),
+            "action": action,
+            "intent_text": str(session["intent_text"]),
+            "note_text": note_text[:2000],
+            "received_count": int(session["received_count"]),
+            "source_message_hash": self._capture_source_message_hash(message_id),
+            "source_attachments": self._progress_capture_source_attachments(
+                connection,
+                str(session["session_id"]),
+            ),
+        }
+
+    def _no_progress_capture_context(
+        self,
+        *,
+        identity_scope: str,
+        principal_scope: str,
+        conversation_key_value: str,
+        message_id: str,
+        action: str,
+    ) -> dict[str, Any]:
+        session_id = self._progress_capture_session_id(
+            identity_scope,
+            principal_scope,
+            conversation_key_value,
+            message_id,
+        )
+        return {
+            "version": 1,
+            "session_id": session_id,
+            "scope_hash": self._progress_capture_scope_hash(
+                identity_scope,
+                principal_scope,
+                conversation_key_value,
+            ),
+            "state": "cancelled",
+            "action": action,
+            "intent_text": "",
+            "note_text": "",
+            "received_count": 0,
+            "source_message_hash": self._capture_source_message_hash(message_id),
+            "source_attachments": [],
+        }
+
+    def _correlate_progress_capture(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        message_id: str,
+        sender_id: str,
+        conversation_key_value: str,
+        text: str,
+        attachment_documents: list[dict[str, Any]],
+        user_digest: str | None,
+        identity_identifier: str | None,
+        principal_id_value: str | None,
+        capability_profile: str,
+    ) -> dict[str, Any]:
+        if capability_profile not in {"owner", "owner_legacy"}:
+            return {}
+        now = utc_now()
+        self._expire_progress_capture_confirmation(connection, now)
+        identity_scope, principal_scope = self._media_archive_scope(
+            sender_id=sender_id,
+            user_digest=user_digest,
+            identity_identifier=identity_identifier,
+            principal_id_value=principal_id_value,
+        )
+        instruction = progress_capture_instruction(text, has_attachments=bool(attachment_documents))
+        session = self._open_progress_capture(
+            connection,
+            identity_scope,
+            principal_scope,
+            conversation_key_value,
+        )
+        normalized_text = re.sub(r"\s+", "", text).strip("，。！？!?,")
+
+        if session is None:
+            kind = None if instruction is None else instruction["kind"]
+            if kind in {"pause", "resume", "finalize", "status", "cancel"}:
+                return self._no_progress_capture_context(
+                    identity_scope=identity_scope,
+                    principal_scope=principal_scope,
+                    conversation_key_value=conversation_key_value,
+                    message_id=message_id,
+                    action="nothing_to_cancel" if kind == "cancel" else "no_active_session",
+                )
+            if kind not in {"start", "confirm"}:
+                return {}
+            session_id = self._progress_capture_session_id(
+                identity_scope,
+                principal_scope,
+                conversation_key_value,
+                message_id,
+            )
+            state = "active" if kind == "start" else "confirmation_required"
+            expires_at = (
+                None
+                if state == "active"
+                else (datetime.now(timezone.utc) + timedelta(seconds=PROGRESS_CAPTURE_CONFIRM_TTL_SECONDS)).isoformat()
+            )
+            connection.execute(
+                "INSERT INTO progress_capture_sessions(session_id,identity_scope,principal_scope,conversation_key,state,intent_text,start_message_id,expires_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    identity_scope,
+                    principal_scope,
+                    conversation_key_value,
+                    state,
+                    text[:1000],
+                    message_id,
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+            self._append_progress_capture_attachments(
+                connection,
+                session_id,
+                message_id,
+                attachment_documents,
+            )
+            session = connection.execute(
+                "SELECT * FROM progress_capture_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            assert session is not None
+            return self._progress_capture_context(
+                connection,
+                session,
+                action="started" if state == "active" else "confirmation_required",
+                message_id=message_id,
+                note_text=text if attachment_documents else "",
+            )
+
+        session_id = str(session["session_id"])
+        kind = None if instruction is None else instruction["kind"]
+        if session["state"] == "confirmation_required":
+            if kind == "cancel":
+                connection.execute(
+                    "UPDATE progress_capture_sessions SET state='cancelled',updated_at=? WHERE session_id=?",
+                    (now, session_id),
+                )
+                session = connection.execute(
+                    "SELECT * FROM progress_capture_sessions WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                assert session is not None
+                return self._progress_capture_context(connection, session, action="cancelled", message_id=message_id)
+            confirmed = bool(PROGRESS_CAPTURE_CONFIRM_RE.fullmatch(normalized_text)) or kind == "start"
+            self._append_progress_capture_attachments(
+                connection,
+                session_id,
+                message_id,
+                attachment_documents,
+            )
+            if confirmed:
+                connection.execute(
+                    "UPDATE progress_capture_sessions SET state='active',expires_at=NULL,intent_text=CASE WHEN ?!='' THEN ? ELSE intent_text END,updated_at=? WHERE session_id=?",
+                    (text, text[:1000], now, session_id),
+                )
+            session = connection.execute(
+                "SELECT * FROM progress_capture_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            assert session is not None
+            return self._progress_capture_context(
+                connection,
+                session,
+                action="started" if confirmed else "confirmation_pending_silent",
+                message_id=message_id,
+                note_text=text if confirmed else "",
+            )
+
+        if kind == "cancel":
+            connection.execute(
+                "UPDATE progress_capture_sessions SET state='cancelled',updated_at=? WHERE session_id=?",
+                (now, session_id),
+            )
+            action = "cancelled"
+        elif kind == "pause":
+            connection.execute(
+                "UPDATE progress_capture_sessions SET state='paused',updated_at=? WHERE session_id=?",
+                (now, session_id),
+            )
+            action = "paused"
+        elif kind == "resume":
+            connection.execute(
+                "UPDATE progress_capture_sessions SET state='active',updated_at=? WHERE session_id=?",
+                (now, session_id),
+            )
+            action = "resumed"
+        elif kind == "finalize":
+            connection.execute(
+                "UPDATE progress_capture_sessions SET state='finalizing',updated_at=? WHERE session_id=?",
+                (now, session_id),
+            )
+            action = "finalize_requested"
+        elif kind == "status":
+            action = "status"
+        elif session["state"] == "paused" and attachment_documents:
+            action = "paused_media_ignored"
+        else:
+            if session["state"] == "finalizing" and attachment_documents:
+                connection.execute(
+                    "UPDATE progress_capture_sessions SET state='active',updated_at=? WHERE session_id=?",
+                    (now, session_id),
+                )
+            self._append_progress_capture_attachments(
+                connection,
+                session_id,
+                message_id,
+                attachment_documents,
+            )
+            action = "media_received" if attachment_documents else "note"
+        session = connection.execute(
+            "SELECT * FROM progress_capture_sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        assert session is not None
+        return self._progress_capture_context(
+            connection,
+            session,
+            action=action,
+            message_id=message_id,
+            note_text=(text if action in {"media_received", "note", "resumed"} else ""),
+        )
+
+    def _bridge_media_archive_progress_capture(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        message_id: str,
+        sender_id: str,
+        conversation_key_value: str,
+        text: str,
+        attachment_documents: list[dict[str, Any]],
+        media_archive_context: dict[str, Any],
+        user_digest: str | None,
+        identity_identifier: str | None,
+        principal_id_value: str | None,
+        capability_profile: str,
+    ) -> dict[str, Any]:
+        """Upgrade an explicitly renovation-targeted legacy archive batch into a durable capture session."""
+
+        if capability_profile not in {"owner", "owner_legacy"}:
+            return {}
+        if media_archive_context.get("authorized") is not True:
+            return {}
+        intent_text = str(media_archive_context.get("intent_text") or text).strip()
+        if not PROGRESS_CAPTURE_AMBIGUOUS_RE.search(re.sub(r"\s+", "", intent_text)):
+            return {}
+        media = [
+            attachment
+            for attachment in attachment_documents
+            if attachment.get("media_type") in {"image", "video"}
+        ]
+        if not media or len(media) != len(attachment_documents):
+            return {}
+        identity_scope, principal_scope = self._media_archive_scope(
+            sender_id=sender_id,
+            user_digest=user_digest,
+            identity_identifier=identity_identifier,
+            principal_id_value=principal_id_value,
+        )
+        existing = self._open_progress_capture(
+            connection,
+            identity_scope,
+            principal_scope,
+            conversation_key_value,
+        )
+        if existing is not None:
+            return self._progress_capture_context(
+                connection,
+                existing,
+                action="media_received",
+                message_id=message_id,
+                note_text=intent_text,
+            )
+        now = utc_now()
+        session_id = self._progress_capture_session_id(
+            identity_scope,
+            principal_scope,
+            conversation_key_value,
+            message_id,
+        )
+        connection.execute(
+            "INSERT INTO progress_capture_sessions(session_id,identity_scope,principal_scope,conversation_key,state,intent_text,start_message_id,created_at,updated_at) "
+            "VALUES (?,?,?,?, 'active',?,?,?,?)",
+            (
+                session_id,
+                identity_scope,
+                principal_scope,
+                conversation_key_value,
+                intent_text[:1000],
+                message_id,
+                now,
+                now,
+            ),
+        )
+        self._append_progress_capture_attachments(
+            connection,
+            session_id,
+            message_id,
+            media,
+        )
+        session = connection.execute(
+            "SELECT * FROM progress_capture_sessions WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+        assert session is not None
+        return self._progress_capture_context(
+            connection,
+            session,
+            action="started",
+            message_id=message_id,
+            note_text=intent_text,
+        )
+
+    def complete_progress_capture(
+        self,
+        session_id: str,
+        *,
+        received_count: Any,
+        stored_count: Any,
+        linked_count: Any,
+    ) -> dict[str, Any]:
+        if not re.fullmatch(r"PCS-[A-Z2-7]{26}", str(session_id)):
+            raise StoreError("capture_invalid", "采集 session_id 无效")
+        counts = (received_count, stored_count, linked_count)
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+            raise StoreError("capture_invalid", "采集完成数量无效")
+        if not (received_count == stored_count == linked_count):
+            raise StoreError("capture_reconciliation_mismatch", "采集完成数量不一致", status=409)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state,received_count FROM progress_capture_sessions WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("capture_session_not_found", "采集会话不存在", status=404)
+            if int(row["received_count"]) != received_count:
+                raise StoreError("capture_reconciliation_mismatch", "Gateway 接收数量已变化", status=409)
+            if row["state"] == "completed":
+                return {"acknowledged": True, "idempotent_replay": True}
+            if row["state"] != "finalizing":
+                raise StoreError("capture_state_conflict", "采集会话不在完成确认状态", status=409)
+            now = utc_now()
+            connection.execute(
+                "UPDATE progress_capture_sessions SET state='completed',completed_at=?,updated_at=? WHERE session_id=?",
+                (now, now, session_id),
+            )
+            return {"acknowledged": True, "idempotent_replay": False}
+
+    @staticmethod
     def _media_archive_scope(
         *,
         sender_id: str,
@@ -3604,6 +4203,18 @@ class GatewayStore:
                             (datetime.now(timezone.utc) + timedelta(seconds=self.spool_ttl_seconds)).isoformat(),
                         ),
                     )
+                progress_capture_context = self._correlate_progress_capture(
+                    connection,
+                    message_id=message_id,
+                    sender_id=sender_id,
+                    conversation_key_value=conversation_key,
+                    text=text,
+                    attachment_documents=attachment_documents,
+                    user_digest=user_digest,
+                    identity_identifier=identity_identifier,
+                    principal_id_value=principal_id_value,
+                    capability_profile=capability_profile,
+                )
                 attachment_documents, media_archive_context = self._correlate_media_archive(
                     connection,
                     message_id=message_id,
@@ -3615,11 +4226,26 @@ class GatewayStore:
                     identity_identifier=identity_identifier,
                     principal_id_value=principal_id_value,
                 )
+                if not progress_capture_context:
+                    progress_capture_context = self._bridge_media_archive_progress_capture(
+                        connection,
+                        message_id=message_id,
+                        sender_id=sender_id,
+                        conversation_key_value=conversation_key,
+                        text=text,
+                        attachment_documents=attachment_documents,
+                        media_archive_context=media_archive_context,
+                        user_digest=user_digest,
+                        identity_identifier=identity_identifier,
+                        principal_id_value=principal_id_value,
+                        capability_profile=capability_profile,
+                    )
                 connection.execute(
-                    "UPDATE inbound_messages SET attachments_json=?,media_archive_context_json=?,updated_at=? WHERE message_id=?",
+                    "UPDATE inbound_messages SET attachments_json=?,media_archive_context_json=?,progress_capture_context_json=?,updated_at=? WHERE message_id=?",
                     (
                         canonical_json(attachment_documents),
                         canonical_json(media_archive_context),
+                        canonical_json(progress_capture_context),
                         now,
                         message_id,
                     ),
@@ -3939,6 +4565,12 @@ class GatewayStore:
                     "SELECT state,COUNT(*) AS count FROM media_archive_requests GROUP BY state"
                 )
             }
+            capture_counts = {
+                row["state"]: row["count"]
+                for row in connection.execute(
+                    "SELECT state,COUNT(*) AS count FROM progress_capture_sessions GROUP BY state"
+                )
+            }
             return {
                 "messages": {state: message_counts.get(state, 0) for state in ("pending_controller", "controller_submitted", "completed", "failed")},
                 "attachments": connection.execute("SELECT COUNT(*) FROM attachments WHERE consumed_at IS NULL").fetchone()[0],
@@ -3947,11 +4579,24 @@ class GatewayStore:
                     state: archive_counts.get(state, 0)
                     for state in ("pending", "bound", "completed", "failed", "cancelled", "expired")
                 },
+                "progress_capture_sessions": {
+                    state: capture_counts.get(state, 0)
+                    for state in (
+                        "confirmation_required",
+                        "active",
+                        "paused",
+                        "finalizing",
+                        "completed",
+                        "cancelled",
+                        "expired",
+                    )
+                },
             }
 
     @staticmethod
     def _message_document(row: sqlite3.Row) -> dict[str, Any]:
         media_archive_context = json.loads(row["media_archive_context_json"] or "{}")
+        progress_capture_context = json.loads(row["progress_capture_context_json"] or "{}")
         return {
             "message_id": row["message_id"],
             "sender_id": row["sender_id"],
@@ -3968,4 +4613,7 @@ class GatewayStore:
             "principal_id": row["principal_id"],
             "upstream_message_id": row["upstream_message_id"],
             "media_archive_context": media_archive_context if isinstance(media_archive_context, dict) else {},
+            "progress_capture_context": (
+                progress_capture_context if isinstance(progress_capture_context, dict) else {}
+            ),
         }

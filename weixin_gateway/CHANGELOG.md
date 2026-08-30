@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.4.8
+
+- 新增按 identity、principal 与 conversation 隔离的持久装修进度采集会话，支持明确开始、一次模糊确认、跨消息图片/视频/说明、暂停、恢复、状态、取消、完成、256 项上限与重启恢复。
+- 普通附件仍不构成保存授权；明确把既有媒体归档为装修进度时复用精确批次，数量、占用或指代不一致即失败关闭。
+- 完成接口严格核对 Gateway received、Hub stored 与事件 linked；Controller 抑制连续单图回复时，Gateway 仍停止输入状态并持久完成消息。
+
 ## 0.4.7
 
 - 将 Controller context、预算/额度、认证、bad request、cyber policy、sandbox 和瞬态上游错误码映射为简洁中文失败提示。

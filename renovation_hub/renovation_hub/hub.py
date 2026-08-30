@@ -161,8 +161,10 @@ class RenovationHubStore(QuoteStoreMixin, LedgerStore):
                 (str(HUB_SCHEMA_VERSION),),
             )
         from .media import initialize_media_schema
+        from .progress_capture import initialize_progress_capture_schema
 
         initialize_media_schema(self)
+        initialize_progress_capture_schema(self)
         initialize_quote_schema(self)
 
     def status(self) -> dict[str, Any]:
@@ -177,6 +179,9 @@ class RenovationHubStore(QuoteStoreMixin, LedgerStore):
                     "areas": connection.execute("SELECT count(*) FROM areas WHERE status!='archived'").fetchone()[0],
                     "events": connection.execute("SELECT count(*) FROM events WHERE status='active'").fetchone()[0],
                     "media": connection.execute("SELECT count(*) FROM media_assets WHERE processing_status='ready'").fetchone()[0],
+                    "progress_captures": connection.execute(
+                        "SELECT count(*) FROM progress_capture_sessions WHERE state IN ('active','paused','finalizing')"
+                    ).fetchone()[0],
                 }
             )
             result["counts"].update(self.quote_counts(connection))

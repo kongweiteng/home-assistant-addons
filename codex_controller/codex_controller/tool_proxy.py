@@ -67,6 +67,20 @@ SAFE_UPSTREAM_ERROR_CODES = frozenset(
         "attachment_invalid",
         "attachment_missing",
         "attachment_not_found",
+        "capture_area_ambiguous",
+        "capture_batch_invalid",
+        "capture_context_not_found",
+        "capture_invalid",
+        "capture_item_conflict",
+        "capture_item_invalid",
+        "capture_item_limit",
+        "capture_item_not_found",
+        "capture_project_ambiguous",
+        "capture_reconciliation_mismatch",
+        "capture_reconciliation_pending",
+        "capture_session_not_found",
+        "capture_stage_ambiguous",
+        "capture_state_conflict",
         "idempotency_conflict",
         "invalid_amount",
         "invalid_date",
@@ -521,6 +535,68 @@ class ToolRouter:
             f"{self.gateway_base_url}/internal/v1/attachments/{quote(reference, safe='')}/preview",
             self.gateway_token,
             MAX_GATEWAY_ATTACHMENT_BYTES,
+        )
+
+    def progress_capture_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Call the fixed internal Hub capture API outside model tool selection."""
+
+        if not self._hub_configured():
+            raise ToolProxyError("ledger_unavailable", "Renovation Hub 采集接口未配置")
+        if not isinstance(payload, dict):
+            raise ToolProxyError("invalid_arguments", "采集参数必须是对象")
+        return self.request_json(
+            "POST",
+            f"{self.ledger_base_url}/internal/v1/progress-captures/action",
+            self.ledger_token,
+            payload,
+        )
+
+    def progress_capture_media(self, reference: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Stream one pre-registered capture item and link it to the draft event."""
+
+        if not self._hub_configured() or not self._gateway_configured():
+            raise ToolProxyError("gateway_unavailable", "装修进度媒体链路未完整配置")
+        if not isinstance(reference, str) or not ATTACHMENT_REF_RE.fullmatch(reference):
+            raise ToolProxyError("attachment_ref_invalid", "attachment_ref 无效")
+        if not isinstance(payload, dict):
+            raise ToolProxyError("invalid_arguments", "采集媒体参数必须是对象")
+        required = {"session_id", "item_id", "project_id", "event_id", "source_ref_hash", "idempotency_key"}
+        if not required.issubset(payload):
+            raise ToolProxyError("invalid_arguments", "采集媒体参数不完整")
+        arguments = {
+            "project_id": payload["project_id"],
+            "captured_at": payload.get("captured_at"),
+            "links": [{"target_type": "event", "target_id": payload["event_id"]}],
+            "capture_session_id": payload["session_id"],
+            "capture_item_id": payload["item_id"],
+            "source_ref_hash": payload["source_ref_hash"],
+            "idempotency_key": payload["idempotency_key"],
+        }
+        return self.stream_media(
+            self.gateway_base_url,
+            self.gateway_token,
+            self.ledger_base_url,
+            self.ledger_token,
+            reference,
+            arguments,
+            self.max_media_bytes,
+        )
+
+    def progress_capture_ack(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Acknowledge Gateway completion only after Hub exact reconciliation."""
+
+        if not self._gateway_configured():
+            raise ToolProxyError("gateway_unavailable", "Weixin Gateway 采集确认接口未配置")
+        if not isinstance(payload, dict):
+            raise ToolProxyError("invalid_arguments", "采集完成确认必须是对象")
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not re.fullmatch(r"PCS-[A-Z2-7]{26}", session_id):
+            raise ToolProxyError("invalid_arguments", "采集 session_id 无效")
+        return self.request_json(
+            "POST",
+            f"{self.gateway_base_url}/internal/v1/progress-captures/{quote(session_id, safe='')}/complete",
+            self.gateway_token,
+            payload,
         )
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1234,7 +1310,13 @@ def _stream_gateway_to_hub(
     idempotency_key = arguments.get("idempotency_key")
     if not isinstance(idempotency_key, str) or len(idempotency_key) < 16 or len(idempotency_key) > 256:
         raise ToolProxyError("invalid_idempotency_key", "媒体写入需要稳定 idempotency_key")
-    source_ref_hash = hashlib.sha256(reference.encode("utf-8")).hexdigest()
+    requested_source_ref_hash = arguments.get("source_ref_hash")
+    source_ref_hash = (
+        requested_source_ref_hash
+        if isinstance(requested_source_ref_hash, str)
+        and re.fullmatch(r"sha256:[a-f0-9]{64}", requested_source_ref_hash)
+        else hashlib.sha256(reference.encode("utf-8")).hexdigest()
+    )
 
     def confirm_consumption(result: dict[str, Any], digest: str) -> dict[str, Any]:
         try:

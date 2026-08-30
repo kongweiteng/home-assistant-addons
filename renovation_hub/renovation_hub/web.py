@@ -25,6 +25,7 @@ from .business_tools import (
 from .hub import RenovationHubStore
 from .ledger import LedgerError
 from .media import MediaService
+from .progress_capture import ProgressCaptureService
 
 
 def _make_app_key(name: str, value_type: type[Any]) -> Any:
@@ -34,6 +35,7 @@ def _make_app_key(name: str, value_type: type[Any]) -> Any:
 
 STORE_KEY = _make_app_key("store", RenovationHubStore)
 MEDIA_KEY = _make_app_key("media", MediaService)
+PROGRESS_CAPTURE_KEY = _make_app_key("progress_capture", ProgressCaptureService)
 API_TOKEN_KEY = _make_app_key("api_token", str)
 CUTOVER_TOKEN_KEY = _make_app_key("cutover_token", str)
 STATIC_DIR_KEY = _make_app_key("static_dir", object)
@@ -71,6 +73,7 @@ def create_app(
     *,
     store: RenovationHubStore,
     media: MediaService,
+    progress_capture: ProgressCaptureService | None = None,
     api_token: str,
     cutover_token: str = "",
     max_request_bytes: int,
@@ -82,6 +85,7 @@ def create_app(
     )
     app[STORE_KEY] = store
     app[MEDIA_KEY] = media
+    app[PROGRESS_CAPTURE_KEY] = progress_capture or ProgressCaptureService(store, media)
     app[API_TOKEN_KEY] = api_token
     app[CUTOVER_TOKEN_KEY] = cutover_token
     app[STATIC_DIR_KEY] = Path(static_dir) if static_dir else None
@@ -145,6 +149,7 @@ def create_app(
     app.router.add_get("/internal/v1/downloads/chart/{reference}", chart_download)
     app.router.add_get("/internal/v1/media/replay", media_replay)
     app.router.add_post("/internal/v1/media/ingest", media_ingest)
+    app.router.add_post("/internal/v1/progress-captures/action", progress_capture_action)
     app.router.add_get("/{tail:.*}", spa)
     return app
 
@@ -186,6 +191,10 @@ def _store(request: web.Request) -> RenovationHubStore:
 
 def _media(request: web.Request) -> MediaService:
     return request.app[MEDIA_KEY]
+
+
+def _progress_capture(request: web.Request) -> ProgressCaptureService:
+    return request.app[PROGRESS_CAPTURE_KEY]
 
 
 def _authorized(request: web.Request) -> None:
@@ -607,6 +616,11 @@ async def media_replay(request: web.Request) -> web.Response:
     return _result(result)
 
 
+async def progress_capture_action(request: web.Request) -> web.Response:
+    payload = await _json(request, internal=True)
+    return _result(_progress_capture(request).action(payload))
+
+
 def _decode_header(value: str, field: str, maximum: int) -> str:
     try:
         decoded = base64.urlsafe_b64decode(value.encode("ascii")).decode("utf-8")
@@ -644,6 +658,7 @@ async def media_ingest(request: web.Request) -> web.Response:
         original_filename=filename,
         mime_type=request.content_type,
         expected_bytes=expected_bytes,
+        retry_failed=bool(metadata.get("capture_item_id")),
     )
     if prepared["replay"]:
         result = dict(prepared["result"])

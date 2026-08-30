@@ -1,6 +1,18 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.7`。
+当前版本：`0.4.8`。
+
+## 装修进度采集会话
+
+`0.4.8` 在旧单批媒体归档之外增加持久连续采集。会话按 identity、principal、conversation 三重作用域隔离，最多 256 项；重启后继续使用原 session 与附件映射。
+
+- 明确“开始记录装修进度”会直接开始；弱装修信号只询问一次，确认前普通附件不写入装修档案。
+- active 后后续图片、视频和说明逐项进入清单；“暂停/继续/状态/取消/记录完成”由 Gateway 在模型外确定性识别。
+- 首项、累计 5 的倍数、失败、状态和控制动作主动回复；回复抑制不影响附件保存、消息完成或输入状态清理。
+- 完成前必须证明 received、registered、stored、linked 完全一致，failed/pending 为 0 且附件 ACK 已确认；否则保留会话供重试。
+- Gateway 只保存微信侧关联、脱敏摘要与私有 spool；媒体原件、item、说明、事件关联和最终审计由 Hub 保存。
+
+回退 `0.4.8` 前先关闭 Poller 与 Controller intake，确认没有 active、paused、confirmation_required、finalizing 会话或待补 ACK，并与 Controller `0.5.26`、Hub `0.3.4` 成组回退。不得删除未完成媒体或采集表。
 
 `0.4.7` 将 Controller 最终错误码映射为有界中文提示：context/预算/额度要求缩短内容、新开会话或检查额度；认证失效要求重新登录；bad request、cyber policy 与 sandbox 不自动重试；连接、响应流、连续失败和内部服务器错误只在 Controller 最多 3 次总尝试耗尽后提示稍后再试。Gateway 不读取或发送 app-server raw message、`additionalDetails`、URL、prompt 或 token。
 

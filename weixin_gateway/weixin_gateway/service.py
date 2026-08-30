@@ -1566,6 +1566,8 @@ class GatewayService:
                             }
                             if message.get("media_archive_context"):
                                 payload["media_archive_context"] = message["media_archive_context"]
+                            if message.get("progress_capture_context"):
+                                payload["progress_capture_context"] = message["progress_capture_context"]
                             stored_profile = str(message.get("capability_profile") or "owner_legacy")
                             try:
                                 incompatible = False
@@ -1623,6 +1625,10 @@ class GatewayService:
                                 )
                                 outbound = dict(message)
                                 outbound["thread_short"] = job.get("thread_short")
+                                if job.get("reply_suppressed") is True:
+                                    await self._stop_typing_for_message(message)
+                                    self.store.mark_finished(message["message_id"], success=True)
+                                    continue
                                 try:
                                     suppression = await self._send_completed_job(outbound, job)
                                 except StoreError as exc:
@@ -2768,7 +2774,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.7",
+            "version": "0.4.8",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

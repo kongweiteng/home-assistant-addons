@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.5.26
+
+- 新增 `progress_capture_v1` 确定性作业路径；装修进度开始、登记、说明、暂停、恢复、取消、状态和完成不依赖模型选择媒体工具。
+- Controller 按最多 16 项分批预登记并逐项流送；Hub 已存但 Gateway ACK 未确认时使用稳定幂等键补 ACK，计数或状态不一致时失败关闭。
+- 新增 `reply_suppressed` 低噪声结果字段；普通连续单图可不发微信文字，但消息完成、输入状态清理、附件保存与审计仍执行。
+- 保持 Relay `0.2.17`、Runner `0.3.18`、Desktop 双 revision、M8 owner-only 边界和 durable `recovery_required` 语义不变。
+
 ## 0.5.25
 
 - 修复同一 `thread_revision`、控制 revision 仍为空时的无操作快照等价判定：`control_revision: null` 与省略该可选键、且其余字段完全一致时在整数单调性检查前按 `refreshed` 接受，避免重连边界把语义相同快照误判为 `desktop_revision_conflict`。

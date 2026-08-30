@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from .app_server import AppServerClient, AppServerError
 from .media_input import MediaInputError, TurnMediaManager
+from .progress_capture import ProgressCaptureCoordinator
 from .prepare_car import (
     PREPARE_CAR_TOOL_NAMES,
     execute_result_text,
@@ -415,6 +416,7 @@ class ControllerService:
                 "runner_manager_v2",
                 "desktop_takeover_v1",
                 "aito_prepare_car_confirmation_v1",
+                "progress_capture_v1",
             ],
         }
 
@@ -506,7 +508,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.25",
+            "version": "0.5.26",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -749,6 +751,20 @@ class ControllerService:
                     conversation_key=job["conversation_key"],
                     media_archive_authorized=media_archive_authorized,
                 )
+            if ProgressCaptureCoordinator.recognizes(payload):
+                if capability_profile not in {"owner", "owner_legacy"} or self.tool_context is None:
+                    raise ToolProxyError(
+                        "tool_not_allowed_for_profile",
+                        "当前微信成员不能创建装修进度归档",
+                    )
+                outcome = ProgressCaptureCoordinator(self.tool_context).handle(payload)
+                self.store.complete_direct_result(
+                    job["job_id"],
+                    outcome.text,
+                    item_type=outcome.item_type,
+                    suppress_reply=outcome.suppress_reply,
+                )
+                return
             prepare_intent = prepare_car_intent(payload)
             if (
                 self.tool_context is not None

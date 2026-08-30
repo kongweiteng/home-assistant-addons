@@ -1,6 +1,17 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.25`。
+当前版本：`0.5.26`。
+
+## 装修进度确定性编排
+
+Gateway 提交 `progress_capture_context@1` 后，Controller 不创建 app-server Turn，也不让模型决定附件数量或媒体工具调用。它验证 session、scope、来源消息和附件摘要，再通过固定内部 API 完成以下步骤：
+
+1. 建立或恢复 Hub 草稿；项目、阶段或空间无法唯一确定时只返回补充引导，不猜测。
+2. 每批最多登记 16 项、每会话最多 256 项，并逐项从 Gateway 非消费流读取原文到 Hub。
+3. Hub 写入后 ACK Gateway；若 Hub 已存但 ACK 待确认，使用同一幂等键 replay 补 ACK。
+4. 完成前重试可恢复的媒体处理失败，并严格核对 received、registered、stored、linked、failed、pending 与 ACK 结果；完全一致后才确认 Gateway 会话完成。
+
+`reply_suppressed=true` 只抑制低噪声微信文字，不跳过消息完成、输入状态清理、附件保存或审计。从 `0.5.26` 回退必须与 Gateway `0.4.8`、Hub `0.3.4` 成组执行；先关闭 Poller 与 intake，并确认没有 active、paused、confirmation_required 或 finalizing 会话及待补 ACK。
 
 ## 瞬态 Turn 安全重试
 

@@ -141,6 +141,7 @@ class MediaService:
         mime_type: Any,
         expected_bytes: Any,
         resume_existing: bool = False,
+        retry_failed: bool = False,
     ) -> dict[str, Any]:
         key = _idempotency_key(idempotency_key)
         ref_hash = _text(source_ref_hash, "source_ref_hash", 80, required=True)
@@ -175,6 +176,23 @@ class MediaService:
                         "mime_type": mime,
                         "expected_bytes": expected_bytes,
                         "state": upload["state"],
+                    }
+                if retry_failed and upload["state"] == "failed":
+                    retry_path = self.staging_root / f"{upload['id']}.part"
+                    retry_path.unlink(missing_ok=True)
+                    connection.execute(
+                        "UPDATE uploads SET received_bytes=0,state='created',media_id=NULL,error_code=NULL,updated_at=? WHERE id=?",
+                        (utc_now(), upload["id"]),
+                    )
+                    return {
+                        "replay": False,
+                        "resumed": True,
+                        "upload_id": upload["id"],
+                        "path": retry_path,
+                        "filename": filename,
+                        "mime_type": mime,
+                        "expected_bytes": expected_bytes,
+                        "state": "created",
                     }
                 raise LedgerError("upload_in_progress", "媒体上传仍在处理中", status=409)
             upload_id = str(uuid.uuid4())
@@ -357,6 +375,27 @@ class MediaService:
             )
             for link in links:
                 connection.execute("INSERT INTO media_links(media_id,target_type,target_id,created_at) VALUES (?,?,?,?)", (object_id, link["target_type"], link["target_id"], now))
+            capture_session_id = metadata.get("capture_session_id")
+            capture_item_id = metadata.get("capture_item_id")
+            if capture_session_id is not None or capture_item_id is not None:
+                if not isinstance(capture_session_id, str) or not isinstance(capture_item_id, str):
+                    raise LedgerError("capture_item_invalid", "采集媒体元数据不完整")
+                event_links = [link["target_id"] for link in links if link["target_type"] == "event"]
+                if len(event_links) != 1:
+                    raise LedgerError("capture_item_invalid", "采集媒体必须关联唯一进度事件")
+                from .progress_capture import complete_capture_item
+
+                complete_capture_item(
+                    connection,
+                    session_id=capture_session_id,
+                    item_id=capture_item_id,
+                    project_id=project_id,
+                    event_id=event_links[0],
+                    source_ref_hash=str(metadata.get("source_ref_hash") or ""),
+                    media_id=object_id,
+                    processing_status=processing["status"],
+                    error_code=processing.get("error_code"),
+                )
             asset = self._asset(connection, object_id)
             result = {"media": asset, "idempotent_replay": False}
             self.store._domain_audit(connection, action="ingest_media", target_type="media", target_id=object_id, actor_hash=actor_hash, idempotency_key=metadata["idempotency_key"], before=None, after=asset)
@@ -412,6 +451,51 @@ class MediaService:
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
+
+    def reprocess(self, media_id: str) -> dict[str, Any]:
+        """Retry metadata/preview processing without replacing the durable original."""
+
+        media_id = _text(media_id, "media_id", 64, required=True)
+        with self.store._connect() as connection:
+            row = connection.execute("SELECT * FROM media_assets WHERE id=?", (media_id,)).fetchone()
+            if row is None:
+                raise LedgerError("media_not_found", "媒体不存在", status=404)
+            asset = dict(row)
+        media_path = self.media_root / asset["storage_name"]
+        try:
+            resolved = media_path.resolve(strict=True)
+            resolved.relative_to(self.media_root.resolve())
+        except (FileNotFoundError, ValueError) as exc:
+            raise LedgerError("media_missing", "媒体原件缺失", status=404) from exc
+        processing = self._process(resolved, asset["media_type"], asset["mime_type"], asset["sha256"])
+        with self.store._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self.store._require_writer(connection)
+            now = utc_now()
+            connection.execute(
+                "UPDATE media_assets SET preview_name=?,width=?,height=?,duration_ms=?,processing_status=?,error_code=?,version=version+1,updated_at=? WHERE id=?",
+                (
+                    processing.get("preview_name"),
+                    processing.get("width"),
+                    processing.get("height"),
+                    processing.get("duration_ms"),
+                    processing["status"],
+                    processing.get("error_code"),
+                    now,
+                    media_id,
+                ),
+            )
+            item_state = "stored" if processing["status"] == "ready" else "failed"
+            connection.execute(
+                "UPDATE progress_capture_items SET state=?,error_code=?,attempts=attempts+1,updated_at=? WHERE media_id=?",
+                (
+                    item_state,
+                    None if item_state == "stored" else (processing.get("error_code") or "media_processing_failed"),
+                    now,
+                    media_id,
+                ),
+            )
+            return self._asset(connection, media_id)
 
     def replay(self, idempotency_key: str, source_ref_hash: str) -> dict[str, Any] | None:
         key = _idempotency_key(idempotency_key)

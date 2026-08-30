@@ -315,6 +315,7 @@ class ControllerStore(FollowupStoreMixin):
                     input_json TEXT NOT NULL,
                     result_text TEXT,
                     result_summary TEXT,
+                    reply_suppressed INTEGER NOT NULL DEFAULT 0 CHECK(reply_suppressed IN (0,1)),
                     error_code TEXT,
                     error_type TEXT,
                     upstream_http_status INTEGER,
@@ -466,6 +467,10 @@ class ControllerStore(FollowupStoreMixin):
                 )
             if "result_summary" not in columns:
                 connection.execute("ALTER TABLE jobs ADD COLUMN result_summary TEXT")
+            if "reply_suppressed" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN reply_suppressed INTEGER NOT NULL DEFAULT 0"
+                )
             job_additions = {
                 "error_type": "TEXT",
                 "upstream_http_status": "INTEGER",
@@ -522,6 +527,7 @@ class ControllerStore(FollowupStoreMixin):
         attachments = payload.get("attachments")
         reply_capabilities = payload.get("reply_capabilities")
         capability_profile = payload.get("capability_profile", "owner_legacy")
+        progress_capture_context = payload.get("progress_capture_context")
         if not isinstance(message_id, str) or not 1 <= len(message_id) <= 256:
             raise StoreError("invalid_job", "message_id 无效")
         if not isinstance(conversation_key, str) or not CONVERSATION_RE.fullmatch(conversation_key):
@@ -565,6 +571,14 @@ class ControllerStore(FollowupStoreMixin):
             raise StoreError("invalid_job", "reply_capabilities 无效")
         if "capability_profile" in payload and capability_profile not in {"owner", "member_read_only"}:
             raise StoreError("invalid_capability_profile", "作业能力画像无效")
+        normalized_capture_context: dict[str, Any] | None = None
+        if progress_capture_context is not None:
+            from .progress_capture import validate_progress_capture_context
+
+            try:
+                normalized_capture_context = validate_progress_capture_context(progress_capture_context)
+            except ValueError as exc:
+                raise StoreError("invalid_job", "progress_capture_context 无效") from exc
         return {
             "version": 1,
             "message_id": message_id,
@@ -575,6 +589,11 @@ class ControllerStore(FollowupStoreMixin):
             **({"media_archive_context": media_archive_context} if media_archive_context else {}),
             "reply_capabilities": sorted(set(reply_capabilities)),
             "capability_profile": capability_profile,
+            **(
+                {"progress_capture_context": normalized_capture_context}
+                if normalized_capture_context is not None
+                else {}
+            ),
         }
 
     def create_job(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -906,6 +925,7 @@ class ControllerStore(FollowupStoreMixin):
         result_text: str,
         *,
         item_type: str,
+        suppress_reply: bool = False,
     ) -> dict[str, Any]:
         """Complete one deterministic Controller action without creating an app-server Turn."""
 
@@ -913,9 +933,9 @@ class ControllerStore(FollowupStoreMixin):
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             updated = connection.execute(
-                "UPDATE jobs SET state='completed',result_text=?,error_code=NULL,finished_at=? "
+                "UPDATE jobs SET state='completed',result_text=?,reply_suppressed=?,error_code=NULL,finished_at=? "
                 "WHERE job_id=? AND state='running'",
-                (bounded, utc_now(), job_id),
+                (bounded, 1 if suppress_reply else 0, utc_now(), job_id),
             ).rowcount
             if updated != 1:
                 raise StoreError("job_state_conflict", "作业不在运行状态", status=409)
@@ -1507,6 +1527,7 @@ class ControllerStore(FollowupStoreMixin):
             "reply_suppressed": document.get("reply_suppressed", False),
             "result": document.get("result"),
             "result_summary": document.get("result_summary") if completed else None,
+            "reply_suppressed": bool(document.get("reply_suppressed")) if completed else False,
             "artifacts": self._public_artifacts(str(document.get("job_id") or "")) if completed else [],
             "error_code": document.get("error_code"),
             "attempt": document.get("attempt"),
@@ -2010,6 +2031,7 @@ class ControllerStore(FollowupStoreMixin):
             "queue_position": queue_position,
             "result": row["result_text"],
             "result_summary": row["result_summary"],
+            "reply_suppressed": bool(row["reply_suppressed"]),
             "error_code": row["error_code"],
             "error_type": row["error_type"],
             "upstream_http_status": row["upstream_http_status"],

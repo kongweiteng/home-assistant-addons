@@ -87,7 +87,7 @@ THREAD_STATUSES = frozenset(
 RECEIPT_STATES = frozenset(
     {"accepted", "confirmed", "conflict", "expired", "failed", "unknown", "recovery_required"}
 )
-ACTIONS = frozenset({"read", "load", "steer", "interrupt", "continue", "archive", "unarchive"})
+ACTIONS = frozenset({"read", "load", "steer", "interrupt", "continue", "archive", "unarchive", "create"})
 
 
 class DesktopProtocolError(ValueError):
@@ -128,8 +128,8 @@ def build_desktop_command(
     runner_id: str,
     request_id: str,
     host_ref: str,
-    thread_ref: str,
-    expected_thread_revision: int,
+    thread_ref: str | None,
+    expected_thread_revision: int | None,
     expected_control_revision: int | None,
     action: str,
     now: dt.datetime,
@@ -137,13 +137,21 @@ def build_desktop_command(
     input_text: str | None = None,
     mode: str | None = None,
     model: str | None = None,
+    project_ref: str | None = None,
     ttl_seconds: int = 120,
 ) -> dict[str, Any]:
     _runner(runner_id)
     _request(request_id)
     _ref(host_ref, "HS")
-    _ref(thread_ref, "TH")
-    _revision(expected_thread_revision)
+    if action == "create":
+        _ref(project_ref, "PJ")
+        if thread_ref is not None or expected_thread_revision is not None or expected_control_revision is not None:
+            raise DesktopProtocolError("desktop_create_target_invalid", "Desktop 新任务不得携带既有 Thread 前提")
+    else:
+        _ref(thread_ref, "TH")
+        _revision(expected_thread_revision)
+        if project_ref is not None:
+            raise DesktopProtocolError("desktop_project_invalid", "既有 Desktop Thread 命令不得携带项目")
     _nullable_revision(expected_control_revision)
     if action not in ACTIONS:
         raise DesktopProtocolError("desktop_action_invalid", "Desktop 动作无效")
@@ -163,6 +171,8 @@ def build_desktop_command(
         "created_at": current.isoformat(),
         "expires_at": (current + dt.timedelta(seconds=ttl_seconds)).isoformat(),
     }
+    if project_ref is not None:
+        document["project_ref"] = project_ref
     if expected_turn_ref is not None:
         document["expected_turn_ref"] = expected_turn_ref
     if input_text is not None:
@@ -190,17 +200,29 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         "expires_at",
         "body_digest",
     }
-    optional = {"expected_turn_ref", "input", "mode", "model"}
+    optional = {"project_ref", "expected_turn_ref", "input", "mode", "model"}
     document = _exact_mapping(value, required, optional)
     _base(document, "desktop_command")
     _request(document["request_id"])
     _ref(document["host_ref"], "HS")
-    _ref(document["thread_ref"], "TH")
-    _revision(document["expected_thread_revision"])
-    _nullable_revision(document["expected_control_revision"])
     action = document["action"]
     if action not in ACTIONS:
         raise DesktopProtocolError("desktop_action_invalid", "Desktop 动作无效")
+    project_ref = document.get("project_ref")
+    if action == "create":
+        _ref(project_ref, "PJ")
+        if (
+            document["thread_ref"] is not None
+            or document["expected_thread_revision"] is not None
+            or document["expected_control_revision"] is not None
+        ):
+            raise DesktopProtocolError("desktop_create_target_invalid", "Desktop 新任务不得携带既有 Thread 前提")
+    else:
+        _ref(document["thread_ref"], "TH")
+        _revision(document["expected_thread_revision"])
+        _nullable_revision(document["expected_control_revision"])
+        if project_ref is not None:
+            raise DesktopProtocolError("desktop_project_invalid", "既有 Desktop Thread 命令不得携带项目")
     created_at = _shanghai_time(document["created_at"], "created_at")
     expires_at = _shanghai_time(document["expires_at"], "expires_at")
     current = _aware(now, "now")
@@ -212,7 +234,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
     if expected_turn is not None:
         _ref(expected_turn, "TR")
     input_text = document.get("input")
-    if action in {"steer", "continue"}:
+    if action in {"steer", "continue", "create"}:
         _safe_input(input_text)
     elif input_text is not None:
         raise DesktopProtocolError("desktop_input_invalid", "该 Desktop 动作不允许输入文本")
@@ -229,7 +251,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
     model = document.get("model")
     if model is not None:
         _model_id(model)
-        if action == "continue":
+        if action in {"continue", "create"}:
             pass
         elif action == "steer" and mode == "safe":
             pass
@@ -383,16 +405,32 @@ def _validate_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         "thread_revision",
         "body_digest",
     }
-    document = _exact_mapping(value, required, {"error_code"})
+    document = _exact_mapping(value, required, {"error_code", "project_ref"})
     _base(document, "desktop_receipt")
     _request(document["request_id"])
     _ref(document["host_ref"], "HS")
-    _ref(document["thread_ref"], "TH")
+    action = document["action"]
+    state = document["state"]
+    thread_ref = document["thread_ref"]
+    revision = document["thread_revision"]
+    project_ref = document.get("project_ref")
+    if action == "create":
+        _ref(project_ref, "PJ")
+        if thread_ref is not None:
+            _ref(thread_ref, "TH")
+        if revision is not None:
+            _revision(revision)
+        if state == "confirmed" and (thread_ref is None or revision is None or document["turn_ref"] is None):
+            raise DesktopProtocolError("desktop_receipt_invalid", "Desktop 新任务 confirmed 收据不完整")
+    else:
+        if project_ref is not None:
+            raise DesktopProtocolError("desktop_receipt_invalid", "既有 Desktop Thread 收据不得携带项目")
+        _ref(thread_ref, "TH")
+        _revision(revision)
     if document["turn_ref"] is not None:
         _ref(document["turn_ref"], "TR")
-    if document["action"] not in ACTIONS or document["state"] not in RECEIPT_STATES:
+    if action not in ACTIONS or state not in RECEIPT_STATES:
         raise DesktopProtocolError("desktop_receipt_invalid", "Desktop receipt 动作或状态无效")
-    _revision(document["thread_revision"])
     error_code = document.get("error_code")
     if error_code is not None:
         _request(error_code)

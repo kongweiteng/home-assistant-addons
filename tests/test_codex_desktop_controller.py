@@ -452,6 +452,97 @@ class DesktopStoreServiceTests(unittest.TestCase):
         encoded = json.dumps(self.service.thread(THREAD_REF), ensure_ascii=False)
         self.assertNotIn(self.runner_id, encoded)
 
+    def test_same_revision_null_control_revision_latches_only_a_safe_degradation(self) -> None:
+        degraded_statuses = {
+            "recovery_required": "recovery_required",
+            "protocol_degraded": "protocol_degraded",
+            "control_offline": "idle",
+        }
+        for control_state, incoming_status in degraded_statuses.items():
+            with self.subTest(control_state=control_state), tempfile.TemporaryDirectory() as temporary:
+                service = DesktopControllerService(
+                    DesktopStore(Path(temporary) / "controller.sqlite3"),
+                    publisher=Publisher(),
+                    now=lambda: NOW,
+                    runner_authorizer=lambda _runner_id: True,
+                )
+                trusted = snapshot(
+                    self.runner_id,
+                    revision=18,
+                    control_revision=8,
+                    status="idle",
+                )
+                trusted["snapshot"]["turns"] = [
+                    {"turn_ref": TURN_REF, "status": "completed", "items": []}
+                ]
+                trusted["snapshot"]["history_incomplete"] = True
+                trusted["body_digest"] = body_digest(trusted)
+                self.assertEqual(service.receive("desktop_snapshot", trusted)["status"], "stored")
+
+                degraded = json.loads(json.dumps(trusted))
+                degraded["snapshot"]["control_revision"] = None
+                degraded["snapshot"]["control_state"] = control_state
+                degraded["snapshot"]["status"] = incoming_status
+                degraded["body_digest"] = body_digest(degraded)
+                self.assertEqual(
+                    service.receive("desktop_snapshot", degraded)["status"],
+                    "degraded_latched",
+                )
+                current = service.thread(THREAD_REF)
+                self.assertEqual(current["control_revision"], 8)
+                self.assertEqual(current["control_state"], control_state)
+                self.assertEqual(current["status"], "idle")
+                self.assertEqual(current["snapshot"]["turns"], trusted["snapshot"]["turns"])
+                self.assertTrue(current["snapshot"]["history_incomplete"])
+
+                same_revision_ready = json.loads(json.dumps(trusted))
+                same_revision_ready["body_digest"] = body_digest(same_revision_ready)
+                with self.assertRaises(StoreError) as context:
+                    service.receive("desktop_snapshot", same_revision_ready)
+                self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+                recovered = json.loads(json.dumps(trusted))
+                recovered["snapshot"]["control_revision"] = 9
+                recovered["body_digest"] = body_digest(recovered)
+                self.assertEqual(
+                    service.receive("desktop_snapshot", recovered)["status"],
+                    "refreshed",
+                )
+                self.assertEqual(service.thread(THREAD_REF)["control_revision"], 9)
+                self.assertEqual(service.thread(THREAD_REF)["control_state"], "ready")
+
+    def test_same_revision_safe_degradation_rejects_business_history_and_writable_changes(self) -> None:
+        candidates = {
+            "business": {"title": "不能锁存的标题"},
+            "history": {
+                "turns": [{"turn_ref": TURN_REF, "status": "completed", "items": []}]
+            },
+            "writable": {"control_state": "ready"},
+        }
+        for name, changes in candidates.items():
+            with self.subTest(name=name):
+                document = snapshot(self.runner_id, control_revision=None)
+                document["snapshot"]["status"] = "recovery_required"
+                document["snapshot"]["control_state"] = "recovery_required"
+                document["snapshot"].update(changes)
+                document["body_digest"] = body_digest(document)
+                with self.assertRaises(StoreError) as context:
+                    self.service.receive("desktop_snapshot", document)
+                self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+        omitted = snapshot(self.runner_id, control_revision=None)
+        omitted["snapshot"].pop("control_revision")
+        omitted["snapshot"]["status"] = "recovery_required"
+        omitted["snapshot"]["control_state"] = "recovery_required"
+        omitted["body_digest"] = body_digest(omitted)
+        with self.assertRaises(StoreError) as context:
+            self.service.receive("desktop_snapshot", omitted)
+        self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+        current = self.service.thread(THREAD_REF)
+        self.assertEqual(current["control_revision"], 7)
+        self.assertEqual(current["control_state"], "ready")
+
     def test_old_snapshot_without_control_revision_is_readable_but_control_fails_closed(self) -> None:
         legacy = snapshot(self.runner_id, revision=8)
         legacy["snapshot"].pop("control_revision")
@@ -1315,12 +1406,20 @@ class DesktopApiTests(unittest.TestCase):
         status, headers, body = self.asset("/desktop/")
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers["Content-Type"])
-        self.assertIn("桌面原任务工作台", body)
+        self.assertIn("Codex 控制器", body)
         self.assertIn('src="desktop.js"', body)
         self.assertIn("viewport-fit=cover", body)
         self.assertIn("safe-area-inset-bottom", body)
-        self.assertIn("#detailContent{display:flex;flex-direction:column}", body)
-        self.assertIn(".composer{position:relative;bottom:auto;order:4", body)
+        self.assertIn("color-scheme:light", body)
+        self.assertIn("--bg:#f7f7f5", body)
+        self.assertIn(".detail-open .detail-panel{display:block}", body)
+        self.assertIn(".composer{position:fixed", body)
+        self.assertIn(".metrics{display:none}", body)
+        self.assertIn("grid-template-columns:repeat(5,1fr)", body)
+        self.assertIn('class="mobile-nav"', body)
+        self.assertIn('<a href="../">设置</a>', body)
+        self.assertIn('id="projectPanel"', body)
+        self.assertIn('id="newTaskSheet"', body)
         self.assertIn('id="modelSelect"', body)
 
         status, headers, script = self.asset("/desktop/desktop.js")
@@ -1333,6 +1432,9 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("model_override_v1", script)
         self.assertIn("state.selectedModel = ''", script)
         self.assertIn("...(model ? {model} : {})", script)
+        self.assertIn("pendingCreate", script)
+        self.assertIn("检查创建结果", script)
+        self.assertIn("for (let attempt = 0; attempt < 12; attempt += 1)", script)
         self.assertIn("原生快速调整保持同一 Turn，不允许切换模型", script)
         self.assertIn("wait_seconds=20", script)
         self.assertNotIn("innerHTML", script)
@@ -1343,12 +1445,20 @@ class DesktopApiTests(unittest.TestCase):
         self.assertNotIn("01a01f1b-b2cb-7762-b352-590ea7a3ae57", script)
         self.assertIn("同一个 threadId", script)
         self.assertIn("detail.control_state === 'protocol_degraded'", script)
+        self.assertIn("create_thread_v1", script)
+        self.assertIn("`${API}/threads`", script)
+        self.assertIn("result.state !== 'confirmed'", script)
+        self.assertIn("草稿仍保留", script)
+        self.assertIn("document.body.classList.add('detail-open')", script)
+        self.assertIn("state.drafts", script)
+        self.assertIn("host_ref: host.host_ref", script)
+        self.assertIn("project_ref: projectRef", script)
 
         combined = DESKTOP_DASHBOARD_HTML + DESKTOP_DASHBOARD_JS
         for required in (
             "安全调整",
             "原生快速调整",
-            "停止当前 Turn",
+            "中断当前 Turn",
             "继续此任务",
             "归档",
             "恢复归档",
@@ -1439,6 +1549,85 @@ class DesktopApiTests(unittest.TestCase):
         continued = self.publisher.desktop_commands[-1][1]
         self.assertEqual(continued["thread_ref"], THREAD_REF)
         self.assertEqual(continued["model"], "gpt-5.6-sol")
+
+    def test_desktop_api_create_is_idempotent_and_waits_for_snapshot_truth(self) -> None:
+        callback_headers = {
+            "Authorization": "Bearer " + self.callback_token,
+            "X-Runner-Credential": self.credential,
+        }
+        capabilities = [
+            "list_read",
+            "owner_follower",
+            "continue_same_thread",
+            "model_override_v1",
+            "create_thread_v1",
+        ]
+        status, result = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_snapshot",
+            snapshot(self.runner_id, capabilities=capabilities),
+            callback_headers,
+        )
+        self.assertEqual(status, 200, result)
+        payload = {
+            "request_id": "desktop-api-create-0001",
+            "host_ref": HOST_REF,
+            "project_ref": PROJECT_REF,
+            "input": "创建一个新任务",
+            "model": "gpt-5.6-terra",
+        }
+        status, submitted = self.request(
+            "POST",
+            "/api/desktop/v1/threads",
+            payload,
+            {"X-CSRF-Token": self.csrf()},
+        )
+        self.assertEqual(status, 202, submitted)
+        self.assertEqual(submitted["result"]["state"], "submitted")
+        command = self.publisher.desktop_commands[-1][1]
+        self.assertEqual(command["project_ref"], PROJECT_REF)
+        self.assertIsNone(command["thread_ref"])
+        self.assertIsNone(command["expected_thread_revision"])
+        self.assertNotIn("cwd", command)
+
+        created_thread_ref = "TH-" + "E" * 20
+        created_turn_ref = "TR-" + "F" * 20
+        confirmed = digest(
+            {
+                "version": 1,
+                "message_type": "desktop_receipt",
+                "runner_id": self.runner_id,
+                "created_at": NOW.isoformat(),
+                "request_id": payload["request_id"],
+                "host_ref": HOST_REF,
+                "project_ref": PROJECT_REF,
+                "thread_ref": created_thread_ref,
+                "turn_ref": created_turn_ref,
+                "action": "create",
+                "state": "confirmed",
+                "thread_revision": 1,
+            }
+        )
+        status, accepted = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_receipt",
+            confirmed,
+            callback_headers,
+        )
+        self.assertEqual(status, 200, accepted)
+        status, replayed = self.request(
+            "POST",
+            "/api/desktop/v1/threads",
+            payload,
+            {"X-CSRF-Token": self.csrf()},
+        )
+        self.assertEqual(status, 202, replayed)
+        self.assertEqual(replayed["result"]["state"], "confirmed")
+        self.assertEqual(replayed["result"]["thread_ref"], created_thread_ref)
+        self.assertEqual(len(self.publisher.desktop_commands), 1)
+        status, threads = self.request("GET", "/api/desktop/v1/threads")
+        self.assertEqual(status, 200, threads)
+        self.assertNotIn(created_thread_ref, {item["thread_ref"] for item in threads["result"]["threads"]})
 
     def test_internal_relay_acl_ingress_queries_and_command_downlink(self) -> None:
         callback_headers = {

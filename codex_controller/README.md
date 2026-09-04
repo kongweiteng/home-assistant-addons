@@ -17,6 +17,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
+- `0.5.26` 将 `/desktop` 重构为浅色、移动优先的跨项目任务总览和实时任务详情页，并新增 capability-gated `POST /api/desktop/v1/threads`。新建任务只接受脱敏 host/project ref、文本和受控模型；Mac Runner 通过同一短生命周期 bundled app-server 会话执行 `thread/start -> turn/start`，再以幂等收据和独立 list/read 对账。页面提交后锁定表单并只用同一 request ID 检查持久收据，结果未知时不伪造成功、不产生第二请求或自动重试。无需配置 OpenAI API Key，复用 Mac Codex App 已登录账号；对应 Runner 源码候选为 `0.3.19`，内置安装器仍固定已发布 `0.3.18`，新能力的 Runner 制品发布与正式升级另行验收。
 - `0.5.25` 在 `0.5.24` 的双 revision 控制历史规则上补齐 semantic-null 边界：同一 `thread_revision` 中，`control_revision: null` 与省略该可选键且其余快照完全一致时按无操作刷新接受；整数 revision 退化为省略、非单调变化、相同整数 revision 的不同历史和同步域漂移继续失败关闭。Relay `0.2.17`、Runner `0.3.18` manifest 与其余业务表面不变。
 - `0.5.24` 补齐 Desktop 双 revision 域迁移：同一 `thread_revision` 下，仅允许单调前进的 `control_revision` 刷新 IPC 派生的 status、active Turn、history 与 turns；旧控制快照 stale 消费，相同控制 revision 的不同历史和任何 app-server 同步域差异继续失败关闭。Ingress 双字段协议降级阻断、Runner `0.3.18` manifest 与其余业务表面不变。
 - `0.5.23` 将 Desktop `thread_revision` 与 `control_revision` 分域持久化和校验：旧 snapshot 缺控制 revision 时仍可读，但 steer/interrupt/ready continue 失败关闭；同一同步 revision 只允许 status/control_state/control_revision 的派生可用性刷新。Ingress 同时显式阻断 `control_state=protocol_degraded`，并内置 Runner `0.3.18` manifest。

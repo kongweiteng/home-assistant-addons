@@ -30,6 +30,10 @@ SAME_REVISION_CONTROL_FIELDS = frozenset(
         "turns",
     }
 )
+SAFETY_DEGRADED_CONTROL_STATES = frozenset(
+    {"recovery_required", "protocol_degraded", "control_offline"}
+)
+SAFETY_DEGRADE_FIELDS = frozenset({"status", "control_revision", "control_state"})
 
 
 class DesktopStore:
@@ -72,6 +76,7 @@ class DesktopStore:
                 (thread_ref,),
             ).fetchone()
             semantic_refresh = False
+            degraded_latch = False
             if existing is not None:
                 if (
                     existing["host_ref"] != host_ref
@@ -93,7 +98,15 @@ class DesktopStore:
                             "status": "stale_ignored",
                             "thread": self._thread_row(connection, thread_ref),
                         }
+                    if refresh == "degraded_latched":
+                        trusted = json.loads(str(existing["snapshot_json"]))
+                        trusted["control_state"] = body["control_state"]
+                        body = trusted
+                        encoded_snapshot = canonical_json(body)
+                        degraded_latch = True
                     if existing["snapshot_json"] == encoded_snapshot or refresh == "refreshed":
+                        semantic_refresh = True
+                    elif degraded_latch:
                         semantic_refresh = True
                     else:
                         raise StoreError(
@@ -156,7 +169,13 @@ class DesktopStore:
                 )
             self._prune_snapshots(connection, thread_ref)
             return {
-                "status": "refreshed" if semantic_refresh else "stored",
+                "status": (
+                    "degraded_latched"
+                    if degraded_latch
+                    else "refreshed"
+                    if semantic_refresh
+                    else "stored"
+                ),
                 "thread": self._thread_row(connection, thread_ref),
             }
 
@@ -1014,6 +1033,17 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
         return "refreshed"
     incoming_control_revision = incoming.get("control_revision")
     existing_control_revision = existing.get("control_revision")
+    if incoming_control_revision is None:
+        if (
+            "control_revision" in incoming
+            and isinstance(existing_control_revision, int)
+            and not isinstance(existing_control_revision, bool)
+            and existing_control_revision >= 0
+            and changed <= SAFETY_DEGRADE_FIELDS
+            and incoming.get("control_state") in SAFETY_DEGRADED_CONTROL_STATES
+        ):
+            return "degraded_latched"
+        return None
     if (
         not isinstance(incoming_control_revision, int)
         or isinstance(incoming_control_revision, bool)

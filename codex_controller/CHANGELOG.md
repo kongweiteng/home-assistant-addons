@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.5.26
+
+- 将 Controller 总览与 `/desktop` 改为浅色、移动优先的 Codex 风格：手机采用任务列表到详情的明确切页、项目与新建 bottom sheet、固定 composer 和底部导航，宽屏保留高效三栏工作台。
+- 新增 `POST /api/desktop/v1/threads` 与 `create_thread_v1` 能力门禁。Controller/Runner 双层校验在线 host、项目白名单和 App 模型目录；Runner 在同一短生命周期 app-server 会话中执行 `thread/start -> turn/start`，随后以独立 read/list 对账原始身份。
+- 新建命令使用 request ID/body digest 幂等和持久收据。页面首次提交后锁定表单，只用同一 request ID 轮询 Controller 日志；只有 confirmed 收据与权威 `thread_ref` 才展示成功。超时、离线或对账未知时保留草稿，不生成第二个请求、不自动重试 Runner，也不创建 Controller 替代 Thread。
+- 同 revision 的旧控制快照只有在业务字段完全一致、明确降级为不可写状态时才锁存降级；保留可信整数 `control_revision`、Turn 历史和业务字段，缺失 revision、可写升级或任意业务漂移继续失败关闭。
+- 此路径复用 Mac Codex App 现有登录，不要求 OpenAI API Key。对应 Runner 源码候选为 `0.3.19`，但内置安装器仍固定已发布 Runner `0.3.18`；新 Runner 制品、pin 更新、正式 HAOS 升级与真实手机同任务 E2E 不包含在本地候选中。
+
 ## 0.5.25
 
 - 修复同一 `thread_revision`、控制 revision 仍为空时的无操作快照等价判定：`control_revision: null` 与省略该可选键、且其余字段完全一致时在整数单调性检查前按 `refreshed` 接受，避免重连边界把语义相同快照误判为 `desktop_revision_conflict`。

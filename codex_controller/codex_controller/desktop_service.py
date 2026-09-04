@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import datetime as dt
+import json
 import re
+import sqlite3
 import threading
 import time
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol
 from zoneinfo import ZoneInfo
 
 from .desktop_protocol import (
@@ -15,6 +18,7 @@ from .desktop_protocol import (
     REQUEST_RE,
     THREAD_STATUSES,
     build_desktop_command,
+    canonical_json,
     intent_digest,
     validate_desktop_document,
     validate_public_input,
@@ -53,6 +57,7 @@ class DesktopControllerService:
         self.runner_status_provider = runner_status_provider
         self._event_condition = threading.Condition()
         self._command_lock = threading.Lock()
+        self._create_journal = _DesktopCreateJournal(store.database_path)
 
     def receive(self, event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -71,6 +76,8 @@ class DesktopControllerService:
             result = self.store.ingest_snapshot(document, observed_at=current.isoformat())
         elif event_type == "desktop_event":
             result = self.store.ingest_event(document)
+        elif document.get("action") == "create":
+            result = self._create_journal.ingest_receipt(document)
         else:
             result = self.store.ingest_receipt(document)
         with self._event_condition:
@@ -78,7 +85,8 @@ class DesktopControllerService:
         return {"accepted": True, **result}
 
     def sweep(self) -> int:
-        return self.store.sweep_commands(now=self._now().isoformat())
+        current = self._now().isoformat()
+        return self.store.sweep_commands(now=current) + self._create_journal.sweep(now=current)
 
     def hosts(self) -> dict[str, Any]:
         current = self._now()
@@ -172,6 +180,86 @@ class DesktopControllerService:
     def submit(self, thread_ref: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._command_lock:
             return self._submit_locked(thread_ref, action, payload)
+
+    def create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        with self._command_lock:
+            return self._create_locked(payload)
+
+    def _create_locked(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_create(payload)
+        host_ref = str(normalized["host_ref"])
+        project_ref = str(normalized["project_ref"])
+        runner_id = self.store.host_runner_id(host_ref)
+        intent = intent_digest(
+            {
+                "runner_id": runner_id,
+                "host_ref": host_ref,
+                "project_ref": project_ref,
+                "action": "create",
+                "input": normalized["input"],
+                "model": normalized.get("model"),
+            }
+        )
+        replay = self._create_journal.replay(str(normalized["request_id"]), intent_digest=intent)
+        if replay is not None:
+            return replay
+        self._create_preconditions(
+            runner_id=runner_id,
+            host_ref=host_ref,
+            project_ref=project_ref,
+            model=normalized.get("model"),
+        )
+        current = self._now()
+        command = build_desktop_command(
+            runner_id=runner_id,
+            request_id=str(normalized["request_id"]),
+            host_ref=host_ref,
+            project_ref=project_ref,
+            thread_ref=None,
+            expected_thread_revision=None,
+            expected_control_revision=None,
+            action="create",
+            input_text=str(normalized["input"]),
+            model=normalized.get("model"),
+            now=current,
+        )
+        stored, created = self._create_journal.prepare(command=command, intent_digest=intent)
+        if not created:
+            return stored
+        if self.publisher is None:
+            return self._create_journal.mark(
+                str(command["request_id"]),
+                state="failed",
+                error_code="desktop_relay_unavailable",
+                updated_at=self._now().isoformat(),
+            )
+        try:
+            self.publisher.publish_desktop_command(runner_id, command)
+        except RelayPublishError as exc:
+            state = "failed" if exc.definitely_undelivered else "unknown"
+            error = exc.code if exc.definitely_undelivered else "relay_publish_indeterminate"
+            result = self._create_journal.mark(
+                str(command["request_id"]),
+                state=state,
+                error_code=error,
+                updated_at=self._now().isoformat(),
+            )
+            if exc.definitely_undelivered:
+                raise StoreError(error, "Desktop Runner 当前离线，新任务未创建", status=503) from exc
+            return result
+        except Exception:
+            return self._create_journal.mark(
+                str(command["request_id"]),
+                state="unknown",
+                error_code="relay_publish_indeterminate",
+                updated_at=self._now().isoformat(),
+            )
+        return self._create_journal.mark(
+            str(command["request_id"]),
+            state="submitted",
+            error_code=None,
+            updated_at=self._now().isoformat(),
+        )
 
     def _submit_locked(
         self,
@@ -357,6 +445,57 @@ class DesktopControllerService:
         else:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
 
+    def _create_preconditions(
+        self,
+        *,
+        runner_id: str,
+        host_ref: str,
+        project_ref: str,
+        model: Any,
+    ) -> None:
+        projects = self.store.list_projects(host_ref=host_ref)
+        if not any(project.get("project_ref") == project_ref for project in projects):
+            raise StoreError(
+                "desktop_project_not_found",
+                "Desktop 项目不存在或未由 Runner 白名单发布",
+                status=404,
+            )
+        hosts = {host["host_ref"]: host for host in self.hosts()["hosts"]}
+        host = hosts.get(host_ref)
+        if host is None or not host["online"]:
+            raise StoreError("desktop_host_stale", "Desktop host 状态已过期", status=409)
+        if host.get("control_enabled") is not True:
+            raise StoreError("desktop_protocol_degraded", "Desktop host 当前只读", status=409)
+        capabilities = set(host.get("capabilities") or [])
+        if "create_thread_v1" not in capabilities:
+            raise StoreError(
+                "desktop_capability_unavailable",
+                "Desktop host 不支持创建 App 原生任务",
+                status=409,
+            )
+        if model is not None:
+            if "model_override_v1" not in capabilities:
+                raise StoreError(
+                    "desktop_capability_unavailable",
+                    "Desktop host 不支持运行模型覆盖",
+                    status=409,
+                )
+            available = {
+                item.get("id")
+                for item in host.get("models") or []
+                if isinstance(item, Mapping)
+            }
+            if model not in available:
+                raise StoreError("desktop_model_unavailable", "所选模型已不在当前 App 目录", status=409)
+        if self.runner_authorizer is None or not self.runner_authorizer(runner_id):
+            raise StoreError(
+                "desktop_runner_not_authorized",
+                "Desktop Runner 未启用或缺少独立 Desktop capability",
+                status=403,
+            )
+        if self.publisher is None:
+            raise StoreError("desktop_relay_unavailable", "Desktop Relay 尚未配置", status=503)
+
     def _normalize_action(self, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
@@ -403,6 +542,34 @@ class DesktopControllerService:
                 raise StoreError("desktop_model_invalid", "原生快速调整不允许覆盖模型", status=400)
         return result
 
+    def _normalize_create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
+        required = {"request_id", "host_ref", "project_ref", "input"}
+        allowed = required | {"model"}
+        if required - set(payload) or set(payload) - allowed:
+            raise StoreError("desktop_fields_invalid", "Desktop 新任务字段无效", status=400)
+        result = dict(payload)
+        request_id = result.get("request_id")
+        if not isinstance(request_id, str) or not REQUEST_RE.fullmatch(request_id):
+            raise StoreError("desktop_request_id_invalid", "Desktop request_id 无效", status=400)
+        self._ref(result.get("host_ref"), "HS")
+        self._ref(result.get("project_ref"), "PJ")
+        input_text = result.get("input")
+        try:
+            validate_public_input(input_text)
+        except DesktopProtocolError as exc:
+            raise StoreError(exc.code, str(exc), status=400) from exc
+        if not isinstance(input_text, str) or not input_text.strip() or len(input_text) > 12000:
+            raise StoreError("desktop_input_invalid", "Desktop 输入文本无效", status=400)
+        model = result.get("model")
+        if model is not None and (
+            not isinstance(model, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", model)
+        ):
+            raise StoreError("desktop_model_invalid", "Desktop model 无效", status=400)
+        return result
+
     def _runner_id(self, thread_ref: str) -> str:
         # runner_id remains internal and is intentionally absent from the public Thread DTO.
         return self.store.runner_id(thread_ref)
@@ -429,6 +596,257 @@ class DesktopControllerService:
     def _ref(value: Any, prefix: str) -> None:
         if not isinstance(value, str) or not REF_RE.fullmatch(value) or not value.startswith(prefix + "-"):
             raise StoreError("desktop_ref_invalid", f"Desktop {prefix} ref 无效", status=400)
+
+
+class _DesktopCreateJournal:
+    """Durable create-request receipts without inventing a Controller Thread row."""
+
+    _STATES = frozenset(
+        {
+            "pending",
+            "submitted",
+            "accepted",
+            "confirmed",
+            "conflict",
+            "expired",
+            "failed",
+            "unknown",
+            "recovery_required",
+        }
+    )
+
+    def __init__(self, database_path: str) -> None:
+        self.database_path = database_path
+        self._lock = threading.RLock()
+        with self._connect() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS desktop_thread_create_commands("
+                "request_id TEXT PRIMARY KEY,intent_digest TEXT NOT NULL,command_body_digest TEXT NOT NULL UNIQUE,"
+                "runner_id TEXT NOT NULL,host_ref TEXT NOT NULL,project_ref TEXT NOT NULL,state TEXT NOT NULL,"
+                "error_code TEXT,command_json TEXT,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,"
+                "orphan INTEGER NOT NULL DEFAULT 0)"
+            )
+            current = dt.datetime.now(SHANGHAI).isoformat()
+            connection.execute(
+                "UPDATE desktop_thread_create_commands SET state='unknown',"
+                "error_code='controller_restarted_before_delivery',updated_at=? WHERE state='pending'",
+                (current,),
+            )
+
+    def prepare(
+        self,
+        *,
+        command: Mapping[str, Any],
+        intent_digest: str,
+    ) -> tuple[dict[str, Any], bool]:
+        request_id = str(command["request_id"])
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is not None:
+                self._same_intent(row, intent_digest)
+                return self._row(row), False
+            connection.execute(
+                "INSERT INTO desktop_thread_create_commands("
+                "request_id,intent_digest,command_body_digest,runner_id,host_ref,project_ref,state,error_code,"
+                "command_json,receipt_json,created_at,updated_at,orphan) VALUES(?,?,?,?,?,?,'pending',NULL,?,NULL,?,?,0)",
+                (
+                    request_id,
+                    intent_digest,
+                    command["body_digest"],
+                    command["runner_id"],
+                    command["host_ref"],
+                    command["project_ref"],
+                    canonical_json(command),
+                    command["created_at"],
+                    command["created_at"],
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            assert row is not None
+            return self._row(row), True
+
+    def replay(self, request_id: str, *, intent_digest: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        self._same_intent(row, intent_digest)
+        return self._row(row)
+
+    def mark(
+        self,
+        request_id: str,
+        *,
+        state: str,
+        error_code: str | None,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        if state not in self._STATES:
+            raise StoreError("desktop_command_state_invalid", "Desktop 新任务状态无效", status=500)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise StoreError("desktop_command_unknown", "Desktop 新任务请求不存在", status=404)
+            if row["state"] == "pending":
+                connection.execute(
+                    "UPDATE desktop_thread_create_commands SET state=?,error_code=?,updated_at=? WHERE request_id=?",
+                    (state, error_code, updated_at, request_id),
+                )
+            row = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            assert row is not None
+            return self._row(row)
+
+    def ingest_receipt(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        request_id = str(document["request_id"])
+        encoded_receipt = canonical_json(document)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO desktop_thread_create_commands("
+                    "request_id,intent_digest,command_body_digest,runner_id,host_ref,project_ref,state,error_code,"
+                    "command_json,receipt_json,created_at,updated_at,orphan) VALUES(?,?,?,?,?,?,?,?,NULL,?,?,?,?,1)",
+                    (
+                        request_id,
+                        "orphan:" + str(document["body_digest"]),
+                        str(document["body_digest"]),
+                        document["runner_id"],
+                        document["host_ref"],
+                        document["project_ref"],
+                        "recovery_required",
+                        "desktop_command_unknown",
+                        encoded_receipt,
+                        document["created_at"],
+                        document["created_at"],
+                    ),
+                )
+                created = connection.execute(
+                    "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+                assert created is not None
+                return {"status": "stored", "orphan": True, "command": self._row(created)}
+            if row["receipt_json"] is not None:
+                if row["receipt_json"] != encoded_receipt:
+                    raise StoreError(
+                        "desktop_receipt_conflict",
+                        "同一 Desktop 新任务 request_id 出现不同收据",
+                        status=409,
+                    )
+                return {"status": "duplicate", "orphan": bool(row["orphan"]), "command": self._row(row)}
+            if (
+                row["runner_id"] != document["runner_id"]
+                or row["host_ref"] != document["host_ref"]
+                or row["project_ref"] != document["project_ref"]
+            ):
+                raise StoreError(
+                    "desktop_receipt_binding_conflict",
+                    "Desktop 新任务 receipt 与请求绑定不一致",
+                    status=409,
+                )
+            connection.execute(
+                "UPDATE desktop_thread_create_commands SET state=?,error_code=?,receipt_json=?,updated_at=? "
+                "WHERE request_id=?",
+                (
+                    document["state"],
+                    document.get("error_code"),
+                    encoded_receipt,
+                    document["created_at"],
+                    request_id,
+                ),
+            )
+            updated = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            assert updated is not None
+            return {"status": "stored", "orphan": False, "command": self._row(updated)}
+
+    def sweep(self, *, now: str) -> int:
+        current = dt.datetime.fromisoformat(now.replace("Z", "+00:00"))
+        expired: list[str] = []
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT request_id,command_json FROM desktop_thread_create_commands WHERE state='submitted'"
+            ).fetchall()
+            for row in rows:
+                try:
+                    command = json.loads(row["command_json"])
+                    expires_at = dt.datetime.fromisoformat(str(command["expires_at"]).replace("Z", "+00:00"))
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    expires_at = current
+                if expires_at.tzinfo is None or expires_at.utcoffset() is None or expires_at <= current:
+                    expired.append(str(row["request_id"]))
+            if expired:
+                connection.executemany(
+                    "UPDATE desktop_thread_create_commands SET state='unknown',"
+                    "error_code='desktop_receipt_timeout',updated_at=? WHERE request_id=? AND state='submitted'",
+                    ((now, request_id) for request_id in expired),
+                )
+        return len(expired)
+
+    @staticmethod
+    def _same_intent(row: sqlite3.Row, digest: str) -> None:
+        if row["intent_digest"] != digest:
+            raise StoreError(
+                "desktop_request_conflict",
+                "同一 Desktop 新任务 request_id 使用了不同正文",
+                status=409,
+            )
+
+    @staticmethod
+    def _row(row: sqlite3.Row) -> dict[str, Any]:
+        command = json.loads(row["command_json"]) if row["command_json"] else {}
+        receipt = json.loads(row["receipt_json"]) if row["receipt_json"] else None
+        if isinstance(receipt, dict):
+            receipt.pop("runner_id", None)
+        return {
+            "request_id": row["request_id"],
+            "host_ref": row["host_ref"],
+            "project_ref": row["project_ref"],
+            "action": "create",
+            "model": command.get("model"),
+            "state": row["state"],
+            "error_code": row["error_code"],
+            "thread_ref": receipt.get("thread_ref") if isinstance(receipt, dict) else None,
+            "turn_ref": receipt.get("turn_ref") if isinstance(receipt, dict) else None,
+            "thread_revision": receipt.get("thread_revision") if isinstance(receipt, dict) else None,
+            "created_at": row["created_at"],
+            "expires_at": command.get("expires_at"),
+            "updated_at": row["updated_at"],
+            "receipt": receipt,
+            "recovery_required": row["state"] in {"unknown", "recovery_required"},
+        }
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.database_path, timeout=10)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=10000")
+        connection.execute("PRAGMA journal_mode=WAL")
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
 
 __all__ = ["DesktopControllerService", "DesktopPublisher"]

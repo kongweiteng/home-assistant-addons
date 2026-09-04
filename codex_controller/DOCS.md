@@ -1,9 +1,10 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.25`。
+当前版本：`0.5.26`。
 
 ## 瞬态 Turn 安全重试
 
+- `0.5.26` 提供浅色移动优先 Desktop 工作台与受控新建入口。页面仅在 Mac 原生 Thread 收据 confirmed 且权威列表出现同一 `thread_ref` 后打开任务；离线、协议降级和未知结果保留草稿并禁止重复发送。此路径复用 Mac Codex App 登录，不要求 Controller 配置 OpenAI API Key；对应 Runner 源码候选为 `0.3.19`，内置安装器仍固定已发布 `0.3.18`，新制品发布和 pin 更新前 capability 保持不可用。
 - `0.5.25` 补齐同 revision semantic-null 重连边界：`control_revision: null` 与省略该可选键、且其他快照字段完全一致时按无操作刷新接受；已有整数 revision 后省略键、非单调 revision、相同整数 revision 的不同历史和同步域漂移继续拒绝。内置 Runner 仍固定 `0.3.18`。
 - `0.5.24` 补齐双 revision 域的控制历史迁移：同一 `thread_revision` 下，只有 `control_revision` 单调前进且差异严格限于 IPC 派生的状态、active Turn、历史完整性和 Turns 时才刷新；旧控制快照被 stale 消费，相同控制 revision 的不同历史与任何同步域差异继续拒绝。内置 Runner 仍固定 `0.3.18`。
 - `0.5.23` 在 `0.5.22` 上增加 Desktop 双 revision 域：公开 `thread_revision` 继续绑定 app-server 同步顺序，可空 `control_revision` 只绑定 IPC Owner CAS。旧 snapshot 可滚动读取但控制失败关闭；同 revision 的派生可用性刷新与 Ingress 双字段协议降级阻断同时生效。内置 pinned manifest 与 Runner 版本常量升级为 `0.3.18`。

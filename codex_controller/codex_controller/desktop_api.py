@@ -61,6 +61,8 @@ def post_desktop_api(
     path: str,
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if path == "/api/desktop/v1/threads":
+        return service.create(payload)
     match = ACTION_PATH_RE.fullmatch(path)
     if match is None:
         raise StoreError("not_found", "Desktop API 路由不存在", status=404)

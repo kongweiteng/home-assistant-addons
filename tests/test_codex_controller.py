@@ -1321,6 +1321,12 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn("X-CSRF-Token", DASHBOARD_JS)
         self.assertIn("MCP 已发布", DASHBOARD_JS)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
+        self.assertIn("color-scheme:light", DASHBOARD_HTML)
+        self.assertIn("viewport-fit=cover", DASHBOARD_HTML)
+        self.assertIn('class="side-rail"', DASHBOARD_HTML)
+        self.assertIn('class="mobile-nav"', DASHBOARD_HTML)
+        self.assertIn('href="desktop/"', DASHBOARD_HTML)
+        self.assertIn("safe-area-inset-bottom", DASHBOARD_HTML)
 
     def test_addon_config_and_run_script_keep_key_out_of_environment(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
@@ -1352,7 +1358,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.25"
+        expected = "0.5.26"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",

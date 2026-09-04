@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.27
+
+- 将内置固定 Runner manifest 与安装目录升级为已完成双构建复现和四平台解包校验的 `0.3.19`，使 `0.5.26` 引入的 `create_thread_v1` 在对应 Runner 升级后可用。
+- 保留浅色移动优先工作台、同一 App 原生 `thread/start -> turn/start`、confirmed-only 收据、host/project/model 双层校验和 unknown-outcome 不重试边界；仍复用 Mac Codex App 登录，不要求 OpenAI API Key。
+- 配套 Relay `0.2.18` 仅增加 `0.3.19` 精确滚动兼容并保留 `0.3.18` 回滚入口；本次发布不自动升级或重启 HAOS、Relay、Controller、Mac Runner，也不执行真实任务。
+
 ## 0.5.26
 
 - 将 Controller 总览与 `/desktop` 改为浅色、移动优先的 Codex 风格：手机采用任务列表到详情的明确切页、项目与新建 bottom sheet、固定 composer 和底部导航，宽屏保留高效三栏工作台。

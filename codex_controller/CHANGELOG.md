@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.28
+
+- 精确接受同一 `thread_revision` 下双方均显式 `control_revision: null`、且唯一差异为不可写 `control_state` 的覆盖；允许状态仅为 `load_required/read_only/recovery_required/protocol_degraded/control_offline`。`ready`、status、业务字段、Turn/历史、绑定或缺失 revision 仍返回 `desktop_revision_conflict`。
+- 内置固定 Runner manifest 更新为 `0.3.20`，精确登记 Codex App `26.901.20858` / build `7658` / CLI `0.153.0-alpha.5` / schema digest，并由 Runner 按 tuple 选择 start-turn IPC 方言；无需 OpenAI API Key。
+- 配套 Relay `0.2.19` 只增加 Runner `0.3.20` 安装兼容，继续保留 `0.3.19` 回滚入口；不把 `desktop_revision_conflict` 加入通用 ACK 白名单。
+
 ## 0.5.27
 
 - 将内置固定 Runner manifest 与安装目录升级为已完成双构建复现和四平台解包校验的 `0.3.19`，使 `0.5.26` 引入的 `create_thread_v1` 在对应 Runner 升级后可用。

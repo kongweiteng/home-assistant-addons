@@ -33,6 +33,15 @@ SAME_REVISION_CONTROL_FIELDS = frozenset(
 SAFETY_DEGRADED_CONTROL_STATES = frozenset(
     {"recovery_required", "protocol_degraded", "control_offline"}
 )
+NON_WRITABLE_CONTROL_STATES = frozenset(
+    {
+        "load_required",
+        "read_only",
+        "recovery_required",
+        "protocol_degraded",
+        "control_offline",
+    }
+)
 SAFETY_DEGRADE_FIELDS = frozenset({"status", "control_revision", "control_state"})
 
 
@@ -1034,6 +1043,15 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
     incoming_control_revision = incoming.get("control_revision")
     existing_control_revision = existing.get("control_revision")
     if incoming_control_revision is None:
+        if (
+            "control_revision" in existing
+            and "control_revision" in incoming
+            and existing_control_revision is None
+            and changed == {"control_state"}
+            and existing.get("control_state") in NON_WRITABLE_CONTROL_STATES
+            and incoming.get("control_state") in NON_WRITABLE_CONTROL_STATES
+        ):
+            return "refreshed"
         if (
             "control_revision" in incoming
             and isinstance(existing_control_revision, int)

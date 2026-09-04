@@ -34,12 +34,12 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.18")
-        self.assertIn('version: "0.2.18"', config)
+        self.assertEqual(__version__, "0.2.19")
+        self.assertIn('version: "0.2.19"', config)
         self.assertEqual(
             SUPPORTED_RUNNER_VERSIONS,
             frozenset(
-                {"0.3.6", "0.3.11", "0.3.12", "0.3.13", "0.3.14", "0.3.15", "0.3.16", "0.3.17", "0.3.18", "0.3.19"}
+                {"0.3.6", "0.3.11", "0.3.12", "0.3.13", "0.3.14", "0.3.15", "0.3.16", "0.3.17", "0.3.18", "0.3.19", "0.3.20"}
             ),
         )
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)

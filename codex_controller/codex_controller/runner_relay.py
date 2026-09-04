@@ -18,7 +18,7 @@ from urllib.request import Request, urlopen
 from .store import StoreError
 
 
-RUNNER_VERSION = "0.3.19"
+RUNNER_VERSION = "0.3.20"
 CODEX_VERSION = "0.146.0"
 PYTHON_VERSION = "3.11.13"
 SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -182,7 +182,7 @@ class RelayPublisher:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "User-Agent": "codex-controller/0.5.27",
+                "User-Agent": "codex-controller/0.5.28",
             },
             method="POST",
         )
@@ -282,7 +282,7 @@ class RunnerInstallerCatalog:
             return manifest
         request = Request(
             self.manifest_url,
-            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.27"},
+            headers={"Accept": "application/json", "User-Agent": "codex-controller/0.5.28"},
             method="GET",
         )
         try:

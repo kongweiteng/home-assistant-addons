@@ -511,6 +511,108 @@ class DesktopStoreServiceTests(unittest.TestCase):
                 self.assertEqual(service.thread(THREAD_REF)["control_revision"], 9)
                 self.assertEqual(service.thread(THREAD_REF)["control_state"], "ready")
 
+    def test_same_revision_explicit_null_accepts_only_non_writable_control_state_overlay(self) -> None:
+        non_writable = {
+            "load_required",
+            "read_only",
+            "recovery_required",
+            "protocol_degraded",
+            "control_offline",
+        }
+        for existing_state in non_writable:
+            for incoming_state in non_writable - {existing_state}:
+                with (
+                    self.subTest(existing=existing_state, incoming=incoming_state),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    service = DesktopControllerService(
+                        DesktopStore(Path(temporary) / "controller.sqlite3"),
+                        publisher=Publisher(),
+                        now=lambda: NOW,
+                        runner_authorizer=lambda _runner_id: True,
+                    )
+                    trusted = snapshot(self.runner_id, revision=18, control_revision=None)
+                    trusted["snapshot"]["control_state"] = existing_state
+                    trusted["snapshot"]["turns"] = [
+                        {"turn_ref": TURN_REF, "status": "completed", "items": []}
+                    ]
+                    trusted["snapshot"]["history_incomplete"] = True
+                    trusted["body_digest"] = body_digest(trusted)
+                    self.assertEqual(service.receive("desktop_snapshot", trusted)["status"], "stored")
+
+                    overlay = json.loads(json.dumps(trusted))
+                    overlay["snapshot"]["control_state"] = incoming_state
+                    overlay["body_digest"] = body_digest(overlay)
+                    self.assertEqual(
+                        service.receive("desktop_snapshot", overlay)["status"],
+                        "refreshed",
+                    )
+                    current = service.thread(THREAD_REF)
+                    self.assertIsNone(current["control_revision"])
+                    self.assertEqual(current["control_state"], incoming_state)
+                    self.assertEqual(current["snapshot"]["turns"], trusted["snapshot"]["turns"])
+                    self.assertTrue(current["snapshot"]["history_incomplete"])
+
+    def test_same_revision_null_control_state_overlay_fails_closed_on_any_writable_or_other_change(self) -> None:
+        cases = {
+            "existing-writable": ({"control_state": "ready"}, {"control_state": "protocol_degraded"}),
+            "incoming-writable": ({"control_state": "load_required"}, {"control_state": "ready"}),
+            "status": ({"control_state": "load_required"}, {"control_state": "protocol_degraded", "status": "failed"}),
+            "business": ({"control_state": "load_required"}, {"control_state": "protocol_degraded", "title": "漂移标题"}),
+            "history": (
+                {"control_state": "load_required"},
+                {
+                    "control_state": "protocol_degraded",
+                    "turns": [{"turn_ref": TURN_REF, "status": "completed", "items": []}],
+                },
+            ),
+        }
+        for name, (existing_changes, incoming_changes) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                service = DesktopControllerService(
+                    DesktopStore(Path(temporary) / "controller.sqlite3"),
+                    publisher=Publisher(),
+                    now=lambda: NOW,
+                    runner_authorizer=lambda _runner_id: True,
+                )
+                trusted = snapshot(self.runner_id, revision=18, control_revision=None)
+                trusted["snapshot"].update(existing_changes)
+                trusted["body_digest"] = body_digest(trusted)
+                self.assertEqual(service.receive("desktop_snapshot", trusted)["status"], "stored")
+
+                overlay = json.loads(json.dumps(trusted))
+                overlay["snapshot"].update(incoming_changes)
+                overlay["body_digest"] = body_digest(overlay)
+                with self.assertRaises(StoreError) as context:
+                    service.receive("desktop_snapshot", overlay)
+                self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+        for missing_side in ("existing", "incoming"):
+            with self.subTest(missing_side=missing_side), tempfile.TemporaryDirectory() as temporary:
+                service = DesktopControllerService(
+                    DesktopStore(Path(temporary) / "controller.sqlite3"),
+                    publisher=Publisher(),
+                    now=lambda: NOW,
+                    runner_authorizer=lambda _runner_id: True,
+                )
+                trusted = snapshot(self.runner_id, revision=18, control_revision=None)
+                trusted["snapshot"]["control_state"] = "load_required"
+                if missing_side == "existing":
+                    trusted["snapshot"].pop("control_revision")
+                trusted["body_digest"] = body_digest(trusted)
+                self.assertEqual(service.receive("desktop_snapshot", trusted)["status"], "stored")
+
+                overlay = json.loads(json.dumps(trusted))
+                overlay["snapshot"]["control_state"] = "protocol_degraded"
+                if missing_side == "existing":
+                    overlay["snapshot"]["control_revision"] = None
+                else:
+                    overlay["snapshot"].pop("control_revision")
+                overlay["body_digest"] = body_digest(overlay)
+                with self.assertRaises(StoreError) as context:
+                    service.receive("desktop_snapshot", overlay)
+                self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
     def test_same_revision_safe_degradation_rejects_business_history_and_writable_changes(self) -> None:
         candidates = {
             "business": {"title": "不能锁存的标题"},

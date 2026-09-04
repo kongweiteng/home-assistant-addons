@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.30
+
+- 内置固定 Runner manifest 更新为 `0.3.21`，精确登记 Codex App `26.901.22334` / build `7746` / CLI `0.153.0` / schema digest `a4e7ee85...`，继续使用已审计的 start-turn v2 + `turnStart` 方言；无需 OpenAI API Key。
+- 配套 Relay `0.2.20` 仅增加 Runner `0.3.21` 安装兼容；未知 App tuple 仍只读，`desktop_revision_conflict` 继续失败关闭，Controller `0.5.29` 的同 revision 恢复规则保持不变。
+
 ## 0.5.29
 
 - 修复 App 归档目录不推进 `thread_revision` 时的恢复死锁：仅当双方都显式 `control_revision: null`、其余业务与历史完全一致、状态严格在 `notLoaded` 与 `archived` 之间切换且控制态始终不可写时接受刷新。

@@ -1564,15 +1564,22 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("safe-area-inset-bottom", body)
         self.assertIn("color-scheme:light", body)
         self.assertIn("--bg:#f7f7f5", body)
-        self.assertIn(".detail-open .detail-panel{display:block}", body)
+        self.assertIn(".detail-open .detail-panel{display:flex}", body)
         self.assertIn(".composer{position:fixed", body)
         self.assertIn(".metrics{display:none}", body)
-        self.assertIn("grid-template-columns:repeat(5,1fr)", body)
+        self.assertIn("grid-template-columns:repeat(4,1fr)", body)
         self.assertIn('class="mobile-nav"', body)
         self.assertIn('<a href="../">设置</a>', body)
         self.assertIn('id="projectPanel"', body)
         self.assertIn('id="newTaskSheet"', body)
         self.assertIn('id="modelSelect"', body)
+        self.assertIn('id="conversationView"', body)
+        self.assertIn('id="advancedControls"', body)
+        self.assertIn('id="composerInput" rows="1"', body)
+        self.assertIn("回复会自动出现在这里", body)
+        self.assertNotIn('id="refreshAll"', body)
+        self.assertNotIn('id="reloadThread"', body)
+        self.assertNotIn("revision", body)
 
         status, headers, script = self.asset("/desktop/desktop.js")
         self.assertEqual(status, 200)
@@ -1589,13 +1596,24 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("for (let attempt = 0; attempt < 12; attempt += 1)", script)
         self.assertIn("原生快速调整保持同一 Turn，不允许切换模型", script)
         self.assertIn("wait_seconds=20", script)
+        self.assertIn("renderConversation", script)
+        self.assertIn("visibilitychange", script)
+        self.assertIn("document.visibilityState === 'visible'", script)
+        self.assertIn("}, 8000)", script)
+        self.assertIn("event.key === 'Enter' && !event.shiftKey", script)
+        self.assertIn("q('composer').requestSubmit()", script)
+        self.assertIn("isNearConversationBottom", script)
+        self.assertIn("newReplyButton", script)
+        self.assertNotIn("q('refreshAll')", script)
+        self.assertNotIn("q('reloadThread')", script)
+        self.assertNotIn("revision ${thread.thread_revision}", script)
         self.assertNotIn("innerHTML", script)
         self.assertNotIn("localStorage", script)
         self.assertNotIn("sessionStorage", script)
         self.assertNotIn("thread_id", script)
         self.assertNotIn("turn_id", script)
         self.assertNotIn("01a01f1b-b2cb-7762-b352-590ea7a3ae57", script)
-        self.assertIn("同一个 threadId", script)
+        self.assertIn("thread_revision: detail.thread_revision", script)
         self.assertIn("detail.control_state === 'protocol_degraded'", script)
         self.assertIn("create_thread_v1", script)
         self.assertIn("`${API}/threads`", script)
@@ -1609,16 +1627,16 @@ class DesktopApiTests(unittest.TestCase):
         combined = DESKTOP_DASHBOARD_HTML + DESKTOP_DASHBOARD_JS
         for required in (
             "安全调整",
-            "原生快速调整",
-            "中断当前 Turn",
-            "继续此任务",
-            "归档",
+            "快速调整",
+            "停止当前任务",
+            "等待你的消息",
+            "归档任务",
             "恢复归档",
             "recovery_required",
             "protocol_degraded",
             "App 默认",
-            "最近命令模型",
             "沿用原任务模型",
+            "运行详情",
         ):
             self.assertIn(required, combined)
 

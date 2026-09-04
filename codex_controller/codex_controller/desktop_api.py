@@ -70,6 +70,8 @@ def post_desktop_api(
 
 
 def _query(value: str) -> dict[str, list[str]]:
+    if value == "":
+        return {}
     try:
         parameters = parse_qs(value, keep_blank_values=True, strict_parsing=True)
     except ValueError as exc:

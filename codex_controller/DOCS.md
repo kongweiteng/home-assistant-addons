@@ -1,9 +1,10 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.31`。
+当前版本：`0.5.32`。
 
 ## 瞬态 Turn 安全重试
 
+- `0.5.32` 将 `/desktop` 改为聊天优先的实时工作台：默认只显示用户消息、Codex 回复和人类可读状态，运行细节折叠；输入框固定在底部，Enter 发送、Shift+Enter 换行，实时事件长轮询、8 秒列表同步、回到前台和网络恢复都会自动刷新。手机为列表到对话的单栏体验。后端写控制与无 API Key 路径不变。
 - `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
 - `0.5.30` 将内置 Runner 更新到 `0.3.21`，精确登记 Codex App `26.901.22334` / build `7746` / CLI `0.153.0`，继续使用 v2 + `turnStart`；未知 tuple 保持只读。配套 Relay 为 `0.2.20`。
 - `0.5.29` 补齐 App 归档目录不推进 `thread_revision` 与协议降级丢失浅层控制历史的恢复语义：只接受不可写的 `notLoaded ↔ archived` 切换，或仅锁存明确降级并保留 Controller 已验证历史；业务漂移继续失败关闭。

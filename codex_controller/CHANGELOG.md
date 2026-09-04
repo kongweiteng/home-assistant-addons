@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.31
+
+- 修复已加载任务在 App 重启后保持同一 `thread_revision`、但暂时变为 `notLoaded/load_required` 时的恢复死锁：仅锁存不可写的 `load_required` 控制态，并保留 Controller 已验证的整数 `control_revision`、状态、Turn 历史和业务字段。
+- 同 revision 仍只允许控制派生字段发生差异；标题、摘要、项目、绑定、时间和其他业务字段继续返回 `desktop_revision_conflict`。Runner `0.3.21`、Relay `0.2.20`、manifest、凭据和网络边界不变。
+
 ## 0.5.30
 
 - 内置固定 Runner manifest 更新为 `0.3.21`，精确登记 Codex App `26.901.22334` / build `7746` / CLI `0.153.0` / schema digest `a4e7ee85...`，继续使用已审计的 start-turn v2 + `turnStart` 方言；无需 OpenAI API Key。

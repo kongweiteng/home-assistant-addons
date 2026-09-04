@@ -1,9 +1,10 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.30`。
+当前版本：`0.5.31`。
 
 ## 瞬态 Turn 安全重试
 
+- `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
 - `0.5.30` 将内置 Runner 更新到 `0.3.21`，精确登记 Codex App `26.901.22334` / build `7746` / CLI `0.153.0`，继续使用 v2 + `turnStart`；未知 tuple 保持只读。配套 Relay 为 `0.2.20`。
 - `0.5.29` 补齐 App 归档目录不推进 `thread_revision` 与协议降级丢失浅层控制历史的恢复语义：只接受不可写的 `notLoaded ↔ archived` 切换，或仅锁存明确降级并保留 Controller 已验证历史；业务漂移继续失败关闭。
 - `0.5.27` 将内置固定 manifest 更新到 Runner `0.3.19`，配套 Relay `0.2.18` 的滚动兼容；`0.5.26` 的浅色移动优先 Desktop 工作台与受控新建入口保持不变。页面仅在 Mac 原生 Thread 收据 confirmed 且权威列表出现同一 `thread_ref` 后打开任务；离线、协议降级和未知结果保留草稿并禁止重复发送。此路径复用 Mac Codex App 登录，不要求 Controller 配置 OpenAI API Key。

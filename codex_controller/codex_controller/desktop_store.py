@@ -31,7 +31,7 @@ SAME_REVISION_CONTROL_FIELDS = frozenset(
     }
 )
 SAFETY_DEGRADED_CONTROL_STATES = frozenset(
-    {"recovery_required", "protocol_degraded", "control_offline"}
+    {"load_required", "recovery_required", "protocol_degraded", "control_offline"}
 )
 NON_WRITABLE_CONTROL_STATES = frozenset(
     {

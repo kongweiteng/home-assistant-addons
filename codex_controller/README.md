@@ -17,6 +17,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
+- `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
 - `0.5.30` 将内置 manifest 固定到 Runner `0.3.21`，精确支持 Codex App `26.901.22334` / build `7746` / CLI `0.153.0`，配套 Relay `0.2.20`；该 tuple 继续使用 v2 + `turnStart`，未知版本保持只读。`0.5.29` 的两类同 revision 安全恢复和全部业务漂移失败关闭边界保持不变。
 - `0.5.27` 在 `0.5.26` 的浅色移动优先工作台和 capability-gated `POST /api/desktop/v1/threads` 基础上，将内置固定 manifest 切换到 Runner `0.3.19`。新建任务只接受脱敏 host/project ref、文本和受控模型；Mac Runner 通过同一短生命周期 bundled app-server 会话执行 `thread/start -> turn/start`，再以幂等收据和独立 list/read 对账。页面提交后锁定表单并只用同一 request ID 检查持久收据，结果未知时不伪造成功、不产生第二请求或自动重试。无需配置 OpenAI API Key，复用 Mac Codex App 已登录账号；配套 Relay `0.2.18` 精确接受 `0.3.19` 并保留 `0.3.18` 回滚入口。
 - `0.5.26` 完成页面与 `create_thread_v1` 源码候选，但内置安装器仍固定已发布 Runner `0.3.18`；正式 manifest 切换由 `0.5.27` 完成。

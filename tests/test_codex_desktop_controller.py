@@ -454,6 +454,7 @@ class DesktopStoreServiceTests(unittest.TestCase):
 
     def test_same_revision_null_control_revision_latches_only_a_safe_degradation(self) -> None:
         degraded_statuses = {
+            "load_required": "notLoaded",
             "recovery_required": "recovery_required",
             "protocol_degraded": "protocol_degraded",
             "control_offline": "idle",

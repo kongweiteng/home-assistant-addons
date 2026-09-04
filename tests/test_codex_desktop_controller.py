@@ -483,6 +483,9 @@ class DesktopStoreServiceTests(unittest.TestCase):
                 degraded["snapshot"]["control_revision"] = None
                 degraded["snapshot"]["control_state"] = control_state
                 degraded["snapshot"]["status"] = incoming_status
+                degraded["snapshot"]["active_turn_ref"] = None
+                degraded["snapshot"]["turns"] = []
+                degraded["snapshot"]["history_incomplete"] = False
                 degraded["body_digest"] = body_digest(degraded)
                 self.assertEqual(
                     service.receive("desktop_snapshot", degraded)["status"],
@@ -510,6 +513,42 @@ class DesktopStoreServiceTests(unittest.TestCase):
                 )
                 self.assertEqual(service.thread(THREAD_REF)["control_revision"], 9)
                 self.assertEqual(service.thread(THREAD_REF)["control_state"], "ready")
+
+    def test_same_revision_null_control_revision_accepts_only_non_writable_archive_transition(self) -> None:
+        for existing_status, incoming_status, existing_state, incoming_state in (
+            ("notLoaded", "archived", "load_required", "read_only"),
+            ("archived", "notLoaded", "read_only", "load_required"),
+            ("notLoaded", "archived", "load_required", "protocol_degraded"),
+        ):
+            with self.subTest(existing=existing_status, incoming=incoming_status), tempfile.TemporaryDirectory() as temporary:
+                service = DesktopControllerService(
+                    DesktopStore(Path(temporary) / "controller.sqlite3"),
+                    publisher=Publisher(),
+                    now=lambda: NOW,
+                    runner_authorizer=lambda _runner_id: True,
+                )
+                trusted = snapshot(
+                    self.runner_id,
+                    revision=18,
+                    control_revision=None,
+                    status=existing_status,
+                )
+                trusted["snapshot"]["control_state"] = existing_state
+                trusted["body_digest"] = body_digest(trusted)
+                self.assertEqual(service.receive("desktop_snapshot", trusted)["status"], "stored")
+
+                transition = json.loads(json.dumps(trusted))
+                transition["snapshot"]["status"] = incoming_status
+                transition["snapshot"]["control_state"] = incoming_state
+                transition["body_digest"] = body_digest(transition)
+                self.assertEqual(
+                    service.receive("desktop_snapshot", transition)["status"],
+                    "refreshed",
+                )
+                current = service.thread(THREAD_REF)
+                self.assertEqual(current["status"], incoming_status)
+                self.assertEqual(current["control_state"], incoming_state)
+                self.assertIsNone(current["control_revision"])
 
     def test_same_revision_explicit_null_accepts_only_non_writable_control_state_overlay(self) -> None:
         non_writable = {
@@ -613,12 +652,9 @@ class DesktopStoreServiceTests(unittest.TestCase):
                     service.receive("desktop_snapshot", overlay)
                 self.assertEqual(context.exception.code, "desktop_revision_conflict")
 
-    def test_same_revision_safe_degradation_rejects_business_history_and_writable_changes(self) -> None:
+    def test_same_revision_safe_degradation_ignores_control_history_loss_but_rejects_business_and_writable_changes(self) -> None:
         candidates = {
             "business": {"title": "不能锁存的标题"},
-            "history": {
-                "turns": [{"turn_ref": TURN_REF, "status": "completed", "items": []}]
-            },
             "writable": {"control_state": "ready"},
         }
         for name, changes in candidates.items():
@@ -632,6 +668,18 @@ class DesktopStoreServiceTests(unittest.TestCase):
                     self.service.receive("desktop_snapshot", document)
                 self.assertEqual(context.exception.code, "desktop_revision_conflict")
 
+        history_loss = snapshot(self.runner_id, control_revision=None)
+        history_loss["snapshot"]["status"] = "notLoaded"
+        history_loss["snapshot"]["control_state"] = "protocol_degraded"
+        history_loss["snapshot"]["active_turn_ref"] = None
+        history_loss["snapshot"]["turns"] = []
+        history_loss["snapshot"]["history_incomplete"] = False
+        history_loss["body_digest"] = body_digest(history_loss)
+        self.assertEqual(
+            self.service.receive("desktop_snapshot", history_loss)["status"],
+            "degraded_latched",
+        )
+
         omitted = snapshot(self.runner_id, control_revision=None)
         omitted["snapshot"].pop("control_revision")
         omitted["snapshot"]["status"] = "recovery_required"
@@ -643,7 +691,8 @@ class DesktopStoreServiceTests(unittest.TestCase):
 
         current = self.service.thread(THREAD_REF)
         self.assertEqual(current["control_revision"], 7)
-        self.assertEqual(current["control_state"], "ready")
+        self.assertEqual(current["status"], "active")
+        self.assertEqual(current["control_state"], "protocol_degraded")
 
     def test_old_snapshot_without_control_revision_is_readable_but_control_fails_closed(self) -> None:
         legacy = snapshot(self.runner_id, revision=8)

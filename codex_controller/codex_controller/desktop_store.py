@@ -42,9 +42,6 @@ NON_WRITABLE_CONTROL_STATES = frozenset(
         "control_offline",
     }
 )
-SAFETY_DEGRADE_FIELDS = frozenset({"status", "control_revision", "control_state"})
-
-
 class DesktopStore:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = str(database_path)
@@ -1047,6 +1044,17 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
             "control_revision" in existing
             and "control_revision" in incoming
             and existing_control_revision is None
+            and changed == {"status", "control_state"}
+            and {existing.get("status"), incoming.get("status")}
+            == {"archived", "notLoaded"}
+            and existing.get("control_state") in NON_WRITABLE_CONTROL_STATES
+            and incoming.get("control_state") in NON_WRITABLE_CONTROL_STATES
+        ):
+            return "refreshed"
+        if (
+            "control_revision" in existing
+            and "control_revision" in incoming
+            and existing_control_revision is None
             and changed == {"control_state"}
             and existing.get("control_state") in NON_WRITABLE_CONTROL_STATES
             and incoming.get("control_state") in NON_WRITABLE_CONTROL_STATES
@@ -1057,7 +1065,6 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
             and isinstance(existing_control_revision, int)
             and not isinstance(existing_control_revision, bool)
             and existing_control_revision >= 0
-            and changed <= SAFETY_DEGRADE_FIELDS
             and incoming.get("control_state") in SAFETY_DEGRADED_CONTROL_STATES
         ):
             return "degraded_latched"

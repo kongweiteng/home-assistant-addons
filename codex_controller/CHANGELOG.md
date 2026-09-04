@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.29
+
+- 修复 App 归档目录不推进 `thread_revision` 时的恢复死锁：仅当双方都显式 `control_revision: null`、其余业务与历史完全一致、状态严格在 `notLoaded` 与 `archived` 之间切换且控制态始终不可写时接受刷新。
+- 同 revision 的可信整数控制历史在 Runner 明确降级为 `recovery_required/protocol_degraded/control_offline` 时，只锁存不可写控制态；允许丢失的 `status/active_turn_ref/history_incomplete/turns` 控制视图出现差异，但继续保留 Controller 已验证的原状态、控制 revision 和历史。标题、摘要、项目、绑定、时间及其他业务漂移仍失败关闭。
+- Relay `0.2.19` ACK 语义、Runner `0.3.20`、53 个工具、manifest pin、身份、凭据和网络边界不变；`desktop_revision_conflict` 不加入 ACK 白名单。
+
 ## 0.5.28
 
 - 精确接受同一 `thread_revision` 下双方均显式 `control_revision: null`、且唯一差异为不可写 `control_state` 的覆盖；允许状态仅为 `load_required/read_only/recovery_required/protocol_degraded/control_offline`。`ready`、status、业务字段、Turn/历史、绑定或缺失 revision 仍返回 `desktop_revision_conflict`。

@@ -1,10 +1,10 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.28`。
+当前版本：`0.5.29`。
 
 ## 瞬态 Turn 安全重试
 
-- `0.5.28` 在严格保持业务快照一致的前提下，允许显式 null 控制 revision 的不可写状态互相覆盖，解除 `load_required -> protocol_degraded` 旧队首阻塞；内置 Runner 更新为 `0.3.20`，精确支持 App `26.901.20858` 的 v2 + `turnStart` continue，同时保留旧三项 v1 方言和未知版本只读降级。配套 Relay 为 `0.2.19`。
+- `0.5.29` 补齐 App 归档目录不推进 `thread_revision` 与协议降级丢失浅层控制历史的恢复语义：只接受不可写的 `notLoaded ↔ archived` 切换，或仅锁存明确降级并保留 Controller 已验证历史；业务漂移继续失败关闭。内置 Runner 仍为 `0.3.20`，配套 Relay 仍为 `0.2.19`。
 - `0.5.27` 将内置固定 manifest 更新到 Runner `0.3.19`，配套 Relay `0.2.18` 的滚动兼容；`0.5.26` 的浅色移动优先 Desktop 工作台与受控新建入口保持不变。页面仅在 Mac 原生 Thread 收据 confirmed 且权威列表出现同一 `thread_ref` 后打开任务；离线、协议降级和未知结果保留草稿并禁止重复发送。此路径复用 Mac Codex App 登录，不要求 Controller 配置 OpenAI API Key。
 - `0.5.26` 提供浅色移动优先 Desktop 工作台与受控新建入口，并形成 Runner `0.3.19` 源码候选；该版本自身仍固定已发布 Runner `0.3.18`，由 `0.5.27` 完成正式 manifest 切换。
 - `0.5.25` 补齐同 revision semantic-null 重连边界：`control_revision: null` 与省略该可选键、且其他快照字段完全一致时按无操作刷新接受；已有整数 revision 后省略键、非单调 revision、相同整数 revision 的不同历史和同步域漂移继续拒绝。内置 Runner 仍固定 `0.3.18`。

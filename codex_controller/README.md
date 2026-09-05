@@ -17,6 +17,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
+- `0.5.33` 将 Desktop 总览升级为按 host 的实时事件长轮询，并把 WSS 连接观测时间与业务数据同步时间分开显示；消息发送明确展示 Controller 接收、Relay 送达、Runner 接收和 Mac 确认四个阶段。任务详情可持续显示公开思考摘要，按模型目录选择推理强度，并在任务运行时添加、编辑、排序或删除纯文本排队消息。内置固定 Runner manifest 更新为 `0.3.22`，匹配四平台可重复构建候选；窄屏布局、底部输入、安全区和单栏返回交互同步适配手机。仍复用 Mac Codex App 登录，不要求 OpenAI API Key，也不传输隐藏 reasoning。
 - `0.5.32` 把 Desktop 工作台改为聊天优先：任务详情将用户消息、Codex 回复和实时 `assistant.delta` 合并为同一对话，命令/计划/文件变化默认折叠，底部输入框常驻；详情长轮询与 8 秒总览同步、前台恢复和网络恢复会自动刷新。手机采用任务列表到对话详情的单栏切换；写操作仍保留 request ID、revision/CAS、收据对账和 unknown 不重放边界，不需要 OpenAI API Key。
 - `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
 - `0.5.30` 将内置 manifest 固定到 Runner `0.3.21`，精确支持 Codex App `26.901.22334` / build `7746` / CLI `0.153.0`，配套 Relay `0.2.20`；该 tuple 继续使用 v2 + `turnStart`，未知版本保持只读。`0.5.29` 的两类同 revision 安全恢复和全部业务漂移失败关闭边界保持不变。

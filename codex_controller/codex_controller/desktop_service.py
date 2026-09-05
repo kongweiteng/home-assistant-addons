@@ -29,6 +29,9 @@ from .store import StoreError
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+QUEUE_ACTIONS = frozenset(
+    {"queue_add", "queue_update", "queue_delete", "queue_reorder", "queue_start"}
+)
 
 
 class DesktopPublisher(Protocol):
@@ -56,6 +59,7 @@ class DesktopControllerService:
         self.runner_authorizer = runner_authorizer
         self.runner_status_provider = runner_status_provider
         self._event_condition = threading.Condition()
+        self._change_sequence = 0
         self._command_lock = threading.Lock()
         self._create_journal = _DesktopCreateJournal(store.database_path)
 
@@ -80,19 +84,22 @@ class DesktopControllerService:
             result = self._create_journal.ingest_receipt(document)
         else:
             result = self.store.ingest_receipt(document)
-        with self._event_condition:
-            self._event_condition.notify_all()
+        self._notify_change()
         return {"accepted": True, **result}
 
     def sweep(self) -> int:
         current = self._now().isoformat()
-        return self.store.sweep_commands(now=current) + self._create_journal.sweep(now=current)
+        changed = self.store.sweep_commands(now=current) + self._create_journal.sweep(now=current)
+        if changed:
+            self._notify_change()
+        return changed
 
     def hosts(self) -> dict[str, Any]:
         current = self._now()
         hosts = self.store.list_hosts()
         for host in hosts:
             online = False
+            connection_observed_at: str | None = None
             runner_id = self.store.host_runner_id(str(host["host_ref"]))
             if self.runner_status_provider is not None:
                 try:
@@ -100,15 +107,23 @@ class DesktopControllerService:
                 except StoreError:
                     runner = {}
                 online = runner.get("connectivity_state") == "online"
+                heartbeat_at = runner.get("last_heartbeat_at")
+                parsed_heartbeat = self._parse_time(heartbeat_at)
+                if parsed_heartbeat is not None:
+                    connection_observed_at = parsed_heartbeat.isoformat()
             else:
                 synced_at = self._parse_time(host.get("synced_at"))
                 online = synced_at is not None and current - synced_at <= dt.timedelta(
                     seconds=self.host_stale_seconds
                 )
+                if synced_at is not None:
+                    connection_observed_at = str(host.get("synced_at"))
             authorized = bool(
                 self.runner_authorizer is not None and self.runner_authorizer(runner_id)
             )
             host["online"] = online
+            host["connection_observed_at"] = connection_observed_at
+            host["data_synced_at"] = host.get("synced_at")
             host["write_available"] = bool(
                 online
                 and authorized
@@ -167,23 +182,55 @@ class DesktopControllerService:
         if after_cursor < 0 or not 1 <= limit <= 500 or not 0 <= wait_seconds <= 25:
             raise StoreError("desktop_cursor_invalid", "Desktop event cursor、limit 或 wait 无效", status=400)
         deadline = time.monotonic() + wait_seconds
-        while True:
-            with self._event_condition:
+        with self._event_condition:
+            observed_change = self._change_sequence
+            while True:
                 result = self.store.events(thread_ref, after_cursor=after_cursor, limit=limit)
                 if result["events"] or wait_seconds == 0:
-                    return result
+                    return {**result, "changed": False}
+                if self._change_sequence != observed_change:
+                    return {**result, "changed": True}
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return result
+                    return {**result, "changed": False}
+                self._event_condition.wait(timeout=remaining)
+
+    def host_events(
+        self,
+        host_ref: str,
+        *,
+        after_cursor: int,
+        limit: int,
+        wait_seconds: float,
+    ) -> dict[str, Any]:
+        self._ref(host_ref, "HS")
+        if after_cursor < 0 or not 1 <= limit <= 500 or not 0 <= wait_seconds <= 25:
+            raise StoreError("desktop_cursor_invalid", "Desktop event cursor、limit 或 wait 无效", status=400)
+        deadline = time.monotonic() + wait_seconds
+        with self._event_condition:
+            observed_change = self._change_sequence
+            while True:
+                result = self.store.host_events(host_ref, after_cursor=after_cursor, limit=limit)
+                if result["events"] or wait_seconds == 0:
+                    return {**result, "changed": False}
+                if self._change_sequence != observed_change:
+                    return {**result, "changed": True}
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return {**result, "changed": False}
                 self._event_condition.wait(timeout=remaining)
 
     def submit(self, thread_ref: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._command_lock:
-            return self._submit_locked(thread_ref, action, payload)
+            result = self._submit_locked(thread_ref, action, payload)
+        self._notify_change()
+        return result
 
     def create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._command_lock:
-            return self._create_locked(payload)
+            result = self._create_locked(payload)
+        self._notify_change()
+        return result
 
     def _create_locked(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         normalized = self._normalize_create(payload)
@@ -198,6 +245,7 @@ class DesktopControllerService:
                 "action": "create",
                 "input": normalized["input"],
                 "model": normalized.get("model"),
+                "effort": normalized.get("effort"),
             }
         )
         replay = self._create_journal.replay(str(normalized["request_id"]), intent_digest=intent)
@@ -208,6 +256,7 @@ class DesktopControllerService:
             host_ref=host_ref,
             project_ref=project_ref,
             model=normalized.get("model"),
+            effort=normalized.get("effort"),
         )
         current = self._now()
         command = build_desktop_command(
@@ -221,6 +270,7 @@ class DesktopControllerService:
             action="create",
             input_text=str(normalized["input"]),
             model=normalized.get("model"),
+            effort=normalized.get("effort"),
             now=current,
         )
         stored, created = self._create_journal.prepare(command=command, intent_digest=intent)
@@ -282,6 +332,9 @@ class DesktopControllerService:
                 "input": normalized.get("input"),
                 "mode": normalized.get("mode"),
                 "model": normalized.get("model"),
+                "effort": normalized.get("effort"),
+                "queue_ref": normalized.get("queue_ref"),
+                "queue_refs": normalized.get("queue_refs"),
             }
         )
         replay = self.store.replay_command(
@@ -318,12 +371,17 @@ class DesktopControllerService:
             host_ref=str(thread["host_ref"]),
             thread_ref=thread_ref,
             expected_thread_revision=int(normalized["thread_revision"]),
-            expected_control_revision=thread.get("control_revision"),
+            expected_control_revision=(
+                None if action in QUEUE_ACTIONS else thread.get("control_revision")
+            ),
             action=action,
             expected_turn_ref=normalized.get("expected_turn_ref"),
             input_text=normalized.get("input"),
             mode=normalized.get("mode"),
             model=normalized.get("model"),
+            effort=normalized.get("effort"),
+            queue_ref=normalized.get("queue_ref"),
+            queue_refs=normalized.get("queue_refs"),
             now=current,
         )
         stored, created = self.store.prepare_command(command=command, intent_digest=intent)
@@ -374,6 +432,7 @@ class DesktopControllerService:
             raise StoreError("desktop_protocol_degraded", "Desktop host 当前只读", status=409)
         capabilities = set(host.get("capabilities") or [])
         model = payload.get("model")
+        effort = payload.get("effort")
         required_capabilities = {
             "steer": (
                 {"native_steer_racy"}
@@ -384,6 +443,11 @@ class DesktopControllerService:
             "continue": {"continue_same_thread"},
             "archive": {"archive_control_v1"},
             "unarchive": {"archive_control_v1"},
+            "queue_add": {"thread_queue_v1"},
+            "queue_update": {"thread_queue_v1"},
+            "queue_delete": {"thread_queue_v1"},
+            "queue_reorder": {"thread_queue_v1"},
+            "queue_start": {"thread_queue_v1"},
         }
         if not required_capabilities.get(action, set()).issubset(capabilities):
             raise StoreError(
@@ -405,6 +469,38 @@ class DesktopControllerService:
             }
             if model not in available_models:
                 raise StoreError("desktop_model_unavailable", "所选模型已不在当前 App 目录", status=409)
+        if effort is not None:
+            if "reasoning_effort_v1" not in capabilities:
+                raise StoreError("desktop_capability_unavailable", "Desktop host 不支持推理强度覆盖", status=409)
+            snapshot_model = thread.get("snapshot", {}).get("model")
+            selected_model = next(
+                (
+                    item
+                    for item in host.get("models") or []
+                    if isinstance(item, Mapping)
+                    and (
+                        item.get("id") == model
+                        or (
+                            model is None
+                            and isinstance(snapshot_model, str)
+                            and item.get("id") == snapshot_model
+                        )
+                        or (
+                            model is None
+                            and not isinstance(snapshot_model, str)
+                            and item.get("is_default") is True
+                        )
+                    )
+                ),
+                None,
+            )
+            available_efforts = {
+                item.get("id")
+                for item in (selected_model or {}).get("supported_reasoning_efforts", [])
+                if isinstance(item, Mapping)
+            }
+            if effort not in available_efforts:
+                raise StoreError("desktop_effort_unavailable", "所选推理强度不适用于当前模型", status=409)
         status = thread["status"]
         active_turn = thread["active_turn_ref"]
         expected_turn = payload.get("expected_turn_ref")
@@ -416,6 +512,11 @@ class DesktopControllerService:
             "continue": {"ready", "load_required"},
             "archive": {"ready"},
             "unarchive": {"read_only"},
+            "queue_add": {"ready"},
+            "queue_update": {"ready"},
+            "queue_delete": {"ready"},
+            "queue_reorder": {"ready"},
+            "queue_start": {"ready"},
         }
         if control_state not in allowed_control_states.get(action, set()):
             raise StoreError(
@@ -423,7 +524,10 @@ class DesktopControllerService:
                 "Desktop Thread 必须先刷新最新 App 快照",
                 status=409,
             )
-        if action in {"steer", "interrupt"} or (action == "continue" and control_state == "ready"):
+        if (
+            action in {"steer", "interrupt"}
+            or (action == "continue" and control_state == "ready")
+        ):
             if not isinstance(control_revision, int) or isinstance(control_revision, bool):
                 raise StoreError(
                     "desktop_snapshot_refresh_required",
@@ -442,6 +546,61 @@ class DesktopControllerService:
         elif action == "unarchive":
             if active_turn is not None or status != "archived":
                 raise StoreError("desktop_unarchive_conflict", "Desktop Thread 当前不能恢复归档", status=409)
+        elif action in QUEUE_ACTIONS:
+            queued = thread.get("snapshot", {}).get("queued_submissions", [])
+            if not isinstance(queued, list):
+                raise StoreError(
+                    "desktop_snapshot_refresh_required",
+                    "Desktop Thread 缺少最新排队消息快照",
+                    status=409,
+                )
+            current_refs = [
+                item.get("queue_ref")
+                for item in queued
+                if isinstance(item, Mapping) and isinstance(item.get("queue_ref"), str)
+            ]
+            if action == "queue_add":
+                if status != "active" or active_turn is None:
+                    raise StoreError(
+                        "desktop_queue_add_conflict",
+                        "Desktop Thread 仅在运行中允许加入排队消息",
+                        status=409,
+                    )
+            elif action == "queue_reorder":
+                requested_refs = payload.get("queue_refs")
+                if (
+                    not current_refs
+                    or not isinstance(requested_refs, list)
+                    or len(requested_refs) != len(current_refs)
+                    or set(requested_refs) != set(current_refs)
+                ):
+                    raise StoreError(
+                        "desktop_queue_conflict",
+                        "Desktop 排队顺序已变化，请刷新后重试",
+                        status=409,
+                    )
+            elif payload.get("queue_ref") not in current_refs:
+                raise StoreError(
+                    "desktop_queue_conflict",
+                    "Desktop 排队消息已变化，请刷新后重试",
+                    status=409,
+                )
+            elif action == "queue_update":
+                target = next(
+                    (
+                        item
+                        for item in queued
+                        if isinstance(item, Mapping)
+                        and item.get("queue_ref") == payload.get("queue_ref")
+                    ),
+                    None,
+                )
+                if not isinstance(target, Mapping) or target.get("editable") is not True:
+                    raise StoreError(
+                        "desktop_queue_not_editable",
+                        "包含非文本内容的排队消息不能在手机端编辑",
+                        status=409,
+                    )
         else:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
 
@@ -452,6 +611,7 @@ class DesktopControllerService:
         host_ref: str,
         project_ref: str,
         model: Any,
+        effort: Any = None,
     ) -> None:
         projects = self.store.list_projects(host_ref=host_ref)
         if not any(project.get("project_ref") == project_ref for project in projects):
@@ -487,6 +647,25 @@ class DesktopControllerService:
             }
             if model not in available:
                 raise StoreError("desktop_model_unavailable", "所选模型已不在当前 App 目录", status=409)
+        if effort is not None:
+            if "reasoning_effort_v1" not in capabilities:
+                raise StoreError("desktop_capability_unavailable", "Desktop host 不支持推理强度覆盖", status=409)
+            selected_model = next(
+                (
+                    item
+                    for item in host.get("models") or []
+                    if isinstance(item, Mapping)
+                    and (item.get("id") == model or (model is None and item.get("is_default") is True))
+                ),
+                None,
+            )
+            supported = {
+                item.get("id")
+                for item in (selected_model or {}).get("supported_reasoning_efforts", [])
+                if isinstance(item, Mapping)
+            }
+            if effort not in supported:
+                raise StoreError("desktop_effort_unavailable", "所选推理强度不适用于当前模型", status=409)
         if self.runner_authorizer is None or not self.runner_authorizer(runner_id):
             raise StoreError(
                 "desktop_runner_not_authorized",
@@ -505,11 +684,16 @@ class DesktopControllerService:
             "continue": {"request_id", "thread_revision", "input"},
             "archive": {"request_id", "thread_revision"},
             "unarchive": {"request_id", "thread_revision"},
+            "queue_add": {"request_id", "thread_revision", "input"},
+            "queue_update": {"request_id", "thread_revision", "queue_ref", "input"},
+            "queue_delete": {"request_id", "thread_revision", "queue_ref"},
+            "queue_reorder": {"request_id", "thread_revision", "queue_refs"},
+            "queue_start": {"request_id", "thread_revision", "queue_ref"},
         }
         required = fields.get(action)
         if required is None:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
-        allowed = required | ({"mode", "model"} if action == "steer" else {"model"} if action == "continue" else set())
+        allowed = required | ({"mode", "model", "effort"} if action == "steer" else {"model", "effort"} if action == "continue" else set())
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop API 字段无效", status=400)
         result = dict(payload)
@@ -522,7 +706,7 @@ class DesktopControllerService:
         expected_turn = result.get("expected_turn_ref")
         if expected_turn is not None:
             self._ref(expected_turn, "TR")
-        if action in {"steer", "continue"}:
+        if action in {"steer", "continue", "queue_add", "queue_update"}:
             try:
                 validate_public_input(result.get("input"))
             except DesktopProtocolError as exc:
@@ -540,13 +724,33 @@ class DesktopControllerService:
                 raise StoreError("desktop_model_invalid", "Desktop model 无效", status=400)
             if action == "steer" and result.get("mode") != "safe":
                 raise StoreError("desktop_model_invalid", "原生快速调整不允许覆盖模型", status=400)
+        effort = result.get("effort")
+        if effort is not None:
+            if not isinstance(effort, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", effort):
+                raise StoreError("desktop_effort_invalid", "Desktop 推理强度无效", status=400)
+            if action == "steer" and result.get("mode") != "safe":
+                raise StoreError("desktop_effort_invalid", "原生快速调整不允许覆盖推理强度", status=400)
+        queue_ref = result.get("queue_ref")
+        if queue_ref is not None:
+            self._ref(queue_ref, "QS")
+        queue_refs = result.get("queue_refs")
+        if queue_refs is not None:
+            if (
+                not isinstance(queue_refs, list)
+                or not queue_refs
+                or len(queue_refs) > 100
+                or len(set(queue_refs)) != len(queue_refs)
+            ):
+                raise StoreError("desktop_queue_invalid", "Desktop 排队顺序无效", status=400)
+            for item in queue_refs:
+                self._ref(item, "QS")
         return result
 
     def _normalize_create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
         required = {"request_id", "host_ref", "project_ref", "input"}
-        allowed = required | {"model"}
+        allowed = required | {"model", "effort"}
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop 新任务字段无效", status=400)
         result = dict(payload)
@@ -568,6 +772,12 @@ class DesktopControllerService:
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", model)
         ):
             raise StoreError("desktop_model_invalid", "Desktop model 无效", status=400)
+        effort = result.get("effort")
+        if effort is not None and (
+            not isinstance(effort, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", effort)
+        ):
+            raise StoreError("desktop_effort_invalid", "Desktop 推理强度无效", status=400)
         return result
 
     def _runner_id(self, thread_ref: str) -> str:
@@ -579,6 +789,11 @@ class DesktopControllerService:
         if value.tzinfo is None or value.utcoffset() is None:
             raise StoreError("desktop_clock_invalid", "Desktop Controller 时钟必须包含时区", status=500)
         return value.astimezone(SHANGHAI)
+
+    def _notify_change(self) -> None:
+        with self._event_condition:
+            self._change_sequence += 1
+            self._event_condition.notify_all()
 
     @staticmethod
     def _parse_time(value: Any) -> dt.datetime | None:
@@ -624,8 +839,19 @@ class _DesktopCreateJournal:
                 "request_id TEXT PRIMARY KEY,intent_digest TEXT NOT NULL,command_body_digest TEXT NOT NULL UNIQUE,"
                 "runner_id TEXT NOT NULL,host_ref TEXT NOT NULL,project_ref TEXT NOT NULL,state TEXT NOT NULL,"
                 "error_code TEXT,command_json TEXT,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,"
-                "orphan INTEGER NOT NULL DEFAULT 0)"
+                "orphan INTEGER NOT NULL DEFAULT 0,relay_delivered_at TEXT,runner_received_at TEXT,mac_confirmed_at TEXT)"
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(desktop_thread_create_commands)"
+                ).fetchall()
+            }
+            for name in ("relay_delivered_at", "runner_received_at", "mac_confirmed_at"):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE desktop_thread_create_commands ADD COLUMN {name} TEXT"
+                    )
             current = dt.datetime.now(SHANGHAI).isoformat()
             connection.execute(
                 "UPDATE desktop_thread_create_commands SET state='unknown',"
@@ -701,8 +927,16 @@ class _DesktopCreateJournal:
                 raise StoreError("desktop_command_unknown", "Desktop 新任务请求不存在", status=404)
             if row["state"] == "pending":
                 connection.execute(
-                    "UPDATE desktop_thread_create_commands SET state=?,error_code=?,updated_at=? WHERE request_id=?",
-                    (state, error_code, updated_at, request_id),
+                    "UPDATE desktop_thread_create_commands SET state=?,error_code=?,updated_at=?,"
+                    "relay_delivered_at=CASE WHEN ?='submitted' THEN COALESCE(relay_delivered_at,?) ELSE relay_delivered_at END "
+                    "WHERE request_id=?",
+                    (state, error_code, updated_at, state, updated_at, request_id),
+                )
+            elif state == "submitted":
+                connection.execute(
+                    "UPDATE desktop_thread_create_commands SET relay_delivered_at=COALESCE(relay_delivered_at,?) "
+                    "WHERE request_id=?",
+                    (updated_at, request_id),
                 )
             row = connection.execute(
                 "SELECT * FROM desktop_thread_create_commands WHERE request_id=?",
@@ -744,14 +978,6 @@ class _DesktopCreateJournal:
                 ).fetchone()
                 assert created is not None
                 return {"status": "stored", "orphan": True, "command": self._row(created)}
-            if row["receipt_json"] is not None:
-                if row["receipt_json"] != encoded_receipt:
-                    raise StoreError(
-                        "desktop_receipt_conflict",
-                        "同一 Desktop 新任务 request_id 出现不同收据",
-                        status=409,
-                    )
-                return {"status": "duplicate", "orphan": bool(row["orphan"]), "command": self._row(row)}
             if (
                 row["runner_id"] != document["runner_id"]
                 or row["host_ref"] != document["host_ref"]
@@ -762,13 +988,33 @@ class _DesktopCreateJournal:
                     "Desktop 新任务 receipt 与请求绑定不一致",
                     status=409,
                 )
+            if row["receipt_json"] is not None:
+                if row["receipt_json"] == encoded_receipt:
+                    return {"status": "duplicate", "orphan": bool(row["orphan"]), "command": self._row(row)}
+                previous = json.loads(str(row["receipt_json"]))
+                previous_state = previous.get("state")
+                current_state = document["state"]
+                if previous_state != "accepted" and current_state == "accepted":
+                    return {"status": "stale", "orphan": bool(row["orphan"]), "command": self._row(row)}
+                if previous_state != "accepted" or current_state == "accepted":
+                    raise StoreError(
+                        "desktop_receipt_conflict",
+                        "同一 Desktop 新任务 request_id 收据阶段冲突",
+                        status=409,
+                    )
             connection.execute(
-                "UPDATE desktop_thread_create_commands SET state=?,error_code=?,receipt_json=?,updated_at=? "
+                "UPDATE desktop_thread_create_commands SET state=?,error_code=?,receipt_json=?,updated_at=?,"
+                "runner_received_at=CASE WHEN ?='accepted' THEN COALESCE(runner_received_at,?) ELSE runner_received_at END,"
+                "mac_confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(mac_confirmed_at,?) ELSE mac_confirmed_at END "
                 "WHERE request_id=?",
                 (
                     document["state"],
                     document.get("error_code"),
                     encoded_receipt,
+                    document["created_at"],
+                    document["state"],
+                    document["created_at"],
+                    document["state"],
                     document["created_at"],
                     request_id,
                 ),
@@ -785,7 +1031,8 @@ class _DesktopCreateJournal:
         expired: list[str] = []
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT request_id,command_json FROM desktop_thread_create_commands WHERE state='submitted'"
+                "SELECT request_id,command_json FROM desktop_thread_create_commands "
+                "WHERE state IN ('submitted','accepted')"
             ).fetchall()
             for row in rows:
                 try:
@@ -798,7 +1045,8 @@ class _DesktopCreateJournal:
             if expired:
                 connection.executemany(
                     "UPDATE desktop_thread_create_commands SET state='unknown',"
-                    "error_code='desktop_receipt_timeout',updated_at=? WHERE request_id=? AND state='submitted'",
+                    "error_code='desktop_receipt_timeout',updated_at=? WHERE request_id=? "
+                    "AND state IN ('submitted','accepted')",
                     ((now, request_id) for request_id in expired),
                 )
         return len(expired)
@@ -824,6 +1072,7 @@ class _DesktopCreateJournal:
             "project_ref": row["project_ref"],
             "action": "create",
             "model": command.get("model"),
+            "effort": command.get("effort"),
             "state": row["state"],
             "error_code": row["error_code"],
             "thread_ref": receipt.get("thread_ref") if isinstance(receipt, dict) else None,
@@ -833,6 +1082,13 @@ class _DesktopCreateJournal:
             "expires_at": command.get("expires_at"),
             "updated_at": row["updated_at"],
             "receipt": receipt,
+            "delivery_stage": _create_delivery_stage(row),
+            "stage_timestamps": {
+                "controller_received": row["created_at"],
+                "relay_delivered": row["relay_delivered_at"],
+                "runner_received": row["runner_received_at"],
+                "mac_confirmed": row["mac_confirmed_at"],
+            },
             "recovery_required": row["state"] in {"unknown", "recovery_required"},
         }
 
@@ -847,6 +1103,16 @@ class _DesktopCreateJournal:
                 yield connection
         finally:
             connection.close()
+
+
+def _create_delivery_stage(row: sqlite3.Row) -> str:
+    if row["mac_confirmed_at"] is not None:
+        return "mac_confirmed"
+    if row["runner_received_at"] is not None:
+        return "runner_received"
+    if row["relay_delivered_at"] is not None:
+        return "relay_delivered"
+    return "controller_received"
 
 
 __all__ = ["DesktopControllerService", "DesktopPublisher"]

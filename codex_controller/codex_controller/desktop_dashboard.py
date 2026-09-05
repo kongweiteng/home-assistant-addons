@@ -1,7 +1,7 @@
 """Responsive Home Assistant Ingress workbench for Codex Desktop takeover."""
 
 DESKTOP_DASHBOARD_HTML_LEGACY = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="only light"><meta name="supported-color-schemes" content="light"><meta name="theme-color" content="#f7f7f5">
 <title>Codex 控制器</title><style>
 :root{color-scheme:light;--bg:#f7f7f5;--surface:#fff;--surface-2:#f0f0ed;--surface-3:#fafaf8;--line:rgba(30,32,36,.11);--line-strong:rgba(30,32,36,.18);--text:#202124;--muted:#73767b;--blue:#3768e5;--blue-soft:#e9eefc;--green:#1a8b67;--green-soft:#e8f4ef;--amber:#a96e16;--amber-soft:#f8efdf;--red:#bd384d;--red-soft:#f9eaed;--shadow:0 1px 3px rgba(20,23,27,.05),0 14px 36px rgba(20,23,27,.055)}
 *{box-sizing:border-box}html{background:var(--bg);scrollbar-gutter:stable}body{margin:0;min-width:320px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}button,input,select,textarea{font:inherit;color:inherit}button,a,input,select,textarea{outline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--blue)}button{min-height:44px;border:1px solid var(--line-strong);border-radius:11px;padding:9px 13px;background:var(--surface);cursor:pointer;transition:background .15s,border-color .15s,transform .15s}button:hover:not(:disabled){background:var(--surface-2)}button:active:not(:disabled){transform:scale(.985)}button:disabled{opacity:.45;cursor:not-allowed}button.primary{border-color:#222326;background:#222326;color:#fff}button.primary:hover:not(:disabled){background:#383a3e}button.danger{border-color:#efd0d7;background:var(--red-soft);color:var(--red)}button.ghost{background:transparent}a{color:var(--blue);text-decoration:none}.shell{max-width:1600px;margin:auto;padding:18px}.topbar{display:flex;gap:18px;align-items:center;justify-content:space-between;margin-bottom:14px}.brand{display:flex;align-items:center;gap:12px;min-width:0}.brand-mark{width:38px;height:38px;display:grid;place-items:center;border-radius:12px;background:#222326;color:#fff;font-weight:760}.eyebrow{color:var(--muted);font-size:11px;font-weight:620;letter-spacing:.02em}.topbar h1{font-size:27px;line-height:1.15;letter-spacing:-.035em;margin:2px 0}.subtitle{margin:0;color:var(--muted);font-size:13px}.top-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.connection{display:inline-flex;align-items:center;min-height:36px;border:1px solid var(--line);border-radius:999px;padding:6px 11px;color:var(--muted);background:var(--surface)}.connection.good{color:var(--green);background:var(--green-soft)}.connection.warn{color:var(--amber);background:var(--amber-soft)}.connection.bad{color:var(--red);background:var(--red-soft)}.runner-banner{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px;padding:13px 15px;border:1px solid var(--line);border-radius:14px;background:var(--surface);box-shadow:0 1px 2px rgba(20,23,27,.035)}.runner-banner strong{display:block}.runner-banner span{display:block;margin-top:2px;color:var(--muted);font-size:12px}.runner-banner.bad{border-color:#ead8b9}.runner-banner.bad strong{color:#5d4a2c}.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:14px}.metric{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:12px 14px}.metric span{display:block;color:var(--muted);font-size:12px}.metric strong{display:block;margin-top:4px;font-size:21px;line-height:1.2;overflow-wrap:anywhere}.workspace{display:grid;grid-template-columns:minmax(220px,.72fr) minmax(300px,1fr) minmax(0,1.85fr);gap:12px;align-items:start}.panel{min-width:0;background:var(--surface);border:1px solid var(--line);border-radius:15px;box-shadow:var(--shadow);overflow:hidden}.panel-head{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:13px 14px;border-bottom:1px solid var(--line);background:var(--surface-3)}.panel-head h2,.panel-head h3{font-size:15px;margin:0}.project-panel .panel-head button{display:none}.panel-body{padding:12px}.stack{display:grid;gap:10px}.muted{color:var(--muted)}.error{color:var(--red)}.success{color:var(--green)}.warning{color:var(--amber)}.badge-row,.detail-meta{display:flex;flex-wrap:wrap;gap:6px}.badge{display:inline-flex;align-items:center;min-height:25px;border:0;border-radius:999px;padding:3px 8px;background:#eeefec;color:#666a70;font-size:11px}.badge.good{background:var(--green-soft);color:var(--green)}.badge.warn{background:var(--amber-soft);color:var(--amber)}.badge.bad{background:var(--red-soft);color:var(--red)}.field{display:grid;gap:5px}.field label{font-size:12px;color:var(--muted)}select,input,textarea{width:100%;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);padding:10px 11px}textarea{min-height:100px;resize:vertical}.project-list,.thread-list{display:grid}.project-button,.thread-button{width:100%;height:auto;text-align:left;background:transparent;border-color:transparent;border-radius:10px;padding:11px}.project-button:hover,.thread-button:hover{background:var(--surface-2)}.project-button.selected{background:var(--surface-2)}.thread-button{min-height:84px;border-radius:0;border-bottom:1px solid var(--line)}.thread-button.selected{background:#f6f7f4;box-shadow:inset 2px 0 0 var(--blue)}.project-title,.thread-title{font-weight:700;overflow-wrap:anywhere}.project-meta,.thread-meta{margin-top:4px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.thread-flags{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.filters{display:grid;grid-template-columns:1fr 1.35fr;gap:8px}.thread-scroll{max-height:calc(100vh - 322px);overflow:auto;padding:0 10px}.empty{padding:30px 16px;text-align:center;color:var(--muted)}.detail-empty{min-height:510px;display:grid;place-items:center;padding:30px;text-align:center}.detail-empty h2{margin:0 0 6px;font-size:20px}.detail-head{padding:15px 16px;border-bottom:1px solid var(--line);background:var(--surface)}.detail-title-row{display:flex;gap:12px;justify-content:space-between;align-items:flex-start}.detail-head h2{font-size:20px;line-height:1.28;letter-spacing:-.02em;margin:0;overflow-wrap:anywhere}.detail-ref{font:11px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--muted);overflow-wrap:anywhere}.detail-meta{margin-top:9px}.detail-actions{display:flex;flex-wrap:wrap;gap:8px;padding:10px 15px;border-bottom:1px solid var(--line)}.detail-back{display:none}.notice{margin:12px 15px 0;border-left:3px solid var(--blue);border-radius:6px 11px 11px 6px;background:var(--blue-soft);padding:10px 12px;color:#4c5d8d}.notice.warn{border-color:var(--amber);background:var(--amber-soft);color:#815b20}.notice.bad{border-color:var(--red);background:var(--red-soft);color:#9e3344}.tabs{display:flex;gap:2px;padding:11px 15px 0;border-bottom:1px solid var(--line)}.tab{min-height:39px;padding:7px 11px;border:0;border-bottom:2px solid transparent;border-radius:7px 7px 0 0;background:transparent;color:var(--muted)}.tab[aria-pressed="true"]{border-bottom-color:var(--text);color:var(--text);font-weight:650}.timeline,.live-feed{display:grid;gap:10px;padding:14px 15px 18px;max-height:calc(100vh - 430px);overflow:auto}.turn{border:1px solid var(--line);border-radius:13px;overflow:hidden}.turn-head{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:9px 11px;background:var(--surface-3);color:var(--muted);font-size:12px}.turn-items{display:grid;gap:8px;padding:10px}.item{min-width:0;border-left:2px solid var(--line-strong);padding:9px 11px;background:#fafaf8;border-radius:7px}.item.user{border-color:var(--blue)}.item.assistant{border-color:var(--green)}.item.reasoning,.item.plan{border-color:var(--amber)}.item.command,.item.file{border-color:#7a6ca9}.item-label{color:var(--muted);font-size:11px;font-weight:700;margin-bottom:4px}.item-text{white-space:pre-wrap;overflow-wrap:anywhere}.code-output{max-height:220px;margin:7px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:9px;background:#f0f1ee;color:#33423b;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.change-list{display:grid;gap:4px;margin-top:5px}.change{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#555b64;overflow-wrap:anywhere}.live-event{border:1px solid var(--line);border-radius:11px;padding:11px;background:#fafaf8}.live-event-head{display:flex;gap:8px;justify-content:space-between;color:var(--muted);font-size:11px}.live-event-body{margin-top:5px;white-space:pre-wrap;overflow-wrap:anywhere}.composer{border-top:1px solid var(--line);background:rgba(255,255,255,.97);padding:10px 15px calc(12px + env(safe-area-inset-bottom))}.mode-switch{display:flex;gap:5px;margin-bottom:8px}.mode-switch button{min-height:36px;padding:6px 10px;background:transparent}.mode-switch button[aria-pressed="true"]{border-color:#222326;background:#222326;color:#fff}.composer-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:8px}.feedback{min-height:22px;margin-right:auto;color:var(--muted);font-size:12px}.model-field{margin-bottom:8px}.model-meta{min-height:18px;font-size:11px;color:var(--muted)}.mobile-nav{display:none}.sheet-backdrop{display:none}.new-task-sheet{position:fixed;z-index:90;left:50%;top:50%;width:min(520px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;transform:translate(-50%,-50%);border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:0 24px 80px rgba(22,25,30,.2);padding:8px 18px 20px}.sheet-handle{display:none;width:38px;height:4px;border-radius:4px;background:#c7c9cc;margin:0 auto 6px}.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.sheet-head h2{margin:9px 0;font-size:20px}.sheet-copy{margin:0 0 15px;color:var(--muted);font-size:13px}.new-task-form{display:grid;gap:13px}.new-task-form textarea{min-height:126px}.sheet-actions{display:flex;gap:8px;justify-content:flex-end}.sheet-actions .primary{min-width:130px}.modal-backdrop{position:fixed;z-index:80;inset:0;background:rgba(25,27,30,.25)}.hidden{display:none!important}.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
@@ -23,21 +23,24 @@ DESKTOP_DASHBOARD_HTML_LEGACY = r"""<!doctype html>
 
 
 DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="only light"><meta name="supported-color-schemes" content="light"><meta name="theme-color" content="#f7f7f5">
 <title>Codex 控制器</title><style>
-:root{color-scheme:light;--bg:#f7f7f5;--surface:#fff;--surface-2:#f1f1ee;--surface-3:#fbfbfa;--line:rgba(31,32,35,.1);--line-strong:rgba(31,32,35,.17);--text:#202124;--muted:#777a7f;--blue:#3f68da;--blue-soft:#edf1fc;--green:#218461;--green-soft:#eaf4ef;--amber:#9b681d;--amber-soft:#f8f0e3;--red:#b43d50;--red-soft:#f9ebee;--shadow:0 1px 2px rgba(20,22,26,.035),0 12px 32px rgba(20,22,26,.05)}
-*{box-sizing:border-box}html{height:100%;background:var(--bg);scrollbar-gutter:stable}body{min-width:320px;min-height:100%;margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}button,input,select,textarea{font:inherit;color:inherit}button,a,input,select,textarea{outline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--blue)}button{min-height:42px;border:1px solid var(--line-strong);border-radius:11px;padding:8px 13px;background:var(--surface);cursor:pointer;transition:background .15s,border-color .15s,transform .15s}button:hover:not(:disabled){background:var(--surface-2)}button:active:not(:disabled){transform:scale(.985)}button:disabled{opacity:.42;cursor:not-allowed}button.primary{border-color:#222326;background:#222326;color:#fff}button.primary:hover:not(:disabled){background:#37383b}button.danger{border-color:#efd2d8;background:var(--red-soft);color:var(--red)}button.ghost{border-color:transparent;background:transparent}a{color:inherit;text-decoration:none}.hidden{display:none!important}.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.muted{color:var(--muted)}.error{color:var(--red)}.success{color:var(--green)}.warning{color:var(--amber)}
+:root{color-scheme:only light;--bg:#f7f7f5;--surface:#fff;--surface-2:#f1f1ee;--surface-3:#fbfbfa;--line:rgba(31,32,35,.1);--line-strong:rgba(31,32,35,.17);--text:#202124;--muted:#777a7f;--blue:#3f68da;--blue-soft:#edf1fc;--green:#218461;--green-soft:#eaf4ef;--amber:#9b681d;--amber-soft:#f8f0e3;--red:#b43d50;--red-soft:#f9ebee;--shadow:0 1px 2px rgba(20,22,26,.035),0 12px 32px rgba(20,22,26,.05)}
+@media(max-width:920px){body .delivery{grid-template-columns:repeat(2,minmax(0,1fr));margin-inline:10px}body .delivery-stage{padding-inline:6px;font-size:10px}body .queue-panel{margin:0 4px 5px}body .queue-list{max-height:min(32dvh,240px)}body .queue-item{grid-template-columns:24px minmax(0,1fr)}body .queue-actions{grid-column:2;justify-content:flex-start}body .queue-actions button{min-height:44px;flex:1 1 auto}}
+.queue-panel{flex:0 0 auto;margin:10px 16px 0;border:1px solid var(--line);border-radius:13px;background:var(--surface-3);overflow:hidden}.queue-head{width:100%;min-height:44px;display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;text-align:left;font-size:12px;font-weight:650}.queue-panel:not(.open) .queue-list{display:none}.queue-list{display:grid;max-height:210px;overflow:auto}.queue-item{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:7px;align-items:center;padding:8px 9px;border-bottom:1px solid var(--line)}.queue-item:last-child{border-bottom:0}.queue-position{color:var(--muted);font-size:11px;text-align:center}.queue-text{min-height:38px;max-height:90px;padding:7px 8px;resize:vertical;font-size:12px}.queue-text[readonly]{border-color:transparent;background:transparent}.queue-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.queue-actions button{min-height:34px;padding:5px 8px;font-size:11px}.queue-empty{padding:9px 11px;color:var(--muted);font-size:12px}.queue-add-button{min-width:80px}
+*{box-sizing:border-box;forced-color-adjust:none}html{height:100%;max-width:100%;overflow-x:hidden;background:#f7f7f5;scrollbar-gutter:stable;-webkit-text-size-adjust:100%;text-size-adjust:100%}body{min-width:320px;min-height:100%;max-width:100%;overflow-x:hidden;margin:0;background:#f7f7f5;color:#202124;font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}button,input,select,textarea{font:inherit;color:inherit;background-color:#fff}button,a,input,select,textarea{outline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid var(--blue)}button{min-height:42px;border:1px solid var(--line-strong);border-radius:11px;padding:8px 13px;background:var(--surface);cursor:pointer;transition:background .15s,border-color .15s,transform .15s}button:hover:not(:disabled){background:var(--surface-2)}button:active:not(:disabled){transform:scale(.985)}button:disabled{opacity:.42;cursor:not-allowed}button.primary{border-color:#222326;background:#222326;color:#fff}button.primary:hover:not(:disabled){background:#37383b}button.danger{border-color:#efd2d8;background:var(--red-soft);color:var(--red)}button.ghost{border-color:transparent;background:transparent}a{color:inherit;text-decoration:none}.hidden{display:none!important}.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.muted{color:var(--muted)}.error{color:var(--red)}.success{color:var(--green)}.warning{color:var(--amber)}
 .shell{max-width:1540px;margin:auto;padding:16px 18px}.topbar{height:58px;display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:12px}.brand{display:flex;align-items:center;gap:11px;min-width:0}.brand-mark{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:#222326;color:#fff;font-weight:750}.brand h1{margin:0;font-size:21px;line-height:1.2;letter-spacing:-.025em}.subtitle{margin:2px 0 0;color:var(--muted);font-size:12px}.top-actions{display:flex;align-items:center;gap:8px}.connection{display:inline-flex;align-items:center;gap:7px;min-height:34px;border:1px solid var(--line);border-radius:999px;padding:5px 10px;background:var(--surface);color:var(--muted);font-size:12px}.connection::before{content:"";width:7px;height:7px;border-radius:999px;background:#aaa}.connection.good{color:var(--green)}.connection.good::before{background:var(--green);box-shadow:0 0 0 3px var(--green-soft)}.connection.warn{color:var(--amber)}.connection.warn::before{background:var(--amber)}.connection.bad{color:var(--red)}.connection.bad::before{background:var(--red)}.settings-link{min-height:42px;display:inline-flex;align-items:center;border:1px solid var(--line-strong);border-radius:11px;padding:8px 13px;background:var(--surface)}
 .runner-banner{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px;padding:12px 14px;border:1px solid #ead8b9;border-radius:14px;background:var(--amber-soft)}.runner-banner.ready{display:none}.runner-banner strong{display:block}.runner-banner span{display:block;margin-top:2px;color:var(--muted);font-size:12px}.metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin-bottom:12px}.metric{min-width:0;border:1px solid var(--line);border-radius:12px;padding:10px 13px;background:var(--surface)}.metric span{display:block;color:var(--muted);font-size:11px}.metric strong{display:block;margin-top:2px;font-size:19px;line-height:1.25}
-.workspace{height:calc(100dvh - 172px);min-height:560px;display:grid;grid-template-columns:220px 330px minmax(420px,1fr);gap:11px}.panel{min-width:0;min-height:0;border:1px solid var(--line);border-radius:15px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}.panel-head{min-height:53px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 13px;border-bottom:1px solid var(--line);background:var(--surface-3)}.panel-head h2{margin:0;font-size:15px}.panel-body{padding:11px}.stack{display:grid;gap:10px}.field{display:grid;gap:5px}.field label{font-size:12px;color:var(--muted)}select,input,textarea{width:100%;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);padding:9px 10px}textarea{resize:none}.badge-row,.detail-meta{display:flex;flex-wrap:wrap;gap:6px}.badge{display:inline-flex;align-items:center;min-height:24px;border:0;border-radius:999px;padding:3px 8px;background:#efefec;color:#65686d;font-size:11px}.badge.good{background:var(--green-soft);color:var(--green)}.badge.warn{background:var(--amber-soft);color:var(--amber)}.badge.bad{background:var(--red-soft);color:var(--red)}
+.workspace{height:calc(var(--app-height,100dvh) - 172px);min-height:560px;display:grid;grid-template-columns:220px 330px minmax(420px,1fr);gap:11px}.panel{min-width:0;min-height:0;border:1px solid var(--line);border-radius:15px;background:var(--surface);box-shadow:var(--shadow);overflow:hidden}.panel-head{min-height:53px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 13px;border-bottom:1px solid var(--line);background:var(--surface-3)}.panel-head h2{margin:0;font-size:15px}.panel-body{padding:11px}.stack{display:grid;gap:10px}.field{display:grid;gap:5px}.field label{font-size:12px;color:var(--muted)}select,input,textarea{width:100%;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);padding:9px 10px}textarea{resize:none}.badge-row,.detail-meta{display:flex;flex-wrap:wrap;gap:6px}.badge{display:inline-flex;align-items:center;min-height:24px;border:0;border-radius:999px;padding:3px 8px;background:#efefec;color:#65686d;font-size:11px}.badge.good{background:var(--green-soft);color:var(--green)}.badge.warn{background:var(--amber-soft);color:var(--amber)}.badge.bad{background:var(--red-soft);color:var(--red)}
 .project-panel .panel-head button{display:none}.project-list,.thread-list{display:grid}.project-button,.thread-button{width:100%;height:auto;text-align:left;border-color:transparent;background:transparent}.project-button{padding:10px;border-radius:10px}.project-button:hover,.project-button.selected{background:var(--surface-2)}.project-title,.thread-title{font-weight:660;overflow-wrap:anywhere}.project-meta,.thread-meta,.thread-preview{margin-top:3px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.filters{display:grid;grid-template-columns:1fr 1.3fr;gap:7px}.thread-scroll{height:calc(100% - 122px);overflow:auto;padding:0 9px}.thread-button{position:relative;min-height:96px;border-radius:0;border-bottom:1px solid var(--line);padding:12px 9px}.thread-button.selected{background:#f6f6f3}.thread-button.selected::before,.thread-button.active-thread::before{content:"";position:absolute;left:0;top:18px;bottom:18px;width:2px;border-radius:2px;background:var(--blue)}.thread-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.thread-state{flex:0 0 auto;color:var(--muted);font-size:11px}.thread-state.good{color:var(--green)}.thread-state.bad{color:var(--red)}.empty{padding:34px 16px;text-align:center;color:var(--muted)}
-.detail-panel{display:flex;flex-direction:column}.detail-empty{height:100%;display:grid;place-items:center;padding:30px;text-align:center}.detail-empty h2{margin:0 0 6px;font-size:20px}.detail-content{height:100%;min-height:0;display:flex;flex-direction:column}.detail-head{flex:0 0 auto;position:relative;padding:13px 16px 11px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.95)}.detail-title-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:10px}.detail-heading{min-width:0}.detail-head h2{margin:0;font-size:18px;line-height:1.3;letter-spacing:-.015em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eyebrow{color:var(--muted);font-size:11px}.detail-preview{margin-top:3px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.detail-meta{margin-top:8px}.detail-back{display:none}.task-menu{position:relative}.task-menu summary{width:42px;height:42px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);cursor:pointer;list-style:none;font-weight:650}.task-menu summary::-webkit-details-marker{display:none}.task-menu-popover{position:absolute;z-index:12;top:48px;right:0;width:210px;display:grid;gap:5px;padding:7px;border:1px solid var(--line);border-radius:13px;background:var(--surface);box-shadow:0 16px 44px rgba(20,22,26,.14)}.task-menu-popover button{width:100%;text-align:left}.notice{flex:0 0 auto;margin:10px 16px 0;border-left:3px solid var(--blue);border-radius:6px 11px 11px 6px;background:var(--blue-soft);padding:9px 11px;color:#4c5d8d;font-size:12px}.notice.warn{border-color:var(--amber);background:var(--amber-soft);color:#805a20}.notice.bad{border-color:var(--red);background:var(--red-soft);color:#983547}
-.conversation-wrap{position:relative;flex:1;min-height:0;overflow:hidden}.conversation{height:100%;overflow:auto;padding:20px clamp(16px,4vw,54px) 26px;scroll-behavior:smooth}.conversation-inner{max-width:820px;display:grid;gap:18px;margin:0 auto}.message{min-width:0}.message-role{margin:0 0 5px;color:var(--muted);font-size:11px;font-weight:650}.message-body{white-space:pre-wrap;overflow-wrap:anywhere}.message.assistant{padding-right:9%}.message.assistant .message-body{font-size:15px;line-height:1.65}.message.user{justify-self:end;width:min(82%,680px);padding:11px 14px;border-radius:17px 17px 5px 17px;background:var(--surface-2)}.message.user .message-role{display:none}.message.system{justify-self:center;color:var(--muted);font-size:12px;text-align:center}.message.streaming .message-role{color:var(--green)}.typing-dot{display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:99px;background:var(--green);animation:pulse 1.3s infinite}@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}.run-details{border:1px solid var(--line);border-radius:12px;background:var(--surface-3)}.run-details summary{cursor:pointer;list-style:none;padding:9px 11px;color:var(--muted);font-size:12px}.run-details summary::-webkit-details-marker{display:none}.run-details[open] summary{border-bottom:1px solid var(--line)}.run-detail-items{display:grid;gap:7px;padding:9px}.run-item{border-left:2px solid var(--line-strong);border-radius:6px;background:var(--surface);padding:8px 9px}.run-item-label{margin-bottom:3px;color:var(--muted);font-size:11px;font-weight:650}.run-item-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.code-output{max-height:190px;margin:6px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:8px;background:#f2f2ef;color:#3b4540;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.new-reply{position:absolute;z-index:4;left:50%;bottom:13px;transform:translateX(-50%);min-height:36px;border-color:#d9dfef;border-radius:999px;background:var(--blue-soft);color:var(--blue);box-shadow:0 5px 16px rgba(30,44,80,.12)}
-.composer{flex:0 0 auto;margin:0 16px 14px;border:1px solid var(--line-strong);border-radius:17px;background:var(--surface);box-shadow:0 8px 28px rgba(20,22,26,.08);padding:7px}.composer textarea{min-height:50px;max-height:160px;border:0;background:transparent;padding:9px 10px;overflow:auto}.composer-bar{display:flex;align-items:flex-end;gap:8px}.composer-tools{min-width:0;flex:1}.composer-status{min-height:20px;padding:1px 9px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.send-button{flex:0 0 auto;min-width:70px}.advanced{margin:1px 4px 5px}.advanced summary{display:inline-flex;min-height:30px;align-items:center;cursor:pointer;color:var(--muted);font-size:11px;list-style:none}.advanced summary::-webkit-details-marker{display:none}.advanced-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:5px}.mode-switch{display:flex;gap:5px}.mode-switch button{min-height:36px;padding:6px 9px;background:transparent;font-size:12px}.mode-switch button[aria-pressed="true"]{border-color:#222326;background:#222326;color:#fff}.model-meta{grid-column:1/-1;color:var(--muted);font-size:11px}
+.detail-panel{display:flex;flex-direction:column}.detail-empty{height:100%;display:grid;place-items:center;padding:30px;text-align:center}.detail-empty h2{margin:0 0 6px;font-size:20px}.detail-content{height:100%;min-height:0;display:flex;flex-direction:column}.detail-head{flex:0 0 auto;position:relative;padding:13px 16px 11px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.95)}.detail-title-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:10px}.detail-heading{min-width:0}.detail-head h2{margin:0;font-size:18px;line-height:1.3;letter-spacing:-.015em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eyebrow{color:var(--muted);font-size:11px}.detail-preview{margin-top:3px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.detail-meta{margin-top:8px}.sync-badge{display:inline-flex;align-items:center;gap:5px}.sync-badge::before{content:"";width:6px;height:6px;border-radius:99px;background:currentColor}.detail-back{display:none}.task-menu{position:relative}.task-menu summary{width:42px;height:42px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);cursor:pointer;list-style:none;font-weight:650}.task-menu summary::-webkit-details-marker{display:none}.task-menu-popover{position:absolute;z-index:12;top:48px;right:0;width:210px;display:grid;gap:5px;padding:7px;border:1px solid var(--line);border-radius:13px;background:var(--surface);box-shadow:0 16px 44px rgba(20,22,26,.14)}.task-menu-popover button{width:100%;text-align:left}.notice{flex:0 0 auto;margin:10px 16px 0;border-left:3px solid var(--blue);border-radius:6px 11px 11px 6px;background:var(--blue-soft);padding:9px 11px;color:#4c5d8d;font-size:12px}.notice.warn{border-color:var(--amber);background:var(--amber-soft);color:#805a20}.notice.bad{border-color:var(--red);background:var(--red-soft);color:#983547}
+.conversation-wrap{position:relative;flex:1;min-height:0;overflow:hidden}.conversation{height:100%;overflow:auto;padding:20px clamp(16px,4vw,54px) 26px;scroll-behavior:smooth}.conversation-inner{max-width:820px;display:grid;gap:18px;margin:0 auto}.message{min-width:0}.message-role{margin:0 0 5px;color:var(--muted);font-size:11px;font-weight:650}.message-body{white-space:pre-wrap;overflow-wrap:anywhere}.message.assistant{padding-right:9%}.message.assistant .message-body{font-size:15px;line-height:1.65}.message.user{justify-self:end;width:min(82%,680px);padding:11px 14px;border-radius:17px 17px 5px 17px;background:var(--surface-2)}.message.user .message-role{display:none}.message.activity{max-width:92%;border-left:2px solid var(--amber);border-radius:7px;background:var(--surface-3);padding:8px 11px;color:#555b63}.message.activity .message-role{color:var(--amber)}.message.activity .message-body{font-size:12px}.message.system{justify-self:center;color:var(--muted);font-size:12px;text-align:center}.message.streaming .message-role{color:var(--green)}.typing-dot{display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:99px;background:var(--green);animation:pulse 1.3s infinite}@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}.run-details{border:1px solid var(--line);border-radius:12px;background:var(--surface-3)}.run-details summary{cursor:pointer;list-style:none;padding:9px 11px;color:var(--muted);font-size:12px}.run-details summary::-webkit-details-marker{display:none}.run-details[open] summary{border-bottom:1px solid var(--line)}.run-detail-items{display:grid;gap:7px;padding:9px}.run-item{border-left:2px solid var(--line-strong);border-radius:6px;background:var(--surface);padding:8px 9px}.run-item-label{margin-bottom:3px;color:var(--muted);font-size:11px;font-weight:650}.run-item-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.code-output{max-height:190px;margin:6px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:8px;background:#f2f2ef;color:#3b4540;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.new-reply{position:absolute;z-index:4;left:50%;bottom:13px;transform:translateX(-50%);min-height:36px;border-color:#d9dfef;border-radius:999px;background:var(--blue-soft);color:var(--blue);box-shadow:0 5px 16px rgba(30,44,80,.12)}
+.composer{flex:0 0 auto;margin:0 16px 14px;border:1px solid var(--line-strong);border-radius:17px;background:var(--surface);box-shadow:0 8px 28px rgba(20,22,26,.08);padding:7px}.composer textarea{min-height:50px;max-height:160px;border:0;background:transparent;padding:9px 10px;overflow:auto}.composer-bar{display:flex;align-items:flex-end;gap:8px}.composer-tools{min-width:0;flex:1}.composer-status{min-height:20px;padding:1px 9px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.send-button{flex:0 0 auto;min-width:70px}.advanced{margin:1px 4px 5px}.advanced summary{display:inline-flex;min-height:30px;align-items:center;cursor:pointer;color:var(--muted);font-size:11px;list-style:none}.advanced summary::-webkit-details-marker{display:none}.advanced-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:5px}.mode-switch{display:flex;gap:5px}.mode-switch button{min-height:36px;padding:6px 9px;background:transparent;font-size:12px}.mode-switch button[aria-pressed="true"]{border-color:#222326;background:#222326;color:#fff}.model-meta{grid-column:1/-1;color:var(--muted);font-size:11px}
 .mobile-nav{display:none}.new-task-sheet{position:fixed;z-index:90;left:50%;top:50%;width:min(520px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;transform:translate(-50%,-50%);border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:0 24px 80px rgba(22,25,30,.2);padding:8px 18px 20px}.sheet-handle{display:none;width:38px;height:4px;border-radius:4px;background:#c7c9cc;margin:0 auto 6px}.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.sheet-head h2{margin:9px 0;font-size:20px}.sheet-copy{margin:0 0 15px;color:var(--muted);font-size:13px}.new-task-form{display:grid;gap:13px}.new-task-form textarea{min-height:126px;resize:vertical}.sheet-actions{display:flex;gap:8px;justify-content:flex-end}.sheet-actions .primary{min-width:130px}.feedback{min-height:20px;color:var(--muted);font-size:12px}.modal-backdrop{position:fixed;z-index:80;inset:0;background:rgba(25,27,30,.25)}
 @media(max-width:1050px){.workspace{grid-template-columns:190px 300px minmax(360px,1fr)}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:820px){body{padding-bottom:calc(76px + env(safe-area-inset-bottom))}.shell{padding:0 12px 16px}.topbar{height:74px;margin:0;padding-top:env(safe-area-inset-top)}.brand-mark,.subtitle,.settings-link{display:none}.brand h1{font-size:24px}.top-actions .connection{padding-inline:9px}.top-actions .primary{padding-inline:11px}.runner-banner{margin:3px 0 11px}.metrics{display:none}.workspace{height:auto;min-height:0;display:block}.panel{box-shadow:none}.project-panel{display:none;position:fixed;z-index:90;left:10px;right:10px;bottom:10px;max-height:76dvh;overflow:auto;border-radius:20px}.project-panel.open{display:block}.project-panel .panel-head button{display:inline-flex}.project-panel.open+.thread-panel{pointer-events:none}.thread-panel{border:0;background:transparent}.thread-panel .panel-head{padding-inline:3px;background:transparent;border:0}.thread-panel .panel-body{padding:5px 0 9px}.thread-scroll{height:auto;padding:0}.thread-button{padding:13px 10px;min-height:98px}.detail-panel{display:none;position:fixed;z-index:40;inset:0;border:0;border-radius:0;background:var(--bg)}.detail-open .detail-panel{display:flex}.detail-open .shell{padding:0}.detail-open .topbar,.detail-open .runner-banner,.detail-open .metrics,.detail-open .project-panel,.detail-open .thread-panel,.detail-open .mobile-nav{display:none}.detail-content{height:100dvh}.detail-head{padding:calc(9px + env(safe-area-inset-top)) 10px 10px;background:rgba(247,247,245,.94);backdrop-filter:blur(18px)}.detail-title-row{grid-template-columns:48px minmax(0,1fr) 42px;align-items:center}.detail-back{width:48px;display:inline-flex;align-items:center;justify-content:center;border-color:transparent;background:transparent;padding:0}.detail-preview{display:none}.detail-meta{margin-left:58px;margin-top:4px}.conversation{padding:17px 14px 210px}.conversation-inner{gap:17px}.message.assistant{padding-right:2%}.message.user{width:min(88%,680px)}.notice{margin-inline:10px}.composer{position:fixed;z-index:8;left:8px;right:8px;bottom:8px;margin:0;border-radius:19px;padding:6px 7px calc(7px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);backdrop-filter:blur(18px)}.composer textarea{max-height:118px}.advanced-grid{grid-template-columns:1fr}.model-meta{grid-column:auto}.mobile-nav{position:fixed;z-index:30;left:12px;right:12px;bottom:10px;height:calc(64px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,1fr);padding:4px 7px env(safe-area-inset-bottom);border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.95);box-shadow:0 8px 28px rgba(25,28,32,.11);backdrop-filter:blur(18px)}.mobile-nav button,.mobile-nav a{min-height:54px;border:0;border-radius:12px;background:transparent;color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:12px}.mobile-nav .primary-nav{margin-top:-14px;height:56px;align-self:start;background:#222326;color:#fff;box-shadow:0 6px 16px rgba(0,0,0,.18)}.new-task-sheet{left:8px;right:8px;top:auto;bottom:0;width:auto;max-height:88dvh;transform:none;border-radius:22px 22px 0 0;padding-bottom:calc(18px + env(safe-area-inset-bottom))}.sheet-handle{display:block}.sheet-actions{display:grid;grid-template-columns:1fr 1.4fr}.sheet-actions button{width:100%}}
+@media(max-width:920px){body{padding-bottom:calc(76px + env(safe-area-inset-bottom));min-height:-webkit-fill-available}.shell{padding:0 12px 16px}.topbar{height:74px;margin:0;padding-top:env(safe-area-inset-top)}.brand-mark,.subtitle,.settings-link{display:none}.brand h1{font-size:24px}.top-actions .connection{padding-inline:9px}.top-actions .primary{padding-inline:11px}.runner-banner{margin:3px 0 11px}.metrics{display:none}.workspace{height:auto;min-height:0;display:block}.panel{box-shadow:none}.project-panel{display:none;position:fixed;z-index:90;left:10px;right:10px;bottom:10px;max-height:76dvh;overflow:auto;border-radius:20px}.project-panel.open{display:block}.project-panel .panel-head button{display:inline-flex}.project-panel.open+.thread-panel{pointer-events:none}.thread-panel{border:0;background:transparent}.thread-panel .panel-head{padding-inline:3px;background:transparent;border:0}.thread-panel .panel-body{padding:5px 0 9px}.thread-scroll{height:auto;padding:0}.thread-button{padding:13px 10px;min-height:98px}.detail-panel{display:none;position:fixed;z-index:40;inset:0;height:var(--app-height,100dvh);border:0;border-radius:0;background:var(--bg)}.detail-open .detail-panel{display:flex}.detail-open .shell{padding:0}.detail-open .topbar,.detail-open .runner-banner,.detail-open .metrics,.detail-open .project-panel,.detail-open .thread-panel,.detail-open .mobile-nav{display:none}.detail-content{height:var(--app-height,100dvh)}.detail-head{padding:calc(9px + env(safe-area-inset-top)) 10px 10px;background:rgba(247,247,245,.94);backdrop-filter:blur(18px)}.detail-title-row{grid-template-columns:48px minmax(0,1fr) 44px;align-items:center}.detail-back,.task-menu summary,.send-button{min-height:44px}.detail-back{width:48px;display:inline-flex;align-items:center;justify-content:center;border-color:transparent;background:transparent;padding:0}.task-menu summary{width:44px;height:44px}.detail-preview{display:none}.detail-meta{margin-left:58px;margin-top:4px}.conversation{padding:17px 14px 210px}.conversation-inner{gap:17px}.message.assistant{padding-right:2%}.message.user{width:min(88%,680px)}.notice{margin-inline:10px}.composer{position:fixed;z-index:8;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));max-height:calc(var(--app-height,100dvh) - max(16px,env(safe-area-inset-top)) - max(16px,env(safe-area-inset-bottom)));overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;margin:0;border-radius:19px;padding:6px 7px calc(7px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);backdrop-filter:blur(18px)}.composer textarea{max-height:118px}.advanced-grid{grid-template-columns:1fr}.model-meta{grid-column:auto}.mobile-nav{position:fixed;z-index:30;left:12px;right:12px;bottom:max(10px,env(safe-area-inset-bottom));height:calc(64px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,1fr);padding:4px 7px env(safe-area-inset-bottom);border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.95);box-shadow:0 8px 28px rgba(25,28,32,.11);backdrop-filter:blur(18px)}.mobile-nav button,.mobile-nav a{min-height:54px;border:0;border-radius:12px;background:transparent;color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:12px}.mobile-nav .primary-nav{margin-top:-14px;height:56px;align-self:start;background:#222326;color:#fff;box-shadow:0 6px 16px rgba(0,0,0,.18)}.new-task-sheet{left:8px;right:8px;top:auto;bottom:0;width:auto;max-height:88dvh;transform:none;border-radius:22px 22px 0 0;padding-bottom:calc(18px + env(safe-area-inset-bottom))}.sheet-handle{display:block}.sheet-actions{display:grid;grid-template-columns:1fr 1.4fr}.sheet-actions button{width:100%}}
 @media(max-width:520px){.shell{padding-inline:9px}.runner-banner{padding:11px}.filters{grid-template-columns:1fr 1.25fr}.task-menu-popover{position:fixed;top:auto;left:10px;right:10px;bottom:calc(12px + env(safe-area-inset-bottom));width:auto}.advanced-grid{padding-inline:2px}.sheet-actions{grid-template-columns:1fr}.new-task-sheet{left:0;right:0}}
+.delivery{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:10px 16px 0}.delivery-stage{min-width:0;border:1px solid var(--line);border-radius:10px;padding:7px 9px;background:var(--surface-3);color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.delivery-stage::before{content:"";display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:99px;background:#b7b9bd}.delivery-stage.done{color:var(--green);background:var(--green-soft)}.delivery-stage.done::before{background:var(--green)}.delivery-stage.current{color:var(--blue);background:var(--blue-soft)}.delivery-stage.current::before{background:var(--blue);animation:pulse 1.3s infinite}.delivery-stage.failed{color:var(--red);background:var(--red-soft)}.delivery-stage.failed::before{background:var(--red)}@media(max-width:920px){.delivery{margin-inline:10px;grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style></head><body><main class="shell">
 <header class="topbar"><div class="brand"><span class="brand-mark">C</span><div><h1>Codex</h1><p class="subtitle">Mac 上的任务，随时继续对话</p></div></div><div class="top-actions"><span id="connectionState" class="connection">正在连接</span><a href="../" class="settings-link">设置</a><button id="newTaskButton" class="primary" type="button">新建任务</button></div></header>
 <section id="runnerBanner" class="runner-banner"><div><strong id="runnerBannerTitle">正在连接 Mac</strong><span id="runnerBannerText">任务与回复会自动同步。</span></div><button id="checkConnection" type="button">重试连接</button></section>
@@ -45,10 +48,10 @@ DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
 <section class="workspace">
 <aside id="projectPanel" class="panel project-panel" aria-label="主机与项目"><div class="panel-head"><h2>项目</h2><button id="closeProjects" class="ghost" type="button">完成</button></div><div class="panel-body stack"><div class="field"><label for="hostSelect">Mac</label><select id="hostSelect" aria-label="选择 Mac 主机"></select></div><div class="badge-row"><span id="hostWriteState" class="badge">正在连接</span></div><div id="hostMeta" class="muted">等待第一次自动同步。</div><div id="projectList" class="project-list" aria-label="项目列表"></div></div></aside>
 <section class="panel thread-panel" aria-label="任务列表"><div class="panel-head"><h2>任务</h2><span id="threadCount" class="badge">0</span></div><div class="panel-body stack"><div class="filters"><div class="field"><label for="statusFilter">查看</label><select id="statusFilter"><option value="all">全部任务</option><option value="active">正在工作</option><option value="idle">可以继续</option><option value="notLoaded">最近任务</option><option value="failed">需要处理</option><option value="recovery_required">需要处理</option><option value="protocol_degraded">暂时只读</option><option value="archived">已归档</option></select></div><div class="field"><label for="threadSearch">搜索</label><input id="threadSearch" maxlength="120" inputmode="search" placeholder="搜索任务标题"></div></div></div><div id="threadList" class="thread-list thread-scroll" aria-live="polite"></div></section>
-<section class="panel detail-panel" aria-label="任务对话"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个任务</h2><p class="muted">打开后即可像 Codex App 一样查看回复并继续对话。</p></div></div><div id="detailContent" class="detail-content hidden"><header class="detail-head"><div class="detail-title-row"><button id="detailBack" class="detail-back" type="button" aria-label="返回任务列表">返回</button><div class="detail-heading"><div id="detailProject" class="eyebrow">当前项目</div><h2 id="detailTitle">-</h2><div id="detailPreview" class="detail-preview"></div></div><details id="taskMenu" class="task-menu"><summary aria-label="更多任务操作">更多</summary><div class="task-menu-popover"><button id="interruptButton" class="danger" type="button">停止当前任务</button><button id="archiveButton" type="button">归档任务</button><button id="unarchiveButton" type="button">恢复归档</button></div></details></div><div id="detailMeta" class="detail-meta"></div></header><div id="detailNotice" class="notice hidden"></div><div class="conversation-wrap"><div id="conversationView" class="conversation" aria-live="polite"><div id="conversationInner" class="conversation-inner"></div></div><button id="newReplyButton" class="new-reply hidden" type="button">查看新回复</button></div><form id="composer" class="composer"><details id="advancedControls" class="advanced"><summary>模型与发送方式</summary><div class="advanced-grid"><div class="field"><label for="modelSelect">模型</label><select id="modelSelect" aria-describedby="modelMeta"></select></div><div class="field"><label>发送方式</label><div class="mode-switch"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">快速调整</button></div></div><div id="modelMeta" class="model-meta"></div></div></details><label class="sr-only" for="composerInput">给 Codex 发消息</label><div class="composer-bar"><div class="composer-tools"><textarea id="composerInput" rows="1" maxlength="12000" placeholder="给 Codex 发消息"></textarea><div id="composerFeedback" class="composer-status" role="status">回复会自动出现在这里</div></div><button id="submitDirection" class="primary send-button" type="submit">发送</button></div></form></div></section>
+<section class="panel detail-panel" aria-label="任务对话"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个任务</h2><p class="muted">打开后即可像 Codex App 一样查看回复并继续对话。</p></div></div><div id="detailContent" class="detail-content hidden"><header class="detail-head"><div class="detail-title-row"><button id="detailBack" class="detail-back" type="button" aria-label="返回任务列表">返回</button><div class="detail-heading"><div id="detailProject" class="eyebrow">当前项目</div><h2 id="detailTitle">-</h2><div id="detailPreview" class="detail-preview"></div></div><details id="taskMenu" class="task-menu"><summary aria-label="更多任务操作">更多</summary><div class="task-menu-popover"><button id="interruptButton" class="danger" type="button">停止当前任务</button><button id="archiveButton" type="button">归档任务</button><button id="unarchiveButton" type="button">恢复归档</button></div></details></div><div id="detailMeta" class="detail-meta"></div></header><div id="detailNotice" class="notice hidden"></div><div class="conversation-wrap"><div id="conversationView" class="conversation" aria-live="polite"><div id="conversationInner" class="conversation-inner"></div></div><button id="newReplyButton" class="new-reply hidden" type="button">查看新回复</button></div><form id="composer" class="composer"><details id="advancedControls" class="advanced"><summary>模型、推理强度与发送方式</summary><div class="advanced-grid"><div class="field"><label for="modelSelect">模型</label><select id="modelSelect" aria-describedby="modelMeta"></select></div><div class="field"><label for="effortSelect">推理强度</label><select id="effortSelect" aria-describedby="modelMeta"></select></div><div class="field"><label>发送方式</label><div class="mode-switch"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">快速调整</button></div></div><div id="modelMeta" class="model-meta"></div></div></details><label class="sr-only" for="composerInput">给 Codex 发消息</label><div class="composer-bar"><div class="composer-tools"><textarea id="composerInput" rows="1" maxlength="12000" placeholder="给 Codex 发消息"></textarea><div id="composerFeedback" class="composer-status" role="status">回复会自动出现在这里</div></div><button id="submitDirection" class="primary send-button" type="submit">发送</button></div></form></div></section>
 </section></main>
 <nav class="mobile-nav" aria-label="移动端导航"><a href="./">任务</a><button id="mobileProjects" type="button">项目</button><button id="mobileNewTask" class="primary-nav" type="button">新建</button><a href="../">设置</a></nav>
-<div id="modalBackdrop" class="modal-backdrop hidden"></div><section id="newTaskSheet" class="new-task-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="newTaskTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="newTaskTitle">新建任务</h2><button id="closeNewTask" class="ghost" type="button">关闭</button></div><p class="sheet-copy">任务会出现在 Mac 和手机的同一任务列表里。连接未确认时不会发送。</p><form id="newTaskForm" class="new-task-form"><div class="field"><label for="newTaskProject">项目</label><select id="newTaskProject" required></select></div><div class="field"><label for="newTaskInput">给 Codex 的任务</label><textarea id="newTaskInput" maxlength="12000" required placeholder="描述希望 Codex 完成的任务"></textarea></div><div class="field"><label for="newTaskModel">模型</label><select id="newTaskModel"></select></div><div id="newTaskFeedback" class="feedback" role="status">正在检查是否可以创建任务。</div><div class="sheet-actions"><button id="cancelNewTask" type="button">取消</button><button id="createTaskButton" class="primary" type="submit" disabled>创建并打开</button></div></form></section>
+<div id="modalBackdrop" class="modal-backdrop hidden"></div><section id="newTaskSheet" class="new-task-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="newTaskTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="newTaskTitle">新建任务</h2><button id="closeNewTask" class="ghost" type="button">关闭</button></div><p class="sheet-copy">任务会出现在 Mac 和手机的同一任务列表里。连接未确认时不会发送。</p><form id="newTaskForm" class="new-task-form"><div class="field"><label for="newTaskProject">项目</label><select id="newTaskProject" required></select></div><div class="field"><label for="newTaskInput">给 Codex 的任务</label><textarea id="newTaskInput" maxlength="12000" required placeholder="描述希望 Codex 完成的任务"></textarea></div><div class="field"><label for="newTaskModel">模型</label><select id="newTaskModel"></select></div><div class="field"><label for="newTaskEffort">推理强度</label><select id="newTaskEffort"></select></div><div id="newTaskFeedback" class="feedback" role="status">正在检查是否可以创建任务。</div><div class="sheet-actions"><button id="cancelNewTask" type="button">取消</button><button id="createTaskButton" class="primary" type="submit" disabled>创建并打开</button></div></form></section>
 <script src="desktop.js"></script></body></html>"""
 
 
@@ -57,7 +60,7 @@ const q = id => document.getElementById(id);
 const API = '../api/desktop/v1';
 const STATUS_API = '../api/status';
 const SHANGHAI_TIME = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
-const state = {csrf: '', hosts: [], projects: [], threads: [], selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', detail: null, events: [], eventCursor: 0, eventGeneration: 0, eventController: null, mode: 'safe', loading: false, drafts: {}, pendingCreate: null, following: true};
+const state = {csrf: '', hosts: [], projects: [], threads: [], selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', selectedEffort: '', detail: null, events: [], eventCursor: 0, eventGeneration: 0, eventController: null, overviewCursor: 0, overviewGeneration: 0, overviewController: null, refreshGeneration: 0, refreshPending: false, refreshPendingPreserveDetail: true, mode: 'safe', loading: false, drafts: {}, pendingCreate: null, createBusy: false, queueBusy: false, queueOpen: false, queueEditing: '', queueDrafts: {}, following: true, serverTimeMs: 0, serverTimeObservedAt: 0, overviewError: '', streamFailures: new Set()};
 
 function requestId() {
   const bytes = new Uint8Array(16);
@@ -75,6 +78,10 @@ async function jsonFetch(path, options = {}) {
 function delay(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)); }
 function text(value, fallback = '') { return typeof value === 'string' && value ? value : fallback; }
 function number(value) { return Number.isFinite(Number(value)) ? Number(value) : 0; }
+function updateViewportHeight() {
+  const height = window.visualViewport?.height || window.innerHeight;
+  document.documentElement.style.setProperty('--app-height', `${Math.max(320, Math.round(height))}px`);
+}
 function formatTime(value) {
   if (!value) return '时间未知';
   const date = new Date(value);
@@ -103,6 +110,36 @@ function statusKind(value) {
 function setConnection(label, kind = '') {
   q('connectionState').className = `connection ${kind}`.trim();
   q('connectionState').textContent = label;
+}
+
+function estimatedServerNow() {
+  return state.serverTimeMs ? state.serverTimeMs + Math.max(0, Date.now() - state.serverTimeObservedAt) : Date.now();
+}
+
+function freshness() {
+  if (!navigator.onLine) return {label: '手机网络离线', kind: 'bad', seconds: null};
+  if (state.streamFailures.size) return {label: '正在重连', kind: 'warn', seconds: null};
+  const host = currentHost();
+  const connectionObservedAt = host?.connection_observed_at || host?.synced_at;
+  if (!host?.online || !connectionObservedAt) return {label: 'Mac 离线', kind: 'bad', seconds: null};
+  const syncedAt = new Date(connectionObservedAt).getTime();
+  if (!Number.isFinite(syncedAt)) return {label: '同步时间未知', kind: 'bad', seconds: null};
+  const seconds = Math.max(0, Math.floor((estimatedServerNow() - syncedAt) / 1000));
+  if (seconds <= 6) return {label: '链路实时', kind: 'good', seconds};
+  if (seconds <= 10) return {label: `心跳 ${seconds} 秒前`, kind: 'warn', seconds};
+  return {label: `链路心跳延迟 ${seconds} 秒`, kind: 'bad', seconds};
+}
+
+function renderFreshness() {
+  const value = freshness();
+  setConnection(value.label, value.kind);
+  const hostMeta = q('hostMeta');
+  if (hostMeta && currentHost()) hostMeta.textContent = state.overviewError || `${value.label} · 数据更新 ${formatTime(currentHost().synced_at)} · 活动任务每 2 秒检查`;
+  const badgeNode = q('detailSyncState');
+  if (badgeNode) {
+    badgeNode.className = `badge sync-badge ${value.kind}`.trim();
+    badgeNode.textContent = value.label;
+  }
 }
 
 function currentHost() { return state.hosts.find(host => host.host_ref === state.selectedHost) || null; }
@@ -156,9 +193,39 @@ function populateModelOptions(select, {includeDefault = true} = {}) {
   }
 }
 
+function modelForEffort(modelId, detail = null) {
+  const models = Array.isArray(currentHost()?.models) ? currentHost().models : [];
+  const currentModel = detail?.snapshot?.model;
+  return models.find(model => model.id === modelId)
+    || models.find(model => model.id === currentModel)
+    || models.find(model => model.is_default)
+    || null;
+}
+
+function populateEffortOptions(select, modelId, {detail = null, value = ''} = {}) {
+  const model = modelForEffort(modelId, detail);
+  const efforts = Array.isArray(model?.supported_reasoning_efforts) ? model.supported_reasoning_efforts : [];
+  select.replaceChildren();
+  const inherit = document.createElement('option');
+  inherit.value = '';
+  inherit.textContent = model?.default_reasoning_effort ? `默认 · ${model.default_reasoning_effort}` : '沿用默认推理强度';
+  select.append(inherit);
+  for (const effort of efforts) {
+    const option = document.createElement('option');
+    option.value = effort.id;
+    option.textContent = effort.id;
+    if (effort.description) option.title = effort.description;
+    select.append(option);
+  }
+  select.value = efforts.some(effort => effort.id === value) ? value : '';
+  return efforts.length > 0;
+}
+
 function renderNewTaskState() {
   const projectSelect = q('newTaskProject');
   const previousProject = projectSelect.value;
+  const previousModel = q('newTaskModel').value;
+  const previousEffort = q('newTaskEffort').value;
   projectSelect.replaceChildren();
   for (const project of state.projects) {
     const option = document.createElement('option');
@@ -169,20 +236,25 @@ function renderNewTaskState() {
   if (state.projects.some(project => project.project_ref === previousProject)) projectSelect.value = previousProject;
   else if (state.selectedProject !== 'all' && state.projects.some(project => project.project_ref === state.selectedProject)) projectSelect.value = state.selectedProject;
   populateModelOptions(q('newTaskModel'));
+  if (Array.from(q('newTaskModel').options).some(option => option.value === previousModel)) q('newTaskModel').value = previousModel;
+  populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value, {value: previousEffort});
   const pending = state.pendingCreate;
   if (pending) {
     projectSelect.value = pending.body.project_ref;
     q('newTaskModel').value = pending.body.model || '';
+    populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value, {value: pending.body.effort || ''});
     q('newTaskInput').value = pending.body.input;
   }
   const allowed = hostCanCreate() && state.projects.length > 0;
-  q('createTaskButton').disabled = pending ? !navigator.onLine : !allowed;
-  q('createTaskButton').textContent = pending ? '检查创建结果' : '创建并打开';
+  q('createTaskButton').disabled = state.createBusy || (pending ? !navigator.onLine : !allowed);
+  q('createTaskButton').textContent = state.createBusy ? '正在创建…' : pending ? '继续检查' : '创建并打开';
   q('newTaskProject').disabled = Boolean(pending) || state.projects.length === 0;
   q('newTaskModel').disabled = Boolean(pending) || !hasCapability('model_override_v1');
+  q('newTaskEffort').disabled = Boolean(pending) || !hasCapability('reasoning_effort_v1');
   q('newTaskInput').disabled = Boolean(pending) || state.projects.length === 0;
   q('newTaskFeedback').className = `feedback ${pending ? 'warning' : allowed ? 'muted' : 'warning'}`;
-  if (pending) q('newTaskFeedback').textContent = '只会用同一 request ID 检查结果；Controller 持久幂等日志保证不会重复创建。';
+  if (state.createBusy) q('newTaskFeedback').textContent = 'Controller 已接收 · WSS 送往 Runner · 等待 Mac 确认';
+  else if (pending) q('newTaskFeedback').textContent = '只会用同一 request ID 检查结果；Controller 持久幂等日志保证不会重复创建。';
   else if (allowed) q('newTaskFeedback').textContent = '创建完成后才会打开新任务；等待或未知状态不会伪装为已发送。';
   else if (!currentHost()?.online || !currentHost()?.write_available) q('newTaskFeedback').textContent = 'Runner 离线：提交已禁用，草稿只保留在当前页面内存中。';
   else if (!hasCapability('create_thread_v1')) q('newTaskFeedback').textContent = '当前 Runner 尚未提供 create_thread_v1，不能远程新建任务。';
@@ -342,11 +414,49 @@ function renderDetail() {
   q('detailPreview').textContent = text(snapshot.preview, detail.status === 'active' ? 'Codex 正在处理这个任务' : '可以继续发送消息');
   const meta = q('detailMeta');
   meta.replaceChildren(badge(statusText(detail.status), statusKind(detail.status)), badge(`更新于 ${formatTime(detail.updated_at)}`));
+  const sync = badge('正在同步', 'sync-badge');
+  sync.id = 'detailSyncState';
+  meta.append(sync);
   if (snapshot.history_incomplete) meta.append(badge('部分较早消息未显示', 'warn'));
   renderNotice(detail);
+  renderDeliveryStatus(detail);
   renderActionState(detail);
   renderConversation(snapshot.turns || []);
   renderComposer(detail);
+  renderQueue(detail);
+  renderFreshness();
+}
+
+function renderDeliveryStatus(detail) {
+  let root = q('deliveryStatus');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'deliveryStatus';
+    root.className = 'delivery hidden';
+    root.setAttribute('role', 'status');
+    root.setAttribute('aria-live', 'polite');
+    q('detailNotice').insertAdjacentElement('afterend', root);
+  }
+  const command = detail?.latest_command;
+  root.replaceChildren();
+  root.classList.toggle('hidden', !command);
+  if (!command) return;
+  const inferred = {pending: 'controller_received', submitted: 'relay_delivered', accepted: 'runner_received', confirmed: 'mac_confirmed'};
+  const stage = command.delivery_stage || inferred[command.state] || 'controller_received';
+  const stageIndex = {controller_received: 0, relay_delivered: 1, runner_received: 2, mac_confirmed: 3}[stage] ?? 0;
+  const failed = ['failed', 'unknown', 'recovery_required', 'conflict', 'expired'].includes(command.state);
+  const labels = ['Controller 已接收', 'Relay 已送达', 'Runner 已接收', 'Mac 已确认'];
+  labels.forEach((label, index) => {
+    const item = document.createElement('div');
+    item.className = 'delivery-stage';
+    item.textContent = label;
+    const done = stage === 'mac_confirmed' || index < stageIndex;
+    const current = !done && index === Math.min(stageIndex, labels.length - 1);
+    if (done) item.classList.add('done');
+    else if (failed && current) item.classList.add('failed');
+    else if (current) item.classList.add('current');
+    root.append(item);
+  });
 }
 
 function renderNotice(detail) {
@@ -465,8 +575,13 @@ function eventSummary(event) {
   return '';
 }
 
+function activityLabel(kind) {
+  const labels = {'reasoning.summary': '思考摘要', 'plan.updated': '计划', 'command.started': '正在运行', 'command.completed': '运行完成', 'file.changed': '文件已更新', 'file.patch': '修改文件', 'awaiting.input': '等待你的确认'};
+  return labels[kind] || '实时进度';
+}
+
 function appendRunDetails(root, turn) {
-  const technical = (turn.items || []).filter(item => !['user.message', 'assistant.message'].includes(item?.type));
+  const technical = (turn.items || []).filter(item => !['user.message', 'assistant.message', 'reasoning.summary', 'plan'].includes(item?.type));
   if (!technical.length && !turn.items_incomplete) return;
   const details = document.createElement('details');
   details.className = 'run-details';
@@ -502,6 +617,8 @@ function renderConversation(turns) {
     for (const item of turn.items || []) {
       if (item?.type === 'user.message') { const value = text(item.text); if (value) { root.append(messageNode('user', value)); shown.add(`user:${value}`); } }
       if (item?.type === 'assistant.message') { const value = text(item.text); if (value) { root.append(messageNode('assistant', value)); shown.add(`assistant:${value}`); } }
+      if (item?.type === 'reasoning.summary') { const value = text(item.text); if (value) root.append(messageNode('activity', value, {label: '思考摘要'})); }
+      if (item?.type === 'plan') { const value = text(item.text); if (value) root.append(messageNode('activity', value, {label: '计划'})); }
     }
     appendRunDetails(root, turn);
   }
@@ -510,6 +627,11 @@ function renderConversation(turns) {
     const role = event.event_kind === 'user.message' ? 'user' : 'assistant';
     const value = eventSummary(event);
     if (value && !shown.has(`${role}:${value}`)) { root.append(messageNode(role, value)); shown.add(`${role}:${value}`); }
+  }
+  const activityKinds = new Set(['reasoning.summary', 'plan.updated', 'command.started', 'command.completed', 'file.changed', 'file.patch', 'awaiting.input']);
+  for (const event of state.events.filter(value => activityKinds.has(value.event_kind)).slice(-8)) {
+    const value = eventSummary(event);
+    if (value) root.append(messageNode('activity', value, {label: activityLabel(event.event_kind)}));
   }
   const live = liveAssistantText();
   if (state.detail?.status === 'active') root.append(messageNode('assistant', live, {streaming: true}));
@@ -520,6 +642,161 @@ function renderConversation(turns) {
     requestAnimationFrame(() => { viewport.scrollTop = viewport.scrollHeight; });
   } else {
     q('newReplyButton').classList.remove('hidden');
+  }
+}
+
+function queuePanel() {
+  let root = q('queuePanel');
+  if (root) return root;
+  root = document.createElement('section');
+  root.id = 'queuePanel';
+  root.className = 'queue-panel hidden';
+  root.setAttribute('aria-label', '排队消息');
+  q('composer').prepend(root);
+  return root;
+}
+
+function queueButton(label, handler, {disabled = false, danger = false} = {}) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.disabled = disabled;
+  if (danger) button.className = 'danger';
+  button.onclick = handler;
+  return button;
+}
+
+function renderQueue(detail) {
+  const root = queuePanel();
+  const queued = Array.isArray(detail?.snapshot?.queued_submissions) ? detail.snapshot.queued_submissions : [];
+  const supported = hasCapability('thread_queue_v1');
+  root.classList.toggle('hidden', !supported && !queued.length);
+  root.classList.toggle('open', state.queueOpen === true);
+  root.replaceChildren();
+  if (supported || queued.length) {
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'queue-head';
+    const title = document.createElement('span');
+    title.textContent = '排队消息';
+    const count = document.createElement('span');
+    count.className = 'badge';
+    count.textContent = `${queued.length}`;
+    head.append(title, count);
+    head.onclick = () => { state.queueOpen = !state.queueOpen; renderQueue(detail); };
+    head.setAttribute('aria-expanded', state.queueOpen ? 'true' : 'false');
+    head.title = state.queueOpen ? '收起排队消息' : '展开排队消息';
+    root.append(head);
+  }
+  const list = document.createElement('div');
+  list.className = 'queue-list';
+  root.append(list);
+  if (!queued.length) {
+    const empty = document.createElement('div');
+    empty.className = 'queue-empty';
+    empty.textContent = detail?.status === 'active' ? '可以把下一条指令加入队列，不会打断当前回复。' : '当前没有排队消息。';
+    list.append(empty);
+  }
+  const blocked = state.queueBusy || Boolean(detail?.latest_command && ['pending', 'submitted', 'accepted', 'unknown'].includes(detail.latest_command.state));
+  queued.forEach((item, index) => {
+    const row = document.createElement('article');
+    row.className = 'queue-item';
+    const position = document.createElement('div');
+    position.className = 'queue-position';
+    position.textContent = `${index + 1}`;
+    const input = document.createElement('textarea');
+    input.className = 'queue-text';
+    input.rows = 2;
+    const editing = state.queueEditing === item.queue_ref && item.editable === true;
+    input.readOnly = !editing;
+    input.value = editing ? (state.queueDrafts[item.queue_ref] ?? item.text ?? '') : (item.text || '此消息包含手机端不支持的内容');
+    input.oninput = () => { state.queueDrafts[item.queue_ref] = input.value; };
+    const actions = document.createElement('div');
+    actions.className = 'queue-actions';
+    if (item.editable === true) {
+      actions.append(queueButton(editing ? '保存' : '编辑', () => {
+        if (!editing) {
+          state.queueEditing = item.queue_ref;
+          state.queueDrafts[item.queue_ref] = item.text || '';
+          renderQueue(detail);
+          requestAnimationFrame(() => q('queuePanel')?.querySelector(`textarea[data-queue-ref="${item.queue_ref}"]`)?.focus());
+          return;
+        }
+        const value = (state.queueDrafts[item.queue_ref] || '').trim();
+        if (value) void submitQueue('update', {queueRef: item.queue_ref, input: value});
+      }, {disabled: blocked}));
+      input.dataset.queueRef = item.queue_ref;
+    }
+    actions.append(
+      queueButton('上移', () => moveQueued(index, -1), {disabled: blocked || index === 0}),
+      queueButton('下移', () => moveQueued(index, 1), {disabled: blocked || index === queued.length - 1}),
+      queueButton('立即开始', () => void submitQueue('start', {queueRef: item.queue_ref}), {disabled: blocked}),
+      queueButton('删除', () => void submitQueue('delete', {queueRef: item.queue_ref}), {disabled: blocked, danger: true}),
+    );
+    row.append(position, input, actions);
+    list.append(row);
+  });
+  let add = q('queueMessageButton');
+  if (!add) {
+    add = document.createElement('button');
+    add.id = 'queueMessageButton';
+    add.type = 'button';
+    add.className = 'queue-add-button';
+    add.textContent = '加入队列';
+    q('submitDirection').insertAdjacentElement('beforebegin', add);
+  }
+  add.classList.toggle('hidden', !(supported && detail?.status === 'active'));
+  add.disabled = blocked || !writeAvailable();
+  add.onclick = () => {
+    const value = q('composerInput').value.trim();
+    if (!value) {
+      q('composerFeedback').className = 'composer-status warning';
+      q('composerFeedback').textContent = '请输入要排队的消息';
+      return;
+    }
+    void submitQueue('add', {input: value});
+  };
+}
+
+function moveQueued(index, offset) {
+  const queued = Array.isArray(state.detail?.snapshot?.queued_submissions) ? state.detail.snapshot.queued_submissions : [];
+  const target = index + offset;
+  if (target < 0 || target >= queued.length) return;
+  const refs = queued.map(item => item.queue_ref);
+  [refs[index], refs[target]] = [refs[target], refs[index]];
+  void submitQueue('reorder', {queueRefs: refs});
+}
+
+async function submitQueue(action, {queueRef = '', input = '', queueRefs = []} = {}) {
+  const detail = state.detail;
+  if (!detail || state.queueBusy) return;
+  state.queueBusy = true;
+  renderQueue(detail);
+  q('composerFeedback').className = 'composer-status muted';
+  q('composerFeedback').textContent = 'Controller 正在接收队列操作…';
+  const base = `${API}/threads/${encodeURIComponent(detail.thread_ref)}/queue`;
+  const path = action === 'add' ? base : action === 'reorder' ? `${base}/reorder` : `${base}/${encodeURIComponent(queueRef)}/${action}`;
+  const body = {request_id: requestId(), thread_revision: detail.thread_revision, ...(input ? {input} : {}), ...(queueRefs.length ? {queue_refs: queueRefs} : {})};
+  try {
+    const result = await jsonFetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    q('composerFeedback').className = 'composer-status success';
+    q('composerFeedback').textContent = result.delivery_stage === 'mac_confirmed' || result.state === 'confirmed' ? 'Mac 已确认队列操作' : 'Controller 已接收，WSS 正在送往 Runner';
+    if (action === 'add') {
+      q('composerInput').value = '';
+      delete state.drafts[detail.thread_ref];
+      resizeComposer();
+    }
+    if (queueRef) delete state.queueDrafts[queueRef];
+    state.queueEditing = '';
+    await loadThread(detail.thread_ref, {restartStream: false});
+    setTimeout(() => void loadThread(detail.thread_ref, {restartStream: false}), 1200);
+  } catch (error) {
+    q('composerFeedback').className = 'composer-status error';
+    q('composerFeedback').textContent = error.message;
+    await loadThread(detail.thread_ref, {restartStream: false});
+  } finally {
+    state.queueBusy = false;
+    if (state.detail) renderQueue(state.detail);
   }
 }
 
@@ -549,6 +826,9 @@ function renderModelSelector(action, enabled) {
   const allowedForAction = action === 'continue' || (action === 'steer' && state.mode === 'safe');
   select.value = state.selectedModel;
   select.disabled = !enabled || !supported || !allowedForAction;
+  const effortSupported = populateEffortOptions(q('effortSelect'), state.selectedModel, {detail: state.detail, value: state.selectedEffort});
+  state.selectedEffort = q('effortSelect').value;
+  q('effortSelect').disabled = !enabled || !allowedForAction || !hasCapability('reasoning_effort_v1') || !effortSupported;
   const defaultModel = models.find(model => model.is_default);
   if (!supported) q('modelMeta').textContent = '当前 App 未提供可用模型目录，将沿用原任务模型。';
   else if (!allowedForAction) q('modelMeta').textContent = '原生快速调整保持同一 Turn，不允许切换模型。';
@@ -572,7 +852,7 @@ function renderComposer(detail) {
 
 function setMode(mode) {
   state.mode = mode;
-  if (mode === 'native') state.selectedModel = '';
+  if (mode === 'native') { state.selectedModel = ''; state.selectedEffort = ''; }
   q('safeMode').setAttribute('aria-pressed', mode === 'safe' ? 'true' : 'false');
   q('nativeMode').setAttribute('aria-pressed', mode === 'native' ? 'true' : 'false');
   if (state.detail) renderDetail();
@@ -591,17 +871,32 @@ async function fetchAllThreads(hostRef) {
 }
 
 async function refreshOverview({preserveDetail = true} = {}) {
-  if (state.loading) return;
+  if (state.loading) {
+    state.refreshGeneration += 1;
+    state.refreshPendingPreserveDetail = state.refreshPending ? state.refreshPendingPreserveDetail && preserveDetail : preserveDetail;
+    state.refreshPending = true;
+    return;
+  }
+  const generation = ++state.refreshGeneration;
   state.loading = true;
-  setConnection('正在同步', 'warn');
+  if (!state.hosts.length) setConnection('正在同步', 'warn');
   try {
     const status = await jsonFetch(STATUS_API);
+    if (generation !== state.refreshGeneration) return;
     state.csrf = status.csrf_token;
     const hostsDocument = await jsonFetch(`${API}/hosts`);
+    if (generation !== state.refreshGeneration) return;
+    const serverTime = new Date(hostsDocument.server_time || '').getTime();
+    if (Number.isFinite(serverTime)) { state.serverTimeMs = serverTime; state.serverTimeObservedAt = Date.now(); }
     state.hosts = hostsDocument.hosts || [];
+    state.overviewError = '';
+    state.streamFailures.delete('overview-fetch');
+    state.streamFailures.delete('network-recovery');
     if (!state.selectedHost || !state.hosts.some(host => host.host_ref === state.selectedHost)) state.selectedHost = state.hosts[0]?.host_ref || '';
-    if (state.selectedHost) {
-      const [projectsDocument, threads] = await Promise.all([jsonFetch(`${API}/projects?host_ref=${encodeURIComponent(state.selectedHost)}`), fetchAllThreads(state.selectedHost)]);
+    const hostRef = state.selectedHost;
+    if (hostRef) {
+      const [projectsDocument, threads] = await Promise.all([jsonFetch(`${API}/projects?host_ref=${encodeURIComponent(hostRef)}`), fetchAllThreads(hostRef)]);
+      if (generation !== state.refreshGeneration || hostRef !== state.selectedHost) return;
       state.projects = projectsDocument.projects || [];
       state.threads = threads;
     } else {
@@ -619,13 +914,24 @@ async function refreshOverview({preserveDetail = true} = {}) {
     renderProjects();
     renderThreads();
     renderMetrics();
-    if (preserveDetail && state.selectedThread) await loadThread(state.selectedThread, {restartStream: false}); else renderDetail();
-    setConnection(currentHost()?.online ? '已连接 · 自动同步' : 'Mac 离线', currentHost()?.online ? 'good' : 'bad');
+    if (preserveDetail && state.selectedThread) await loadThread(state.selectedThread, {restartStream: false, throwOnError: true}); else renderDetail();
+    renderFreshness();
   } catch (error) {
-    setConnection('同步失败', 'bad');
+    if (generation !== state.refreshGeneration) return;
+    state.overviewError = error.message;
+    state.streamFailures.add('overview-fetch');
+    renderFreshness();
     q('hostMeta').textContent = error.message;
   } finally {
     state.loading = false;
+    if (state.refreshPending) {
+      const nextPreserveDetail = state.refreshPendingPreserveDetail;
+      state.refreshPending = false;
+      state.refreshPendingPreserveDetail = true;
+      void refreshOverview({preserveDetail: nextPreserveDetail});
+    } else if (state.selectedHost && !state.overviewController && navigator.onLine && document.visibilityState === 'visible') {
+      startOverviewStream();
+    }
   }
 }
 
@@ -640,6 +946,9 @@ async function selectThread(threadRef) {
   if (state.selectedThread) state.drafts[state.selectedThread] = q('composerInput').value;
   state.selectedThread = threadRef;
   state.selectedModel = '';
+  state.selectedEffort = '';
+  state.queueOpen = false;
+  state.queueEditing = '';
   state.events = [];
   state.eventCursor = 0;
   state.following = true;
@@ -650,19 +959,62 @@ async function selectThread(threadRef) {
   document.body.classList.add('detail-open');
 }
 
-async function loadThread(threadRef, {restartStream = false, initialEvents = false} = {}) {
+async function loadThread(threadRef, {restartStream = false, initialEvents = false, throwOnError = false} = {}) {
   try {
-    state.detail = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}`);
+    const detail = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}`);
+    if (threadRef !== state.selectedThread) return false;
+    state.detail = detail;
     if (initialEvents) {
       const eventDocument = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/events?after_cursor=0&limit=500&wait_seconds=0`);
+      if (threadRef !== state.selectedThread) return false;
       state.events = eventDocument.events || [];
       state.eventCursor = eventDocument.next_cursor || 0;
     }
     renderDetail();
     if (restartStream) startEventStream();
+    return true;
   } catch (error) {
     q('composerFeedback').className = 'composer-status error';
     q('composerFeedback').textContent = error.message;
+    if (throwOnError) throw error;
+    return false;
+  }
+}
+
+function stopOverviewStream() {
+  state.overviewGeneration += 1;
+  if (state.overviewController) state.overviewController.abort();
+  state.overviewController = null;
+  state.streamFailures.delete('overview');
+}
+
+function startOverviewStream() {
+  stopOverviewStream();
+  state.overviewCursor = 0;
+  const generation = state.overviewGeneration;
+  const hostRef = state.selectedHost;
+  if (!hostRef) return;
+  void overviewEventLoop(hostRef, generation);
+}
+
+async function overviewEventLoop(hostRef, generation) {
+  let backoff = 600;
+  while (generation === state.overviewGeneration && hostRef === state.selectedHost) {
+    state.overviewController = new AbortController();
+    try {
+      const document = await jsonFetch(`${API}/events?host_ref=${encodeURIComponent(hostRef)}&after_cursor=${state.overviewCursor}&limit=500&wait_seconds=20`, {signal: state.overviewController.signal});
+      if (generation !== state.overviewGeneration) return;
+      if (Number.isFinite(Number(document.next_cursor))) state.overviewCursor = Number(document.next_cursor);
+      state.streamFailures.delete('overview');
+      if (document.events?.length || document.changed) await refreshOverview(); else renderFreshness();
+      backoff = 600;
+    } catch (error) {
+      if (error.name === 'AbortError' || generation !== state.overviewGeneration) return;
+      state.streamFailures.add('overview');
+      renderFreshness();
+      await delay(backoff);
+      backoff = Math.min(backoff * 2, 10000);
+    }
   }
 }
 
@@ -670,6 +1022,7 @@ function stopEventStream() {
   state.eventGeneration += 1;
   if (state.eventController) state.eventController.abort();
   state.eventController = null;
+  state.streamFailures.delete('detail');
 }
 
 function startEventStream() {
@@ -693,12 +1046,14 @@ async function eventLoop(threadRef, generation) {
         renderConversation(state.detail?.snapshot?.turns || []);
       }
       if (Number.isFinite(Number(document.next_cursor))) state.eventCursor = Number(document.next_cursor);
-      await loadThread(threadRef, {restartStream: false});
-      setConnection('已连接 · 自动同步', 'good');
+      await loadThread(threadRef, {restartStream: false, throwOnError: true});
+      state.streamFailures.delete('detail');
+      renderFreshness();
       backoff = 1000;
     } catch (error) {
       if (error.name === 'AbortError' || generation !== state.eventGeneration) return;
-      setConnection('连接中断 · 自动重连', 'warn');
+      state.streamFailures.add('detail');
+      renderFreshness();
       await delay(backoff);
       backoff = Math.min(backoff * 2, 15000);
     }
@@ -723,6 +1078,7 @@ async function submitAction(action, extra = {}) {
       state.following = true;
     }
     state.selectedModel = '';
+    state.selectedEffort = '';
     await loadThread(detail.thread_ref, {restartStream: false});
     setTimeout(() => void loadThread(detail.thread_ref, {restartStream: false}), 1200);
   } catch (error) {
@@ -734,11 +1090,13 @@ async function submitAction(action, extra = {}) {
 
 async function createThread(event) {
   event.preventDefault();
+  if (state.createBusy) return;
   const host = currentHost();
   const existing = state.pendingCreate;
   const input = existing?.body.input || q('newTaskInput').value.trim();
   const projectRef = existing?.body.project_ref || q('newTaskProject').value;
   const model = existing?.body.model || q('newTaskModel').value;
+  const effort = existing?.body.effort || q('newTaskEffort').value;
   if (!existing && !hostCanCreate()) {
     q('newTaskFeedback').className = 'feedback warning';
     q('newTaskFeedback').textContent = 'Runner 当前不可创建任务；草稿仍保留，未发送。';
@@ -749,21 +1107,22 @@ async function createThread(event) {
     q('newTaskFeedback').textContent = '请选择项目并填写任务要求。';
     return;
   }
-  const body = existing?.body || {request_id: requestId(), host_ref: host.host_ref, project_ref: projectRef, input, ...(model ? {model} : {})};
+  const body = existing?.body || {request_id: requestId(), host_ref: host.host_ref, project_ref: projectRef, input, ...(model ? {model} : {}), ...(effort ? {effort} : {})};
   state.pendingCreate = existing || {body, controllerAccepted: false};
+  state.createBusy = true;
   renderNewTaskState();
   q('newTaskFeedback').className = 'feedback muted';
   q('newTaskFeedback').textContent = existing ? '正在用同一 request ID 检查收据…' : '正在提交创建请求，等待 Mac 收据…';
   let controllerAccepted = Boolean(existing?.controllerAccepted);
   try {
-    for (let attempt = 0; attempt < 12; attempt += 1) {
+    for (let attempt = 0; attempt < 45; attempt += 1) {
       const result = await jsonFetch(`${API}/threads`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
       controllerAccepted = true;
       state.pendingCreate = {body, controllerAccepted: true};
       if (['submitted', 'accepted', 'pending'].includes(result.state)) {
         q('newTaskFeedback').className = 'feedback muted';
         q('newTaskFeedback').textContent = '请求已登记，正在用同一 request ID 等待 Mac 收据…';
-        if (attempt < 11) await delay(700);
+        if (attempt < 44) await delay(700);
         continue;
       }
       if (result.state !== 'confirmed' || result.action !== 'create' || !result.thread_ref) {
@@ -804,6 +1163,10 @@ async function createThread(event) {
     } else {
       q('newTaskFeedback').textContent = `未确认 Controller 是否收到请求：${error.message}。不会自动重试；网络恢复后可用同一 request ID 安全检查。`;
     }
+  } finally {
+    state.createBusy = false;
+    q('createTaskButton').disabled = state.pendingCreate ? !navigator.onLine : !(hostCanCreate() && state.projects.length > 0);
+    q('createTaskButton').textContent = state.pendingCreate ? '继续检查' : '创建并打开';
   }
 }
 
@@ -818,7 +1181,7 @@ function resizeComposer() {
   input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
 }
 
-q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.detail = null; stopEventStream(); await refreshOverview({preserveDetail: false}); };
+q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.selectedEffort = ''; state.detail = null; stopEventStream(); stopOverviewStream(); await refreshOverview({preserveDetail: false}); };
 q('statusFilter').onchange = renderThreads;
 q('threadSearch').oninput = renderThreads;
 q('checkConnection').onclick = () => refreshOverview();
@@ -833,7 +1196,9 @@ q('modalBackdrop').onclick = () => { setNewTaskOpen(false); setProjectsOpen(fals
 q('newTaskForm').onsubmit = createThread;
 q('safeMode').onclick = () => setMode('safe');
 q('nativeMode').onclick = () => setMode('native');
-q('modelSelect').onchange = () => { state.selectedModel = q('modelSelect').value; };
+q('modelSelect').onchange = () => { state.selectedModel = q('modelSelect').value; state.selectedEffort = ''; if (state.detail) renderComposer(state.detail); };
+q('effortSelect').onchange = () => { state.selectedEffort = q('effortSelect').value; };
+q('newTaskModel').onchange = () => { populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value); };
 q('interruptButton').onclick = () => { q('taskMenu').open = false; if (state.detail) void submitAction('interrupt', {expected_turn_ref: state.detail.active_turn_ref}); };
 q('archiveButton').onclick = () => { q('taskMenu').open = false; if (state.detail && confirm(`归档“${state.detail.title}”？任务不会被删除。`)) void submitAction('archive'); };
 q('unarchiveButton').onclick = () => { q('taskMenu').open = false; if (state.detail) void submitAction('unarchive'); };
@@ -845,20 +1210,28 @@ q('composer').onsubmit = event => {
   if (!detail || !action || !input) { q('composerFeedback').className = 'composer-status warning'; q('composerFeedback').textContent = '请输入要发送的消息'; return; }
   if (!navigator.onLine || !writeAvailable()) { q('composerFeedback').className = 'composer-status warning'; q('composerFeedback').textContent = 'Mac 离线，草稿已保留且没有发送'; return; }
   const model = state.selectedModel && (action === 'continue' || state.mode === 'safe') ? state.selectedModel : '';
-  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...(model ? {model} : {})});
-  else void submitAction('continue', {input, ...(model ? {model} : {})});
+  const effort = state.selectedEffort && (action === 'continue' || state.mode === 'safe') ? state.selectedEffort : '';
+  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
+  else void submitAction('continue', {input, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
 };
 q('composerInput').oninput = () => { if (state.selectedThread) state.drafts[state.selectedThread] = q('composerInput').value; resizeComposer(); };
 q('composerInput').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); q('composer').requestSubmit(); } };
 q('conversationView').onscroll = () => { state.following = isNearConversationBottom(); if (state.following) q('newReplyButton').classList.add('hidden'); };
 q('newReplyButton').onclick = followLatestReply;
-window.addEventListener('online', () => { setConnection('网络已恢复 · 正在同步', 'good'); void refreshOverview(); if (state.selectedThread) startEventStream(); });
-window.addEventListener('offline', () => { stopEventStream(); setConnection('手机网络离线', 'bad'); renderRunnerBanner(); renderNewTaskState(); });
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { void refreshOverview(); if (state.selectedThread) startEventStream(); } });
-window.addEventListener('beforeunload', stopEventStream);
+window.addEventListener('online', () => { state.streamFailures.add('network-recovery'); renderFreshness(); void refreshOverview(); if (state.selectedHost) startOverviewStream(); if (state.selectedThread) startEventStream(); });
+window.addEventListener('offline', () => { stopEventStream(); stopOverviewStream(); state.streamFailures.delete('network-recovery'); renderFreshness(); renderRunnerBanner(); renderNewTaskState(); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { void refreshOverview(); if (state.selectedHost) startOverviewStream(); if (state.selectedThread) startEventStream(); } else { stopOverviewStream(); stopEventStream(); } });
+window.addEventListener('beforeunload', () => { stopOverviewStream(); stopEventStream(); });
+window.addEventListener('resize', updateViewportHeight);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', updateViewportHeight);
+  window.visualViewport.addEventListener('scroll', updateViewportHeight);
+}
 
+updateViewportHeight();
 void refreshOverview({preserveDetail: false});
-setInterval(() => { if (document.visibilityState === 'visible') void refreshOverview(); }, 8000);
+setInterval(renderFreshness, 1000);
+setInterval(() => { if (document.visibilityState === 'visible') void refreshOverview(); }, 4000);
 """
 
 

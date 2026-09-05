@@ -15,7 +15,7 @@ MAX_DOCUMENT_BYTES = 256 * 1024
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RUNNER_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
 REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-REF_RE = re.compile(r"^(HS|PJ|TH|TR)-[A-Z2-7]{20,52}$")
+REF_RE = re.compile(r"^(HS|PJ|TH|TR|QS)-[A-Z2-7]{20,52}$")
 DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 UUID_RE = re.compile(
@@ -87,7 +87,23 @@ THREAD_STATUSES = frozenset(
 RECEIPT_STATES = frozenset(
     {"accepted", "confirmed", "conflict", "expired", "failed", "unknown", "recovery_required"}
 )
-ACTIONS = frozenset({"read", "load", "steer", "interrupt", "continue", "archive", "unarchive", "create"})
+ACTIONS = frozenset(
+    {
+        "read",
+        "load",
+        "steer",
+        "interrupt",
+        "continue",
+        "archive",
+        "unarchive",
+        "create",
+        "queue_add",
+        "queue_update",
+        "queue_delete",
+        "queue_reorder",
+        "queue_start",
+    }
+)
 
 
 class DesktopProtocolError(ValueError):
@@ -137,6 +153,9 @@ def build_desktop_command(
     input_text: str | None = None,
     mode: str | None = None,
     model: str | None = None,
+    effort: str | None = None,
+    queue_ref: str | None = None,
+    queue_refs: list[str] | None = None,
     project_ref: str | None = None,
     ttl_seconds: int = 120,
 ) -> dict[str, Any]:
@@ -181,6 +200,12 @@ def build_desktop_command(
         document["mode"] = mode
     if model is not None:
         document["model"] = model
+    if effort is not None:
+        document["effort"] = effort
+    if queue_ref is not None:
+        document["queue_ref"] = queue_ref
+    if queue_refs is not None:
+        document["queue_refs"] = list(queue_refs)
     document["body_digest"] = body_digest(document)
     return validate_desktop_command(document, now=current)
 
@@ -200,7 +225,16 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         "expires_at",
         "body_digest",
     }
-    optional = {"project_ref", "expected_turn_ref", "input", "mode", "model"}
+    optional = {
+        "project_ref",
+        "expected_turn_ref",
+        "input",
+        "mode",
+        "model",
+        "effort",
+        "queue_ref",
+        "queue_refs",
+    }
     document = _exact_mapping(value, required, optional)
     _base(document, "desktop_command")
     _request(document["request_id"])
@@ -234,7 +268,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
     if expected_turn is not None:
         _ref(expected_turn, "TR")
     input_text = document.get("input")
-    if action in {"steer", "continue", "create"}:
+    if action in {"steer", "continue", "create", "queue_add", "queue_update"}:
         _safe_input(input_text)
     elif input_text is not None:
         raise DesktopProtocolError("desktop_input_invalid", "该 Desktop 动作不允许输入文本")
@@ -257,6 +291,33 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
             pass
         else:
             raise DesktopProtocolError("desktop_model_invalid", "该 Desktop 动作不允许 model")
+    effort = document.get("effort")
+    if effort is not None:
+        _effort(effort)
+        if action in {"continue", "create"}:
+            pass
+        elif action == "steer" and mode == "safe":
+            pass
+        else:
+            raise DesktopProtocolError("desktop_effort_invalid", "该 Desktop 动作不允许推理强度")
+    queue_ref = document.get("queue_ref")
+    queue_refs = document.get("queue_refs")
+    if action in {"queue_update", "queue_delete", "queue_start"}:
+        _ref(queue_ref, "QS")
+    elif queue_ref is not None:
+        raise DesktopProtocolError("desktop_ref_invalid", "该 Desktop 动作不允许 queue ref")
+    if action == "queue_reorder":
+        if (
+            not isinstance(queue_refs, list)
+            or not queue_refs
+            or len(queue_refs) > 100
+            or len(set(queue_refs)) != len(queue_refs)
+        ):
+            raise DesktopProtocolError("desktop_ref_invalid", "Desktop 排队顺序无效")
+        for item in queue_refs:
+            _ref(item, "QS")
+    elif queue_refs is not None:
+        raise DesktopProtocolError("desktop_ref_invalid", "该 Desktop 动作不允许 queue refs")
     _digest(document)
     return document
 
@@ -278,12 +339,22 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
         "snapshot",
         "body_digest",
     }
-    document = _exact_mapping(value, required, {"host"})
+    document = _exact_mapping(value, required, {"host", "snapshot_sequence"})
     _base(document, "desktop_snapshot")
     _ref(document["host_ref"], "HS")
     _ref(document["project_ref"], "PJ")
     _ref(document["thread_ref"], "TH")
     _revision(document["thread_revision"])
+    snapshot_sequence = document.get("snapshot_sequence")
+    if "snapshot_sequence" in document and (
+        not isinstance(snapshot_sequence, int)
+        or isinstance(snapshot_sequence, bool)
+        or snapshot_sequence < 1
+    ):
+        raise DesktopProtocolError(
+            "desktop_sequence_invalid",
+            "Desktop snapshot sequence 无效",
+        )
     _shanghai_time(document["created_at"], "created_at")
     snapshot = document["snapshot"]
     if not isinstance(snapshot, Mapping):
@@ -316,6 +387,9 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
     turns = snapshot.get("turns")
     if not isinstance(turns, list) or len(turns) > 100:
         raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop Turn 列表无效")
+    queue_is_present = "queued_submissions" in snapshot
+    if queue_is_present:
+        _queued_submissions(snapshot.get("queued_submissions"))
     _public(snapshot)
     host = document.get("host")
     if host is not None:
@@ -332,13 +406,29 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
         if host.get("control_enabled") is True and host.get("state") != "normal":
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host control/state 不一致")
         models = host.get("models", [])
-        _model_catalog(models)
+        complete_reasoning_catalog = _model_catalog(models)
         if "model_override_v1" in capabilities and (
             host.get("control_enabled") is not True or not models
         ):
             raise DesktopProtocolError(
                 "desktop_host_invalid",
                 "Desktop host model capability 与目录不一致",
+            )
+        if "reasoning_effort_v1" in capabilities and (
+            host.get("control_enabled") is not True
+            or not complete_reasoning_catalog
+            or not any(item.get("supported_reasoning_efforts") for item in models)
+        ):
+            raise DesktopProtocolError(
+                "desktop_host_invalid",
+                "Desktop host 推理强度能力与目录不一致",
+            )
+        if "thread_queue_v1" in capabilities and (
+            not queue_is_present or snapshot_sequence is None
+        ):
+            raise DesktopProtocolError(
+                "desktop_host_invalid",
+                "Desktop host 排队能力与快照序号不一致",
             )
         listener_count = host.get("tcp_listener_count")
         if not isinstance(listener_count, int) or isinstance(listener_count, bool) or listener_count < -1:
@@ -405,7 +495,7 @@ def _validate_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         "thread_revision",
         "body_digest",
     }
-    document = _exact_mapping(value, required, {"error_code", "project_ref"})
+    document = _exact_mapping(value, required, {"error_code", "project_ref", "queue_ref"})
     _base(document, "desktop_receipt")
     _request(document["request_id"])
     _ref(document["host_ref"], "HS")
@@ -431,6 +521,15 @@ def _validate_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
         _ref(document["turn_ref"], "TR")
     if action not in ACTIONS or state not in RECEIPT_STATES:
         raise DesktopProtocolError("desktop_receipt_invalid", "Desktop receipt 动作或状态无效")
+    queue_ref = document.get("queue_ref")
+    if queue_ref is not None:
+        _ref(queue_ref, "QS")
+    if action in {"queue_update", "queue_delete", "queue_start"} and queue_ref is None:
+        raise DesktopProtocolError("desktop_receipt_invalid", "Desktop 排队收据缺少 queue ref")
+    if action == "queue_add" and state == "confirmed" and queue_ref is None:
+        raise DesktopProtocolError("desktop_receipt_invalid", "Desktop 添加排队消息收据不完整")
+    if action not in {"queue_add", "queue_update", "queue_delete", "queue_start"} and queue_ref is not None:
+        raise DesktopProtocolError("desktop_receipt_invalid", "该 Desktop 收据不允许 queue ref")
     error_code = document.get("error_code")
     if error_code is not None:
         _request(error_code)
@@ -486,18 +585,34 @@ def _model_id(value: Any) -> None:
         raise DesktopProtocolError("desktop_model_invalid", "Desktop model 无效")
 
 
-def _model_catalog(value: Any) -> None:
+def _model_catalog(value: Any) -> bool:
     if not isinstance(value, list) or len(value) > 32:
         raise DesktopProtocolError("desktop_host_invalid", "Desktop host models 无效")
     seen: set[str] = set()
     default_count = 0
+    complete_catalog = True
     for item in value:
-        if not isinstance(item, Mapping) or set(item) != {"id", "display_name", "is_default"}:
+        if not isinstance(item, Mapping) or frozenset(item) not in {
+            frozenset({"id", "display_name", "is_default"}),
+            frozenset(
+                {
+                    "id",
+                    "display_name",
+                    "is_default",
+                    "default_reasoning_effort",
+                    "supported_reasoning_efforts",
+                }
+            ),
+        }:
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host model entry 无效")
+        complete_entry = "supported_reasoning_efforts" in item
+        complete_catalog = complete_catalog and complete_entry
         model_id = item.get("id")
         _model_id(model_id)
         display_name = item.get("display_name")
         is_default = item.get("is_default")
+        default_effort = item.get("default_reasoning_effort")
+        efforts = item.get("supported_reasoning_efforts")
         if (
             model_id in seen
             or not isinstance(display_name, str)
@@ -506,12 +621,72 @@ def _model_catalog(value: Any) -> None:
             or len(display_name) > 100
             or any(ord(character) < 32 for character in display_name)
             or not isinstance(is_default, bool)
+            or (complete_entry and default_effort is not None and not isinstance(default_effort, str))
+            or (complete_entry and not isinstance(efforts, list))
+            or (complete_entry and len(efforts) > 16)
         ):
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host model entry 无效")
         seen.add(model_id)
         default_count += int(is_default)
         if default_count > 1:
             raise DesktopProtocolError("desktop_host_invalid", "Desktop host default model 无效")
+        effort_ids: set[str] = set()
+        for effort in efforts or []:
+            if not isinstance(effort, Mapping) or set(effort) != {"id", "description"}:
+                raise DesktopProtocolError("desktop_host_invalid", "Desktop reasoning effort entry 无效")
+            effort_id = effort.get("id")
+            description = effort.get("description")
+            _effort(effort_id)
+            if (
+                effort_id in effort_ids
+                or not isinstance(description, str)
+                or len(description) > 300
+                or any(ord(character) < 32 and character not in "\n\t" for character in description)
+            ):
+                raise DesktopProtocolError("desktop_host_invalid", "Desktop reasoning effort entry 无效")
+            effort_ids.add(effort_id)
+        if default_effort is not None:
+            _effort(default_effort)
+            if default_effort not in effort_ids:
+                raise DesktopProtocolError("desktop_host_invalid", "Desktop default reasoning effort 无效")
+    return complete_catalog
+
+
+def _queued_submissions(value: Any) -> None:
+    if not isinstance(value, list) or len(value) > 100:
+        raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop 排队消息列表无效")
+    seen: set[str] = set()
+    for position, item in enumerate(value):
+        if not isinstance(item, Mapping) or set(item) != {
+            "queue_ref",
+            "position",
+            "text",
+            "editable",
+            "input_kind",
+        }:
+            raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop 排队消息条目无效")
+        queue_ref = item.get("queue_ref")
+        _ref(queue_ref, "QS")
+        text = item.get("text")
+        editable = item.get("editable")
+        input_kind = item.get("input_kind")
+        if (
+            queue_ref in seen
+            or item.get("position") != position
+            or not isinstance(text, str)
+            or not text
+            or len(text) > 12000
+            or not isinstance(editable, bool)
+            or input_kind not in {"text", "non_text"}
+            or editable != (input_kind == "text")
+        ):
+            raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop 排队消息条目无效")
+        seen.add(queue_ref)
+
+
+def _effort(value: Any) -> None:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", value):
+        raise DesktopProtocolError("desktop_effort_invalid", "Desktop reasoning effort 无效")
 
 
 def _revision(value: Any) -> None:

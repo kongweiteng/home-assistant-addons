@@ -15,6 +15,16 @@ EVENTS_PATH_RE = re.compile(r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/even
 ACTION_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/(steer|interrupt|continue|archive|unarchive)$"
 )
+QUEUE_ADD_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/queue$"
+)
+QUEUE_ITEM_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/queue/"
+    r"(QS-[A-Z2-7]{20,52})/(update|delete|start)$"
+)
+QUEUE_REORDER_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/queue/reorder$"
+)
 
 
 def get_desktop_api(
@@ -37,6 +47,17 @@ def get_desktop_api(
             status=_one(parameters, "status"),
             after_cursor=_integer(parameters, "cursor", default=0, minimum=0, maximum=2**63 - 1),
             limit=_integer(parameters, "limit", default=100, minimum=1, maximum=200),
+        )
+    if path == "/api/desktop/v1/events":
+        _only(parameters, {"host_ref", "after_cursor", "limit", "wait_seconds"})
+        host_ref = _one(parameters, "host_ref")
+        if host_ref is None:
+            raise StoreError("desktop_query_invalid", "Desktop API host_ref 不能为空", status=400)
+        return service.host_events(
+            host_ref,
+            after_cursor=_integer(parameters, "after_cursor", default=0, minimum=0, maximum=2**63 - 1),
+            limit=_integer(parameters, "limit", default=100, minimum=1, maximum=500),
+            wait_seconds=_number(parameters, "wait_seconds", default=0.0, minimum=0.0, maximum=25.0),
         )
     thread_match = THREAD_PATH_RE.fullmatch(path)
     if thread_match:
@@ -63,6 +84,20 @@ def post_desktop_api(
 ) -> dict[str, Any]:
     if path == "/api/desktop/v1/threads":
         return service.create(payload)
+    queue_add = QUEUE_ADD_PATH_RE.fullmatch(path)
+    if queue_add is not None:
+        return service.submit(queue_add.group(1), "queue_add", payload)
+    queue_item = QUEUE_ITEM_PATH_RE.fullmatch(path)
+    if queue_item is not None:
+        thread_ref, queue_ref, action = queue_item.groups()
+        return service.submit(
+            thread_ref,
+            f"queue_{action}",
+            {**payload, "queue_ref": queue_ref},
+        )
+    queue_reorder = QUEUE_REORDER_PATH_RE.fullmatch(path)
+    if queue_reorder is not None:
+        return service.submit(queue_reorder.group(1), "queue_reorder", payload)
     match = ACTION_PATH_RE.fullmatch(path)
     if match is None:
         raise StoreError("not_found", "Desktop API 路由不存在", status=404)
@@ -134,6 +169,9 @@ def _number(
 __all__ = [
     "ACTION_PATH_RE",
     "EVENTS_PATH_RE",
+    "QUEUE_ADD_PATH_RE",
+    "QUEUE_ITEM_PATH_RE",
+    "QUEUE_REORDER_PATH_RE",
     "THREAD_PATH_RE",
     "get_desktop_api",
     "post_desktop_api",

@@ -64,7 +64,7 @@ def create_server(
             }
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.5.32"
+        server_version = "CodexController/0.5.33"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

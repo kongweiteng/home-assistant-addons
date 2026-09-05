@@ -57,6 +57,7 @@ class DesktopStore:
         thread_ref = str(document["thread_ref"])
         runner_id = str(document["runner_id"])
         revision = int(document["thread_revision"])
+        snapshot_sequence = document.get("snapshot_sequence")
         digest = str(document["body_digest"])
         encoded_document = canonical_json(document)
         encoded_snapshot = canonical_json(body)
@@ -77,12 +78,14 @@ class DesktopStore:
                 observed_at,
             )
             existing = connection.execute(
-                "SELECT id,host_ref,project_ref,runner_id,thread_revision,control_revision,snapshot_digest,snapshot_json "
+                "SELECT id,host_ref,project_ref,runner_id,thread_revision,control_revision,snapshot_sequence,"
+                "snapshot_digest,snapshot_json "
                 "FROM desktop_threads WHERE thread_ref=?",
                 (thread_ref,),
             ).fetchone()
             semantic_refresh = False
             degraded_latch = False
+            effective_snapshot_sequence = snapshot_sequence
             if existing is not None:
                 if (
                     existing["host_ref"] != host_ref
@@ -98,7 +101,37 @@ class DesktopStore:
                 if revision < previous_revision:
                     return {"status": "stale_ignored", "thread": self._thread_row(connection, thread_ref)}
                 if revision == previous_revision and existing["snapshot_digest"] not in {None, digest}:
-                    refresh = _same_revision_refresh(str(existing["snapshot_json"]), body)
+                    existing_sequence = existing["snapshot_sequence"]
+                    if snapshot_sequence is None:
+                        effective_snapshot_sequence = existing_sequence
+                    elif existing_sequence is not None and snapshot_sequence < existing_sequence:
+                        return {
+                            "status": "stale_ignored",
+                            "thread": self._thread_row(connection, thread_ref),
+                        }
+                    if (
+                        snapshot_sequence is not None
+                        and existing_sequence is not None
+                        and snapshot_sequence == existing_sequence
+                    ):
+                        if existing["snapshot_json"] == encoded_snapshot:
+                            semantic_refresh = True
+                        else:
+                            raise StoreError(
+                                "desktop_revision_conflict",
+                                "同一 Desktop snapshot sequence 出现不同快照",
+                                status=409,
+                            )
+                        refresh = None
+                    elif (
+                        snapshot_sequence is not None
+                        and (existing_sequence is None or snapshot_sequence > existing_sequence)
+                        and _changed_snapshot_fields(str(existing["snapshot_json"]), body)
+                        == {"queued_submissions"}
+                    ):
+                        refresh = "refreshed"
+                    else:
+                        refresh = _same_revision_refresh(str(existing["snapshot_json"]), body)
                     if refresh == "stale_ignored":
                         return {
                             "status": "stale_ignored",
@@ -126,12 +159,13 @@ class DesktopStore:
             connection.execute(
                 "INSERT INTO desktop_threads("
                 "thread_ref,host_ref,project_ref,runner_id,title,status,active_turn_ref,thread_revision,"
-                "control_revision,control_state,snapshot_digest,snapshot_json,source_created_at,source_updated_at,observed_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "control_revision,snapshot_sequence,control_state,snapshot_digest,snapshot_json,"
+                "source_created_at,source_updated_at,observed_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(thread_ref) DO UPDATE SET "
                 "title=excluded.title,status=excluded.status,active_turn_ref=excluded.active_turn_ref,"
                 "thread_revision=excluded.thread_revision,control_revision=excluded.control_revision,"
-                "control_state=excluded.control_state,"
+                "snapshot_sequence=excluded.snapshot_sequence,control_state=excluded.control_state,"
                 "snapshot_digest=excluded.snapshot_digest,snapshot_json=excluded.snapshot_json,"
                 "source_created_at=excluded.source_created_at,source_updated_at=excluded.source_updated_at,"
                 "observed_at=excluded.observed_at",
@@ -145,6 +179,7 @@ class DesktopStore:
                     body.get("active_turn_ref"),
                     revision,
                     body.get("control_revision"),
+                    effective_snapshot_sequence,
                     str(body.get("control_state") or "recovery_required")[:64],
                     digest,
                     encoded_snapshot,
@@ -155,23 +190,44 @@ class DesktopStore:
             )
             if semantic_refresh:
                 refreshed = connection.execute(
-                    "UPDATE desktop_snapshots SET body_digest=?,document_json=?,observed_at=? "
+                    "UPDATE desktop_snapshots SET body_digest=?,document_json=?,source_sequence=?,observed_at=? "
                     "WHERE thread_ref=? AND thread_revision=?",
-                    (digest, encoded_document, observed_at, thread_ref, revision),
+                    (
+                        digest,
+                        encoded_document,
+                        effective_snapshot_sequence,
+                        observed_at,
+                        thread_ref,
+                        revision,
+                    ),
                 )
                 if refreshed.rowcount == 0:
                     connection.execute(
                         "INSERT INTO desktop_snapshots("
-                        "thread_ref,thread_revision,body_digest,document_json,observed_at"
-                        ") VALUES(?,?,?,?,?)",
-                        (thread_ref, revision, digest, encoded_document, observed_at),
+                        "thread_ref,thread_revision,body_digest,document_json,source_sequence,observed_at"
+                        ") VALUES(?,?,?,?,?,?)",
+                        (
+                            thread_ref,
+                            revision,
+                            digest,
+                            encoded_document,
+                            effective_snapshot_sequence,
+                            observed_at,
+                        ),
                     )
             else:
                 connection.execute(
                     "INSERT INTO desktop_snapshots("
-                    "thread_ref,thread_revision,body_digest,document_json,observed_at"
-                    ") VALUES(?,?,?,?,?)",
-                    (thread_ref, revision, digest, encoded_document, observed_at),
+                    "thread_ref,thread_revision,body_digest,document_json,source_sequence,observed_at"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        thread_ref,
+                        revision,
+                        digest,
+                        encoded_document,
+                        effective_snapshot_sequence,
+                        observed_at,
+                    ),
                 )
             self._prune_snapshots(connection, thread_ref)
             return {
@@ -307,8 +363,8 @@ class DesktopStore:
             connection.execute(
                 "INSERT INTO desktop_commands("
                 "request_id,intent_digest,body_digest,runner_id,host_ref,thread_ref,action,state,error_code,"
-                "command_json,receipt_json,created_at,updated_at"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "command_json,receipt_json,created_at,updated_at,relay_delivered_at,runner_received_at,mac_confirmed_at"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL)",
                 (
                     request_id,
                     intent_digest,
@@ -375,8 +431,16 @@ class DesktopStore:
                 raise StoreError("desktop_command_unknown", "Desktop 命令不存在", status=404)
             if current["state"] == "pending":
                 connection.execute(
-                    "UPDATE desktop_commands SET state=?,error_code=?,updated_at=? WHERE request_id=? AND state='pending'",
-                    (state, error_code, updated_at, request_id),
+                    "UPDATE desktop_commands SET state=?,error_code=?,updated_at=?,"
+                    "relay_delivered_at=CASE WHEN ?='submitted' THEN COALESCE(relay_delivered_at,?) ELSE relay_delivered_at END "
+                    "WHERE request_id=? AND state='pending'",
+                    (state, error_code, updated_at, state, updated_at, request_id),
+                )
+            elif state == "submitted":
+                connection.execute(
+                    "UPDATE desktop_commands SET relay_delivered_at=COALESCE(relay_delivered_at,?) "
+                    "WHERE request_id=?",
+                    (updated_at, request_id),
                 )
             return self._command_row(
                 connection.execute(
@@ -389,18 +453,6 @@ class DesktopStore:
         request_id = str(document["request_id"])
         digest = str(document["body_digest"])
         with self._lock, self._connect() as connection:
-            request_receipt = connection.execute(
-                "SELECT body_digest FROM desktop_receipts WHERE request_id=? ORDER BY id LIMIT 1",
-                (request_id,),
-            ).fetchone()
-            if request_receipt is not None:
-                if request_receipt["body_digest"] != digest:
-                    raise StoreError(
-                        "desktop_receipt_conflict",
-                        "同一 Desktop request_id 出现不同收据",
-                        status=409,
-                    )
-                return {"status": "duplicate", "command": self._optional_command(connection, request_id)}
             duplicate = connection.execute(
                 "SELECT request_id FROM desktop_receipts WHERE body_digest=?",
                 (digest,),
@@ -411,9 +463,21 @@ class DesktopStore:
                 "SELECT * FROM desktop_commands WHERE request_id=?",
                 (request_id,),
             ).fetchone()
+            previous_receipt = connection.execute(
+                "SELECT state,document_json FROM desktop_receipts WHERE request_id=? ORDER BY id DESC LIMIT 1",
+                (request_id,),
+            ).fetchone()
             orphan = command is None
             state = str(document["state"])
             error_code = document.get("error_code")
+            if previous_receipt is not None:
+                previous_state = str(previous_receipt["state"])
+                if previous_state != "accepted" or state == "accepted":
+                    raise StoreError(
+                        "desktop_receipt_conflict",
+                        "同一 Desktop request_id 收据阶段冲突",
+                        status=409,
+                    )
             if command is not None:
                 if (
                     command["runner_id"] != document["runner_id"]
@@ -427,6 +491,17 @@ class DesktopStore:
                         status=409,
                     )
                 command_document = json.loads(command["command_json"])
+                expected_queue_ref = command_document.get("queue_ref")
+                receipt_queue_ref = document.get("queue_ref")
+                if (
+                    command["action"] in {"queue_update", "queue_delete", "queue_start"}
+                    and receipt_queue_ref != expected_queue_ref
+                ):
+                    raise StoreError(
+                        "desktop_receipt_binding_conflict",
+                        "Desktop 排队收据与命令绑定不一致",
+                        status=409,
+                    )
                 if int(document["thread_revision"]) < int(
                     command_document["expected_thread_revision"]
                 ):
@@ -461,12 +536,18 @@ class DesktopStore:
             )
             if command is not None:
                 connection.execute(
-                    "UPDATE desktop_commands SET state=?,error_code=?,receipt_json=?,updated_at=? "
+                    "UPDATE desktop_commands SET state=?,error_code=?,receipt_json=?,updated_at=?,"
+                    "runner_received_at=CASE WHEN ?='accepted' THEN COALESCE(runner_received_at,?) ELSE runner_received_at END,"
+                    "mac_confirmed_at=CASE WHEN ?='confirmed' THEN COALESCE(mac_confirmed_at,?) ELSE mac_confirmed_at END "
                     "WHERE request_id=?",
                     (
                         state,
                         error_code,
                         canonical_json(document),
+                        document["created_at"],
+                        state,
+                        document["created_at"],
+                        state,
                         document["created_at"],
                         request_id,
                     ),
@@ -658,6 +739,31 @@ class DesktopStore:
             "has_more": has_more,
         }
 
+    def host_events(self, host_ref: str, *, after_cursor: int, limit: int) -> dict[str, Any]:
+        with self._connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM desktop_hosts WHERE host_ref=?",
+                (host_ref,),
+            ).fetchone() is None:
+                raise StoreError("desktop_host_not_found", "Desktop host 不存在", status=404)
+            rows = connection.execute(
+                "SELECT cursor,document_json FROM desktop_events "
+                "WHERE host_ref=? AND cursor>? ORDER BY cursor LIMIT ?",
+                (host_ref, after_cursor, limit + 1),
+            ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        events = []
+        for row in rows:
+            document = json.loads(row["document_json"])
+            document.pop("runner_id", None)
+            events.append({"cursor": int(row["cursor"]), **document})
+        return {
+            "events": events,
+            "next_cursor": int(rows[-1]["cursor"]) if rows else after_cursor,
+            "has_more": has_more,
+        }
+
     def command(self, request_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
@@ -685,7 +791,7 @@ class DesktopStore:
         expired: list[str] = []
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT request_id,command_json FROM desktop_commands WHERE state='submitted'"
+                "SELECT request_id,command_json FROM desktop_commands WHERE state IN ('submitted','accepted')"
             ).fetchall()
             for row in rows:
                 try:
@@ -699,7 +805,7 @@ class DesktopStore:
             if expired:
                 connection.executemany(
                     "UPDATE desktop_commands SET state='unknown',error_code='desktop_receipt_timeout',updated_at=? "
-                    "WHERE request_id=? AND state='submitted'",
+                    "WHERE request_id=? AND state IN ('submitted','accepted')",
                     ((now, request_id) for request_id in expired),
                 )
         return len(expired)
@@ -735,6 +841,7 @@ class DesktopStore:
                     active_turn_ref TEXT,
                     thread_revision INTEGER NOT NULL,
                     control_revision INTEGER,
+                    snapshot_sequence INTEGER,
                     control_state TEXT NOT NULL,
                     snapshot_digest TEXT,
                     snapshot_json TEXT NOT NULL,
@@ -750,6 +857,7 @@ class DesktopStore:
                     thread_revision INTEGER NOT NULL,
                     body_digest TEXT NOT NULL UNIQUE,
                     document_json TEXT NOT NULL,
+                    source_sequence INTEGER,
                     observed_at TEXT NOT NULL,
                     UNIQUE(thread_ref,thread_revision)
                 );
@@ -783,7 +891,10 @@ class DesktopStore:
                     command_json TEXT NOT NULL,
                     receipt_json TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    relay_delivered_at TEXT,
+                    runner_received_at TEXT,
+                    mac_confirmed_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS desktop_commands_thread_created
                     ON desktop_commands(thread_ref,created_at);
@@ -803,8 +914,6 @@ class DesktopStore:
                     orphan INTEGER NOT NULL,
                     created_at TEXT NOT NULL
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS desktop_receipts_request
-                    ON desktop_receipts(request_id);
                 """
             )
             columns = {
@@ -813,6 +922,26 @@ class DesktopStore:
             }
             if "control_revision" not in columns:
                 connection.execute("ALTER TABLE desktop_threads ADD COLUMN control_revision INTEGER")
+            if "snapshot_sequence" not in columns:
+                connection.execute("ALTER TABLE desktop_threads ADD COLUMN snapshot_sequence INTEGER")
+            snapshot_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(desktop_snapshots)").fetchall()
+            }
+            if "source_sequence" not in snapshot_columns:
+                connection.execute("ALTER TABLE desktop_snapshots ADD COLUMN source_sequence INTEGER")
+            command_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(desktop_commands)").fetchall()
+            }
+            for name in ("relay_delivered_at", "runner_received_at", "mac_confirmed_at"):
+                if name not in command_columns:
+                    connection.execute(f"ALTER TABLE desktop_commands ADD COLUMN {name} TEXT")
+            connection.execute("DROP INDEX IF EXISTS desktop_receipts_request")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS desktop_receipts_request_created "
+                "ON desktop_receipts(request_id,id)"
+            )
 
     def _recover_pending_commands(self) -> None:
         current = dt.datetime.now(dt.timezone.utc).astimezone(dt.timezone(dt.timedelta(hours=8))).isoformat()
@@ -969,6 +1098,7 @@ class DesktopStore:
             "status": row["status"],
             "active_turn_ref": row["active_turn_ref"],
             "thread_revision": int(row["thread_revision"]),
+            "snapshot_sequence": row["snapshot_sequence"],
             "control_revision": row["control_revision"],
             "control_state": row["control_state"],
             "created_at": row["source_created_at"],
@@ -992,6 +1122,9 @@ class DesktopStore:
             "action": row["action"],
             "mode": command.get("mode"),
             "model": command.get("model"),
+            "effort": command.get("effort"),
+            "queue_ref": command.get("queue_ref"),
+            "queue_refs": command.get("queue_refs"),
             "expected_turn_ref": command.get("expected_turn_ref"),
             "expected_thread_revision": command.get("expected_thread_revision"),
             "expected_control_revision": command.get("expected_control_revision"),
@@ -1001,6 +1134,14 @@ class DesktopStore:
             "expires_at": command.get("expires_at"),
             "updated_at": row["updated_at"],
             "receipt": receipt,
+            "delivery_stage": _delivery_stage(row),
+            "stage_timestamps": {
+                "controller_received": row["created_at"],
+                "relay_delivered": row["relay_delivered_at"],
+                "runner_received": row["runner_received_at"],
+                "mac_confirmed": row["mac_confirmed_at"],
+            },
+            "recovery_required": row["state"] in {"unknown", "recovery_required"},
         }
 
     def _optional_command(self, connection: sqlite3.Connection, request_id: str) -> dict[str, Any] | None:
@@ -1088,6 +1229,30 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
     if incoming_control_revision == existing_control_revision:
         return None
     return "refreshed"
+
+
+def _changed_snapshot_fields(existing_json: str, incoming: Mapping[str, Any]) -> set[str]:
+    try:
+        existing = json.loads(existing_json)
+    except (TypeError, json.JSONDecodeError):
+        return set()
+    if not isinstance(existing, dict):
+        return set()
+    return {
+        field
+        for field in set(existing) | set(incoming)
+        if existing.get(field) != incoming.get(field)
+    }
+
+
+def _delivery_stage(row: sqlite3.Row) -> str:
+    if row["mac_confirmed_at"] is not None:
+        return "mac_confirmed"
+    if row["runner_received_at"] is not None:
+        return "runner_received"
+    if row["relay_delivered_at"] is not None:
+        return "relay_delivered"
+    return "controller_received"
 
 
 __all__ = [

@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.34
+
+- 修复从 `0.5.32` 升级后，旧 Desktop 快照尚无 `snapshot_sequence` 且首次收到 Runner `0.3.22` 新字段时被误判为 `desktop_revision_conflict` 的兼容缺口。迁移按任务、事务内且仅执行一次，同时原子建立任务与历史快照水位。
+- 首次水位只允许精确新增 `model`、`reasoning_effort` 和 `queued_submissions`；旧键删除、额外字段、业务内容漂移、来源水位不一致、摘要缺失和非法 SQLite 整数全部失败关闭。不可写降级态继续保留 Controller 已验证的控制 revision 与 Turn 历史，并安全补齐新增字段。
+- Relay 保持 `0.2.21`、Runner 保持 `0.3.22`；不要求 OpenAI API Key，也不清理、改写或人工重放 Runner outbox，由兼容后的 Controller 正常确认既有积压。
+
 ## 0.5.33
 
 - 内置固定 Runner manifest 更新为 `0.3.22` 四平台可重复构建候选；启动时继续从镜像内读取原始 manifest 字节并核对固定 SHA-256、版本、平台目录和公开 HTTPS URL，`v0321` 保留为历史发布证据。

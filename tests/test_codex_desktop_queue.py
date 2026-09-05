@@ -92,6 +92,8 @@ def snapshot(
             "history_incomplete": False,
             "turns": [],
             "control_state": "ready",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "medium",
             "queued_submissions": queue
             if queue is not None
             else [
@@ -214,7 +216,7 @@ class DesktopQueueProtocolTests(unittest.TestCase):
             "snapshot_sequence",
             validate_desktop_document("desktop_snapshot", legacy),
         )
-        for invalid in (None, 0, -1, True, 1.0, "1"):
+        for invalid in (None, 0, -1, True, 1.0, "1", 1 << 63):
             with self.subTest(sequence=invalid):
                 document = snapshot()
                 document["snapshot_sequence"] = invalid
@@ -349,6 +351,9 @@ class DesktopQueueServiceTests(unittest.TestCase):
             )
             legacy = snapshot(sequence=None)
             legacy["host"]["capabilities"].remove("thread_queue_v1")
+            legacy["host"]["capabilities"].remove("reasoning_effort_v1")
+            for field in ("model", "reasoning_effort", "queued_submissions"):
+                legacy["snapshot"].pop(field)
             legacy["body_digest"] = body_digest(legacy)
             service.receive("desktop_snapshot", legacy)
             updated_queue = [
@@ -363,15 +368,219 @@ class DesktopQueueServiceTests(unittest.TestCase):
 
             result = service.receive(
                 "desktop_snapshot",
-                snapshot(queue=updated_queue, sequence=1),
+                snapshot(queue=updated_queue, sequence=141861),
             )
 
             self.assertEqual(result["status"], "refreshed")
-            self.assertEqual(result["thread"]["snapshot_sequence"], 1)
+            self.assertEqual(result["thread"]["snapshot_sequence"], 141861)
             self.assertEqual(
                 service.thread(THREAD_REF)["snapshot"]["queued_submissions"],
                 updated_queue,
             )
+
+    def test_first_sequence_enriches_a_pre_queue_snapshot_and_safe_control_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DesktopControllerService(
+                DesktopStore(Path(temporary) / "controller.sqlite3"),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            legacy = snapshot(sequence=None)
+            legacy["host"]["capabilities"].remove("thread_queue_v1")
+            legacy["host"]["capabilities"].remove("reasoning_effort_v1")
+            for field in ("model", "reasoning_effort", "queued_submissions"):
+                legacy["snapshot"].pop(field, None)
+            legacy["body_digest"] = body_digest(legacy)
+            service.receive("desktop_snapshot", legacy)
+
+            enriched = snapshot(sequence=1)
+            enriched["snapshot"]["control_revision"] = 13
+            enriched["snapshot"]["turns"] = [
+                {
+                    "turn_ref": TURN_REF,
+                    "status": "active",
+                    "created_at": NOW.isoformat(),
+                    "updated_at": NOW.isoformat(),
+                }
+            ]
+            enriched["body_digest"] = body_digest(enriched)
+
+            result = service.receive("desktop_snapshot", enriched)
+
+            self.assertEqual(result["status"], "refreshed")
+            self.assertEqual(result["thread"]["snapshot_sequence"], 1)
+            stored = service.thread(THREAD_REF)
+            self.assertEqual(stored["snapshot"]["control_revision"], 13)
+            self.assertEqual(stored["snapshot"]["model"], "gpt-5.6-sol")
+            self.assertEqual(stored["snapshot"]["reasoning_effort"], "medium")
+            with sqlite3.connect(Path(temporary) / "controller.sqlite3") as connection:
+                source_sequence = connection.execute(
+                    "SELECT source_sequence FROM desktop_snapshots "
+                    "WHERE thread_ref=? AND thread_revision=?",
+                    (THREAD_REF, 7),
+                ).fetchone()[0]
+            self.assertEqual(source_sequence, 1)
+
+    def test_first_sequence_enrichment_cannot_hide_business_field_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            service = DesktopControllerService(
+                DesktopStore(Path(temporary) / "controller.sqlite3"),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            legacy = snapshot(sequence=None)
+            legacy["host"]["capabilities"].remove("thread_queue_v1")
+            legacy["host"]["capabilities"].remove("reasoning_effort_v1")
+            for field in ("model", "reasoning_effort", "queued_submissions"):
+                legacy["snapshot"].pop(field, None)
+            legacy["body_digest"] = body_digest(legacy)
+            service.receive("desktop_snapshot", legacy)
+            drifted = snapshot(sequence=1)
+            drifted["snapshot"]["title"] = "不能借迁移改变标题"
+            drifted["body_digest"] = body_digest(drifted)
+
+            with self.assertRaises(StoreError) as context:
+                service.receive("desktop_snapshot", drifted)
+
+            self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+    def test_first_sequence_enrichment_rejects_key_shape_bypass(self) -> None:
+        for mutation in ("partial", "extra_null", "remove_legacy_null"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                path = Path(temporary) / "controller.sqlite3"
+                service = DesktopControllerService(
+                    DesktopStore(path),
+                    publisher=Publisher(),
+                    now=lambda: NOW,
+                    runner_authorizer=lambda _runner_id: True,
+                )
+                legacy = snapshot(sequence=None)
+                legacy["host"]["capabilities"].remove("thread_queue_v1")
+                legacy["host"]["capabilities"].remove("reasoning_effort_v1")
+                for field in ("model", "reasoning_effort", "queued_submissions"):
+                    legacy["snapshot"].pop(field)
+                legacy["snapshot"]["legacy_null"] = None
+                legacy["body_digest"] = body_digest(legacy)
+                service.receive("desktop_snapshot", legacy)
+
+                incoming = snapshot(sequence=141861)
+                incoming["snapshot"]["legacy_null"] = None
+                if mutation == "partial":
+                    incoming["snapshot"].pop("reasoning_effort")
+                elif mutation == "extra_null":
+                    incoming["snapshot"]["extra_null"] = None
+                else:
+                    incoming["snapshot"].pop("legacy_null")
+                incoming["body_digest"] = body_digest(incoming)
+
+                with self.assertRaises(StoreError) as context:
+                    service.receive("desktop_snapshot", incoming)
+
+                self.assertEqual(context.exception.code, "desktop_revision_conflict")
+                with sqlite3.connect(path) as connection:
+                    sequences = connection.execute(
+                        "SELECT t.snapshot_sequence,s.source_sequence "
+                        "FROM desktop_threads t JOIN desktop_snapshots s "
+                        "ON s.thread_ref=t.thread_ref AND s.thread_revision=t.thread_revision "
+                        "WHERE t.thread_ref=?",
+                        (THREAD_REF,),
+                    ).fetchone()
+                self.assertEqual(sequences, (None, None))
+
+    def test_first_sequence_enrichment_requires_unseeded_snapshot_row(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sqlite3"
+            service = DesktopControllerService(
+                DesktopStore(path),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            legacy = snapshot(sequence=None)
+            legacy["host"]["capabilities"].remove("thread_queue_v1")
+            legacy["host"]["capabilities"].remove("reasoning_effort_v1")
+            for field in ("model", "reasoning_effort", "queued_submissions"):
+                legacy["snapshot"].pop(field)
+            legacy["body_digest"] = body_digest(legacy)
+            service.receive("desktop_snapshot", legacy)
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "UPDATE desktop_snapshots SET source_sequence=99 WHERE thread_ref=?",
+                    (THREAD_REF,),
+                )
+
+            with self.assertRaises(StoreError) as context:
+                service.receive("desktop_snapshot", snapshot(sequence=141861))
+
+            self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+    def test_same_revision_with_missing_stored_digest_fails_closed(self) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE desktop_threads SET snapshot_digest=NULL WHERE thread_ref=?",
+                (THREAD_REF,),
+            )
+        updated = snapshot(sequence=2)
+        updated["snapshot"]["queued_submissions"] = []
+        updated["body_digest"] = body_digest(updated)
+
+        with self.assertRaises(StoreError) as context:
+            self.service.receive("desktop_snapshot", updated)
+
+        self.assertEqual(context.exception.code, "desktop_revision_conflict")
+
+    def test_first_sequence_enrichment_preserves_fields_during_degraded_latch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "controller.sqlite3"
+            service = DesktopControllerService(
+                DesktopStore(path),
+                publisher=Publisher(),
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            legacy = snapshot(sequence=None)
+            legacy["host"]["capabilities"].remove("thread_queue_v1")
+            legacy["host"]["capabilities"].remove("reasoning_effort_v1")
+            for field in ("model", "reasoning_effort", "queued_submissions"):
+                legacy["snapshot"].pop(field)
+            legacy["body_digest"] = body_digest(legacy)
+            service.receive("desktop_snapshot", legacy)
+
+            degraded = snapshot(sequence=141861)
+            degraded["snapshot"]["control_revision"] = None
+            degraded["snapshot"]["control_state"] = "recovery_required"
+            degraded["body_digest"] = body_digest(degraded)
+            result = service.receive("desktop_snapshot", degraded)
+
+            self.assertEqual(result["status"], "degraded_latched")
+            stored = service.thread(THREAD_REF)
+            self.assertEqual(stored["snapshot_sequence"], 141861)
+            self.assertEqual(stored["snapshot"]["control_revision"], 12)
+            self.assertEqual(stored["snapshot"]["control_state"], "recovery_required")
+            self.assertEqual(stored["snapshot"]["model"], "gpt-5.6-sol")
+            self.assertEqual(stored["snapshot"]["reasoning_effort"], "medium")
+            self.assertIn("queued_submissions", stored["snapshot"])
+            with sqlite3.connect(path) as connection:
+                source_sequence = connection.execute(
+                    "SELECT source_sequence FROM desktop_snapshots WHERE thread_ref=?",
+                    (THREAD_REF,),
+                ).fetchone()[0]
+            self.assertEqual(source_sequence, 141861)
+
+    def test_snapshot_model_and_reasoning_effort_are_bounded(self) -> None:
+        for field, value, code in (
+            ("model", "contains spaces", "desktop_model_invalid"),
+            ("reasoning_effort", "contains spaces", "desktop_effort_invalid"),
+        ):
+            with self.subTest(field=field):
+                document = snapshot()
+                document["snapshot"][field] = value
+                document["body_digest"] = body_digest(document)
+                with self.assertRaises(DesktopProtocolError) as context:
+                    validate_desktop_document("desktop_snapshot", document)
+                self.assertEqual(context.exception.code, code)
 
     def test_greater_sequence_with_queue_and_control_changes_conflicts(self) -> None:
         updated = snapshot(

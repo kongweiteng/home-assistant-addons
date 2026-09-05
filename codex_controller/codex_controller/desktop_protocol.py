@@ -350,6 +350,7 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(snapshot_sequence, int)
         or isinstance(snapshot_sequence, bool)
         or snapshot_sequence < 1
+        or snapshot_sequence > (1 << 63) - 1
     ):
         raise DesktopProtocolError(
             "desktop_sequence_invalid",
@@ -387,6 +388,12 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
     turns = snapshot.get("turns")
     if not isinstance(turns, list) or len(turns) > 100:
         raise DesktopProtocolError("desktop_snapshot_invalid", "Desktop Turn 列表无效")
+    model = snapshot.get("model")
+    if "model" in snapshot and model is not None:
+        _model_id(model)
+    reasoning_effort = snapshot.get("reasoning_effort")
+    if "reasoning_effort" in snapshot and reasoning_effort is not None:
+        _effort(reasoning_effort)
     queue_is_present = "queued_submissions" in snapshot
     if queue_is_present:
         _queued_submissions(snapshot.get("queued_submissions"))

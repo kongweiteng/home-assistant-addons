@@ -42,6 +42,11 @@ NON_WRITABLE_CONTROL_STATES = frozenset(
         "control_offline",
     }
 )
+LEGACY_SEQUENCE_ENRICHMENT_FIELDS = frozenset(
+    {"model", "reasoning_effort", "queued_submissions"}
+)
+
+
 class DesktopStore:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = str(database_path)
@@ -85,6 +90,7 @@ class DesktopStore:
             ).fetchone()
             semantic_refresh = False
             degraded_latch = False
+            legacy_sequence_enrichment = False
             effective_snapshot_sequence = snapshot_sequence
             if existing is not None:
                 if (
@@ -100,7 +106,13 @@ class DesktopStore:
                 previous_revision = int(existing["thread_revision"])
                 if revision < previous_revision:
                     return {"status": "stale_ignored", "thread": self._thread_row(connection, thread_ref)}
-                if revision == previous_revision and existing["snapshot_digest"] not in {None, digest}:
+                if revision == previous_revision and existing["snapshot_digest"] is None:
+                    raise StoreError(
+                        "desktop_revision_conflict",
+                        "现有 Desktop snapshot 摘要缺失，拒绝覆盖",
+                        status=409,
+                    )
+                if revision == previous_revision and existing["snapshot_digest"] != digest:
                     existing_sequence = existing["snapshot_sequence"]
                     if snapshot_sequence is None:
                         effective_snapshot_sequence = existing_sequence
@@ -123,13 +135,29 @@ class DesktopStore:
                                 status=409,
                             )
                         refresh = None
-                    elif (
-                        snapshot_sequence is not None
-                        and (existing_sequence is None or snapshot_sequence > existing_sequence)
-                        and _changed_snapshot_fields(str(existing["snapshot_json"]), body)
-                        == {"queued_submissions"}
-                    ):
-                        refresh = "refreshed"
+                    elif snapshot_sequence is not None and existing_sequence is None:
+                        legacy_snapshot = connection.execute(
+                            "SELECT body_digest,source_sequence FROM desktop_snapshots "
+                            "WHERE thread_ref=? AND thread_revision=?",
+                            (thread_ref, revision),
+                        ).fetchone()
+                        if (
+                            legacy_snapshot is None
+                            or legacy_snapshot["body_digest"] != existing["snapshot_digest"]
+                            or legacy_snapshot["source_sequence"] is not None
+                        ):
+                            refresh = None
+                        else:
+                            legacy_sequence_enrichment = True
+                            refresh = _legacy_sequence_refresh(
+                                str(existing["snapshot_json"]), body, host
+                            )
+                    elif snapshot_sequence is not None and snapshot_sequence > existing_sequence:
+                        changed_fields = _changed_snapshot_fields(str(existing["snapshot_json"]), body)
+                        if changed_fields == {"queued_submissions"}:
+                            refresh = "refreshed"
+                        else:
+                            refresh = _same_revision_refresh(str(existing["snapshot_json"]), body)
                     else:
                         refresh = _same_revision_refresh(str(existing["snapshot_json"]), body)
                     if refresh == "stale_ignored":
@@ -139,6 +167,9 @@ class DesktopStore:
                         }
                     if refresh == "degraded_latched":
                         trusted = json.loads(str(existing["snapshot_json"]))
+                        if legacy_sequence_enrichment:
+                            for field in LEGACY_SEQUENCE_ENRICHMENT_FIELDS:
+                                trusted[field] = body[field]
                         trusted["control_state"] = body["control_state"]
                         body = trusted
                         encoded_snapshot = canonical_json(body)
@@ -1238,11 +1269,40 @@ def _changed_snapshot_fields(existing_json: str, incoming: Mapping[str, Any]) ->
         return set()
     if not isinstance(existing, dict):
         return set()
+    return _mapping_changes(existing, incoming)
+
+
+def _mapping_changes(existing: Mapping[str, Any], incoming: Mapping[str, Any]) -> set[str]:
     return {
         field
         for field in set(existing) | set(incoming)
-        if existing.get(field) != incoming.get(field)
+        if field not in existing or field not in incoming or existing[field] != incoming[field]
     }
+
+
+def _legacy_sequence_refresh(
+    existing_json: str,
+    incoming: Mapping[str, Any],
+    host: Mapping[str, Any],
+) -> str | None:
+    try:
+        existing = json.loads(existing_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    capabilities = host.get("capabilities")
+    if (
+        not isinstance(existing, dict)
+        or not isinstance(capabilities, list)
+        or "thread_queue_v1" not in capabilities
+        or "reasoning_effort_v1" not in capabilities
+        or any(field in existing for field in LEGACY_SEQUENCE_ENRICHMENT_FIELDS)
+        or set(incoming) != set(existing) | LEGACY_SEQUENCE_ENRICHMENT_FIELDS
+    ):
+        return None
+    enriched = dict(existing)
+    for field in LEGACY_SEQUENCE_ENRICHMENT_FIELDS:
+        enriched[field] = incoming[field]
+    return _same_revision_refresh(canonical_json(enriched), incoming)
 
 
 def _delivery_stage(row: sqlite3.Row) -> str:

@@ -1,10 +1,10 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.33`。
+当前版本：`0.5.34`。
 
 ## 瞬态 Turn 安全重试
 
-- `0.5.33` 增加按 host 的总览事件长轮询，连接状态使用 Runner 心跳观测时间、内容新鲜度使用 Desktop 数据同步时间，避免把“链路在线”和“数据已刷新”混为一谈。发送状态显示 Controller 已接收、Relay 已送达、Runner 已接收、Mac 已确认四个阶段；任务详情持续展示可公开的思考摘要，并允许按模型选择受支持的推理强度。活动任务可通过受控收据添加、编辑、排序或删除纯文本排队消息；内置固定 manifest 更新为四平台 Runner `0.3.22` 可重复构建候选。手机端同步修正窄屏、底部输入、安全区和单栏导航。隐藏 reasoning、原始 App 标识和凭据仍不得进入 HAOS，路径继续复用 Mac Codex App 登录而不要求 OpenAI API Key。
+- `0.5.34` 保留 `0.5.33` 的按 host 总览事件长轮询、四阶段送达、公开思考摘要、推理强度、排队消息和移动端修正，并兼容 `0.5.32` 旧快照首次建立 Runner `0.3.22` 水位。该迁移只允许精确补齐 `model`、`reasoning_effort`、`queued_submissions`，旧业务字段、绑定、摘要或来源水位不一致时仍失败关闭。隐藏 reasoning、原始 App 标识和凭据继续不得进入 HAOS，路径仍复用 Mac Codex App 登录且不要求 OpenAI API Key。
 - `0.5.32` 将 `/desktop` 改为聊天优先的实时工作台：默认只显示用户消息、Codex 回复和人类可读状态，运行细节折叠；输入框固定在底部，Enter 发送、Shift+Enter 换行，实时事件长轮询、8 秒列表同步、回到前台和网络恢复都会自动刷新。手机为列表到对话的单栏体验。后端写控制与无 API Key 路径不变。
 - `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
 - `0.5.30` 将内置 Runner 更新到 `0.3.21`，精确登记 Codex App `26.901.22334` / build `7746` / CLI `0.153.0`，继续使用 v2 + `turnStart`；未知 tuple 保持只读。配套 Relay 为 `0.2.20`。

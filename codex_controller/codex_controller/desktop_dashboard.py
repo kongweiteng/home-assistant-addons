@@ -56,6 +56,10 @@ DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
 <script src="desktop.js"></script></body></html>"""
 
 
+from .desktop_layout import task_first_html
+
+DESKTOP_DASHBOARD_HTML = task_first_html(DESKTOP_DASHBOARD_HTML)
+
 DESKTOP_DASHBOARD_JS = r"""
 const q = id => document.getElementById(id);
 const API = '../api/desktop/v1';
@@ -83,7 +87,9 @@ async function jsonFetch(path, options = {}) {
     if (!response.ok) {
       if (response.status === 401) throw new Error('Home Assistant 会话已失效，请重新打开此页面');
       if ([502, 503, 504].includes(response.status)) throw new Error('Home Assistant 网关暂时不可用，正在等待恢复');
-      throw new Error(document?.error?.message || document?.error?.code || `请求失败（${response.status}）`);
+      const error = new Error(document?.error?.message || document?.error?.code || `请求失败（${response.status}）`);
+      error.status = response.status;
+      throw error;
     }
     if (!document) throw new Error('Controller 返回了无法识别的数据');
     return document.result ?? document;
@@ -299,7 +305,7 @@ function renderNewTaskState() {
 }
 
 function syncDialogBackground() {
-  const modalOpen = !q('newTaskSheet').classList.contains('hidden') || !q('connectionSheet').classList.contains('hidden');
+  const modalOpen = !q('newTaskSheet').classList.contains('hidden') || !q('connectionSheet').classList.contains('hidden') || q('projectPanel').classList.contains('open') || !q('imageDialog').classList.contains('hidden');
   document.querySelector('main.shell').inert = modalOpen;
   document.querySelector('nav.mobile-nav').inert = modalOpen;
 }
@@ -343,6 +349,7 @@ function setConnectionOpen(open) {
 }
 
 function setProjectsOpen(open) {
+  if (open) state.projectReturnFocus = document.activeElement;
   q('projectPanel').classList.toggle('open', open);
   if (open) {
     q('newTaskSheet').classList.add('hidden');
@@ -350,6 +357,8 @@ function setProjectsOpen(open) {
   }
   q('modalBackdrop').classList.toggle('hidden', !open && q('newTaskSheet').classList.contains('hidden') && q('connectionSheet').classList.contains('hidden'));
   syncDialogBackground();
+  if (open) q('closeProjects').focus();
+  else if (state.projectReturnFocus) { restoreFocus(state.projectReturnFocus); state.projectReturnFocus = null; }
 }
 
 function renderMetrics() {
@@ -695,9 +704,14 @@ function renderConversation(turns) {
   const shouldFollow = state.following || isNearConversationBottom();
   root.replaceChildren();
   const shown = new Set();
+  const imageMessages = state.detail?.image_messages || [];
+  const placedImages = new Set();
   for (const turn of turns) {
+    const images = imageMessages.filter(message => message.receipt?.turn_ref && message.receipt.turn_ref === turn.turn_ref);
+    renderImageHistory(root, images);
+    for (const message of images) { placedImages.add(message.request_id); if (message.input) shown.add(`user:${message.input}`); }
     for (const item of turn.items || []) {
-      if (item?.type === 'user.message') { const value = text(item.text); if (value) { root.append(messageNode('user', value)); shown.add(`user:${value}`); } }
+      if (item?.type === 'user.message') { const value = text(item.text); if (value && !images.some(message => message.input === value)) { root.append(messageNode('user', value)); shown.add(`user:${value}`); } }
       if (item?.type === 'assistant.message') { const value = text(item.text); if (value) { root.append(messageNode('assistant', value)); shown.add(`assistant:${value}`); } }
       if (item?.type === 'reasoning.summary') { const value = text(item.text); if (value) root.append(messageNode('activity', value, {label: '思考摘要'})); }
       if (item?.type === 'plan') { const value = text(item.text); if (value) root.append(messageNode('activity', value, {label: '计划'})); }
@@ -716,6 +730,7 @@ function renderConversation(turns) {
     if (value) root.append(messageNode('activity', value, {label: activityLabel(event.event_kind)}));
   }
   const live = liveAssistantText();
+  renderImageHistory(root, imageMessages.filter(message => !placedImages.has(message.request_id)));
   if (state.detail?.status === 'active') root.append(messageNode('assistant', live, {streaming: true}));
   if (!root.children.length) root.append(messageNode('system', '还没有消息。你可以在下方开始对话。'));
   if (shouldFollow) {
@@ -752,7 +767,7 @@ function renderQueue(detail) {
   const root = queuePanel();
   const queued = Array.isArray(detail?.snapshot?.queued_submissions) ? detail.snapshot.queued_submissions : [];
   const supported = hasCapability('thread_queue_v1');
-  root.classList.toggle('hidden', !supported && !queued.length);
+  root.classList.toggle('hidden', !queued.length && (!supported || detail?.status !== 'active'));
   root.classList.toggle('open', state.queueOpen === true);
   root.replaceChildren();
   if (supported || queued.length) {
@@ -828,8 +843,9 @@ function renderQueue(detail) {
     q('submitDirection').insertAdjacentElement('beforebegin', add);
   }
   add.classList.toggle('hidden', !(supported && detail?.status === 'active'));
-  add.disabled = blocked || !writeAvailable();
+  add.disabled = blocked || !writeAvailable() || currentAttachments().length > 0;
   add.onclick = () => {
+    if (currentAttachments().length) { q('composerFeedback').textContent = '队列暂不支持图片；请直接发送，附件已保留'; return; }
     const value = q('composerInput').value.trim();
     if (!value) {
       q('composerFeedback').className = 'composer-status warning';
@@ -852,6 +868,7 @@ function moveQueued(index, offset) {
 async function submitQueue(action, {queueRef = '', input = '', queueRefs = []} = {}) {
   const detail = state.detail;
   if (!detail || state.queueBusy) return;
+  if (action === 'add' && currentAttachments().length) { q('composerFeedback').textContent = '队列暂不支持图片，请直接发送'; return; }
   state.queueBusy = true;
   renderQueue(detail);
   q('composerFeedback').className = 'composer-status muted';
@@ -861,18 +878,19 @@ async function submitQueue(action, {queueRef = '', input = '', queueRefs = []} =
   const body = {request_id: requestId(), thread_revision: detail.thread_revision, ...(input ? {input} : {}), ...(queueRefs.length ? {queue_refs: queueRefs} : {})};
   try {
     const result = await jsonFetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    if (detail.thread_ref !== state.selectedThread) return;
     q('composerFeedback').className = 'composer-status success';
     q('composerFeedback').textContent = result.delivery_stage === 'mac_confirmed' || result.state === 'confirmed' ? 'Mac 已确认队列操作' : 'Controller 已接收，WSS 正在送往 Runner';
     if (action === 'add') {
-      q('composerInput').value = '';
-      delete state.drafts[detail.thread_ref];
+      if (q('composerInput').value.trim() === input) q('composerInput').value = '';
+      if ((state.drafts[detail.thread_ref] || '').trim() === input) delete state.drafts[detail.thread_ref];
       resizeComposer();
     }
     if (queueRef) delete state.queueDrafts[queueRef];
     state.queueEditing = '';
     await loadThread(detail.thread_ref, {restartStream: false});
-    setTimeout(() => void loadThread(detail.thread_ref, {restartStream: false}), 1200);
   } catch (error) {
+    if (detail.thread_ref !== state.selectedThread) return;
     q('composerFeedback').className = 'composer-status error';
     q('composerFeedback').textContent = error.message;
     await loadThread(detail.thread_ref, {restartStream: false});
@@ -926,10 +944,11 @@ function renderComposer(detail) {
   q('composerInput').disabled = !action;
   q('safeMode').disabled = detail.status !== 'active';
   q('nativeMode').disabled = detail.status !== 'active' || !hasCapability('native_steer_racy');
-  q('submitDirection').disabled = !enabled;
+  q('submitDirection').disabled = !enabled || Boolean(imageState.pending[detail.thread_ref]) || Boolean(imageState.busy[detail.thread_ref]);
   renderModelSelector(action, enabled);
   q('submitDirection').textContent = '发送';
   q('composerInput').placeholder = action === 'steer' ? '给 Codex 发消息，立即调整当前方向' : '给 Codex 发消息';
+  renderAttachments(enabled);
 }
 
 function setMode(mode) {
@@ -941,7 +960,10 @@ function setMode(mode) {
 }
 
 async function loadThreadPage({reset = false} = {}) {
-  if (state.threadsLoading || !state.selectedHost || (!reset && !state.threadsHasMore)) return;
+  if ((!reset && state.threadsLoading) || !state.selectedHost || (!reset && !state.threadsHasMore)) return;
+  const generation = (state.threadPageGeneration || 0) + 1;
+  state.threadPageGeneration = generation;
+  const scope = `${state.selectedHost}:${state.selectedProject}:${q('statusFilter').value}`;
   state.threadsLoading = true;
   if (reset) {
     state.threadsCursor = 0;
@@ -952,6 +974,7 @@ async function loadThreadPage({reset = false} = {}) {
     const project = state.selectedProject !== 'all' ? `&project_ref=${encodeURIComponent(state.selectedProject)}` : '';
     const status = q('statusFilter').value !== 'all' ? `&status=${encodeURIComponent(q('statusFilter').value)}` : '';
     const document = await jsonFetch(`${API}/threads?host_ref=${encodeURIComponent(state.selectedHost)}${project}${status}&cursor=${state.threadsCursor}&limit=40&order=recent`);
+    if (generation !== state.threadPageGeneration || scope !== `${state.selectedHost}:${state.selectedProject}:${q('statusFilter').value}`) return;
     const retained = reset && state.selectedThread ? state.threads.find(thread => thread.thread_ref === state.selectedThread) : null;
     if (reset) state.threads = [];
     const byRef = new Map(state.threads.map(thread => [thread.thread_ref, thread]));
@@ -963,20 +986,19 @@ async function loadThreadPage({reset = false} = {}) {
     state.threads = Array.from(byRef.values());
     state.threadsCursor = number(document.next_cursor);
     state.threadsHasMore = Boolean(document.has_more);
+  } catch (error) {
+    if (generation === state.threadPageGeneration) q('threadListStatus').textContent = error.message;
   } finally {
-    state.threadsLoading = false;
-    renderThreads();
-    renderMetrics();
+    if (generation === state.threadPageGeneration) {
+      state.threadsLoading = false;
+      renderThreads();
+      renderMetrics();
+    }
   }
 }
 
 function maybeLoadMoreThreads() {
   if (!state.threadsHasMore || state.threadsLoading || !state.selectedHost) return;
-  if (window.matchMedia('(max-width: 920px)').matches) {
-    const footer = q('threadListStatus').getBoundingClientRect();
-    if (footer.top <= window.innerHeight + 260) void loadThreadPage();
-    return;
-  }
   const list = q('threadList');
   if (list.scrollTop + list.clientHeight >= list.scrollHeight - 260) void loadThreadPage();
 }
@@ -1032,14 +1054,21 @@ async function refreshOverview({preserveDetail = true} = {}) {
 
 async function selectProject(projectRef) {
   state.selectedProject = projectRef;
+  q('projectScope').textContent = state.projects.find(project => project.project_ref === projectRef)?.project_alias || '全部项目';
   renderProjects();
   await loadThreadPage({reset: true});
   setProjectsOpen(false);
 }
 
 async function selectThread(threadRef) {
+  const selection = (state.selectionGeneration || 0) + 1;
+  state.selectionGeneration = selection;
   if (state.selectedThread) state.drafts[state.selectedThread] = q('composerInput').value;
+  stopEventStream();
   state.selectedThread = threadRef;
+  state.detail = null;
+  renderDetail();
+  q('composerInput').value = state.drafts[threadRef] || '';
   state.selectedModel = '';
   state.selectedEffort = '';
   state.queueOpen = false;
@@ -1048,21 +1077,25 @@ async function selectThread(threadRef) {
   state.eventCursor = 0;
   state.following = true;
   renderThreads();
-  await loadThread(threadRef, {restartStream: true});
+  const loaded = await loadThread(threadRef, {restartStream: true});
+  if (selection !== state.selectionGeneration || threadRef !== state.selectedThread || !loaded) return;
   q('composerInput').value = state.drafts[threadRef] || '';
   resizeComposer();
   document.body.classList.add('detail-open');
 }
 
 async function loadThread(threadRef, {restartStream = false, throwOnError = false} = {}) {
+  const selection = state.selectionGeneration;
   try {
     const detail = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}`);
-    if (threadRef !== state.selectedThread) return false;
+    if (selection !== state.selectionGeneration || threadRef !== state.selectedThread) return false;
+    if (state.detail?.thread_ref === threadRef && number(state.detail.thread_revision) > number(detail.thread_revision)) return true;
     state.detail = detail;
     renderDetail();
     if (restartStream) startEventStream();
     return true;
   } catch (error) {
+    if (threadRef !== state.selectedThread) return false;
     q('composerFeedback').className = 'composer-status error';
     q('composerFeedback').textContent = error.message;
     if (throwOnError) throw error;
@@ -1125,6 +1158,8 @@ function applyHostFrame(document) {
   state.overviewReconnectAttempt = 0;
   state.streamFailures.delete('overview');
   renderFreshness();
+  const created = (document.create_commands || []).find(command => command.request_id === state.pendingCreate?.body.request_id);
+  if (created) void handleCreateResult(created);
 }
 
 async function addUnknownThread(threadRef) {
@@ -1299,31 +1334,47 @@ async function recoverDetailBaseline() {
   if (threadRef === state.selectedThread && navigator.onLine) startEventStream();
 }
 
-async function submitAction(action, extra = {}) {
+async function submitAction(action, extra = {}, retry = null) {
   const detail = state.detail;
-  if (!detail) return;
-  const body = {request_id: requestId(), thread_revision: detail.thread_revision, ...extra};
+  if (!detail || imageState.busy[detail.thread_ref] || (!retry && imageState.pending[detail.thread_ref])) return;
+  const ref = detail.thread_ref;
+  const body = retry?.body || {request_id: requestId(), thread_revision: detail.thread_revision, ...extra};
+  const pending = retry || {body, action, extra};
+  imageState.busy[ref] = true;
+  imageState.pending[ref] = pending;
+  const isCurrent = () => state.selectedThread === ref;
   q('composerFeedback').className = 'composer-status muted';
   q('composerFeedback').textContent = action === 'steer' || action === 'continue' ? '正在发送…' : '正在处理…';
   q('submitDirection').disabled = true;
   try {
     const result = await jsonFetch(`${API}/threads/${encodeURIComponent(detail.thread_ref)}/${action}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
-    q('composerFeedback').className = 'composer-status success';
-    q('composerFeedback').textContent = result.state === 'submitted' ? '已发送，等待 Codex 回复' : '已送达 Mac，正在同步';
-    if (action === 'steer' || action === 'continue') {
-      q('composerInput').value = '';
-      delete state.drafts[detail.thread_ref];
-      resizeComposer();
-      state.following = true;
+    const confirmed = result.state === 'confirmed' || result.delivery_stage === 'mac_confirmed';
+    const accepted = ['pending', 'submitted', 'accepted', 'confirmed'].includes(result.state);
+    if (accepted || ['failed', 'conflict', 'expired', 'recovery_required'].includes(result.state)) delete imageState.pending[ref];
+    if (isCurrent()) {
+      q('composerFeedback').className = `composer-status ${accepted ? 'success' : 'warning'}`;
+      q('composerFeedback').textContent = confirmed ? 'Mac 已确认，回复将自动同步' : accepted ? 'Controller 已接收，等待 Mac 确认' : '未完成发送，请检查回执；草稿已保留';
     }
-    state.selectedModel = '';
-    state.selectedEffort = '';
-    await loadThread(detail.thread_ref, {restartStream: false});
-    setTimeout(() => void loadThread(detail.thread_ref, {restartStream: false}), 1200);
+    if (accepted && (action === 'steer' || action === 'continue')) {
+      if ((state.drafts[ref] || '').trim() === body.input) delete state.drafts[ref];
+      for (const item of currentAttachments(ref)) if ((body.image_refs || []).includes(item.image_ref) && item.url) URL.revokeObjectURL(item.url);
+      imageState.drafts[ref] = currentAttachments(ref).filter(item => !(body.image_refs || []).includes(item.image_ref));
+      if (isCurrent()) {
+        if (q('composerInput').value.trim() === body.input) q('composerInput').value = '';
+        resizeComposer(); state.following = true; state.selectedModel = ''; state.selectedEffort = '';
+      }
+    }
+    if (isCurrent()) await loadThread(ref, {restartStream: false});
   } catch (error) {
-    q('composerFeedback').className = 'composer-status error';
-    q('composerFeedback').textContent = error.message;
-    await loadThread(detail.thread_ref, {restartStream: false});
+    if (error.status >= 400 && error.status < 500) delete imageState.pending[ref];
+    if (isCurrent()) {
+      q('composerFeedback').className = 'composer-status error';
+      q('composerFeedback').textContent = `${error.message}。草稿保留，不会自动重发`;
+      await loadThread(ref, {restartStream: false});
+    }
+  } finally {
+    delete imageState.busy[ref];
+    if (isCurrent() && state.detail) renderComposer(state.detail);
   }
 }
 
@@ -1354,47 +1405,14 @@ async function createThread(event) {
   q('newTaskFeedback').textContent = existing ? '正在用同一 request ID 检查收据…' : '正在提交创建请求，等待 Mac 收据…';
   let controllerAccepted = Boolean(existing?.controllerAccepted);
   try {
-    for (let attempt = 0; attempt < 45; attempt += 1) {
-      const result = await jsonFetch(`${API}/threads`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
-      controllerAccepted = true;
-      state.pendingCreate = {body, controllerAccepted: true};
-      if (['submitted', 'accepted', 'pending'].includes(result.state)) {
-        q('newTaskFeedback').className = 'feedback muted';
-        q('newTaskFeedback').textContent = '请求已登记，正在用同一 request ID 等待 Mac 收据…';
-        if (attempt < 44) await delay(700);
-        continue;
-      }
-      if (result.state !== 'confirmed' || result.action !== 'create' || !result.thread_ref) {
-        const uncertain = result.state === 'unknown' || result.state === 'recovery_required';
-        state.pendingCreate = uncertain ? {body, controllerAccepted: true} : null;
-        renderNewTaskState();
-        q('newTaskFeedback').className = `feedback ${uncertain ? 'error' : 'warning'}`;
-        q('newTaskFeedback').textContent = uncertain
-          ? '创建结果需要对账；草稿与 request ID 已保留，不会重复创建。'
-          : `创建未完成（${result.state || 'unknown'}）；可以修改草稿后重新提交。`;
-        return;
-      }
-      state.pendingCreate = null;
-      q('newTaskFeedback').className = 'feedback success';
-      q('newTaskFeedback').textContent = 'Mac 已确认创建，正在打开同一个任务。';
-      q('newTaskInput').value = '';
-      await refreshOverview({preserveDetail: false});
-      const created = state.threads.find(thread => thread.thread_ref === result.thread_ref);
-      if (created) {
-        setNewTaskOpen(false);
-        await selectThread(created.thread_ref);
-      } else {
-        q('newTaskFeedback').className = 'feedback warning';
-        q('newTaskFeedback').textContent = 'Mac 已确认创建，任务正在自动同步，稍后会出现在列表中。';
-      }
-      return;
-    }
-    state.pendingCreate = {body, controllerAccepted: true};
-    renderNewTaskState();
-    q('newTaskFeedback').className = 'feedback warning';
-    q('newTaskFeedback').textContent = '请求仍在等待收据；可稍后用同一 request ID 检查结果。';
+    const result = await jsonFetch(`${API}/threads`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    controllerAccepted = true;
+    // SSE may have delivered the terminal receipt before this POST completed.
+    if (state.pendingCreate?.body.request_id === body.request_id) await handleCreateResult(result);
   } catch (error) {
-    state.pendingCreate = {body, controllerAccepted};
+    if (state.pendingCreate?.body.request_id !== body.request_id) return;
+    if (error.status >= 400 && error.status < 500) state.pendingCreate = null;
+    else state.pendingCreate = {body, controllerAccepted};
     renderNewTaskState();
     q('newTaskFeedback').className = 'feedback error';
     if (controllerAccepted) {
@@ -1406,6 +1424,31 @@ async function createThread(event) {
     state.createBusy = false;
     q('createTaskButton').disabled = state.pendingCreate ? !navigator.onLine : !(hostCanCreate() && state.projects.length > 0);
     q('createTaskButton').textContent = state.pendingCreate ? '继续检查' : '创建并打开';
+  }
+}
+
+async function handleCreateResult(result) {
+  const pending = state.pendingCreate;
+  if (!pending || result.request_id !== pending.body.request_id) return;
+  pending.controllerAccepted = true;
+  if (['submitted', 'accepted', 'pending'].includes(result.state)) {
+    q('newTaskFeedback').textContent = '请求已登记，等待 SSE 推送 Mac 确认；无需手动刷新';
+    return;
+  }
+  if (result.state !== 'confirmed' || result.action !== 'create' || !result.thread_ref) {
+    if (!['unknown', 'recovery_required'].includes(result.state)) state.pendingCreate = null;
+    renderNewTaskState();
+    q('newTaskFeedback').textContent = `创建未完成（${result.state || 'unknown'}）；草稿保留，请核对结果`;
+    return;
+  }
+  state.pendingCreate = null;
+  q('newTaskInput').value = '';
+  q('newTaskFeedback').textContent = 'Mac 已确认创建，正在打开同一个任务';
+  await addUnknownThread(result.thread_ref);
+  // Closing the sheet is a deliberate navigation; late receipts must not steal another task.
+  if (!q('newTaskSheet').classList.contains('hidden') && state.selectedHost === pending.body.host_ref) {
+    setNewTaskOpen(false);
+    await selectThread(result.thread_ref);
   }
 }
 
@@ -1439,13 +1482,14 @@ q('closeNewTask').onclick = () => setNewTaskOpen(false);
 q('cancelNewTask').onclick = () => setNewTaskOpen(false);
 q('modalBackdrop').onclick = () => { setNewTaskOpen(false); setProjectsOpen(false); setConnectionOpen(false); };
 document.addEventListener('keydown', event => {
-  const dialog = !q('newTaskSheet').classList.contains('hidden')
+  const dialog = !q('imageDialog').classList.contains('hidden') ? q('imageDialog') : q('projectPanel').classList.contains('open') ? q('projectPanel') : !q('newTaskSheet').classList.contains('hidden')
     ? q('newTaskSheet')
     : !q('connectionSheet').classList.contains('hidden')
       ? q('connectionSheet')
       : null;
   if (event.key === 'Escape' && (dialog || q('projectPanel').classList.contains('open'))) {
     event.preventDefault();
+    setImageOpen();
     setNewTaskOpen(false);
     setProjectsOpen(false);
     setConnectionOpen(false);
@@ -1473,15 +1517,19 @@ q('composer').onsubmit = event => {
   const detail = state.detail;
   const input = q('composerInput').value.trim();
   const action = detail ? composerAction(detail) : null;
-  if (!detail || !action || !input) { q('composerFeedback').className = 'composer-status warning'; q('composerFeedback').textContent = '请输入要发送的消息'; return; }
+  const attachments = currentAttachments();
+  if (!detail || !action || (!input && !attachments.length)) { q('composerFeedback').className = 'composer-status warning'; q('composerFeedback').textContent = '请输入消息或添加图片'; return; }
+  if (q('submitDirection').disabled) return;
+  if (attachments.length && (!hasCapability('image_input_v1') || (action === 'steer' && state.mode === 'native') || attachments.some(item => !item.image_ref || item.error || Date.parse(item.expires_at) <= Date.now()))) { renderAttachments(); q('composerFeedback').textContent = '图片尚未就绪，或当前发送方式不支持图片'; return; }
   if (!navigator.onLine || !writeAvailable()) { q('composerFeedback').className = 'composer-status warning'; q('composerFeedback').textContent = 'Mac 离线，草稿已保留且没有发送'; return; }
   const model = state.selectedModel && (action === 'continue' || state.mode === 'safe') ? state.selectedModel : '';
   const effort = state.selectedEffort && (action === 'continue' || state.mode === 'safe') ? state.selectedEffort : '';
-  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
-  else void submitAction('continue', {input, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
+  const images = attachments.length ? {image_refs: attachments.map(item => item.image_ref)} : {};
+  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
+  else void submitAction('continue', {input, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
 };
 q('composerInput').oninput = () => { if (state.selectedThread) state.drafts[state.selectedThread] = q('composerInput').value; resizeComposer(); };
-q('composerInput').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); q('composer').requestSubmit(); } };
+q('composerInput').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !window.matchMedia('(pointer: coarse)').matches) { event.preventDefault(); q('composer').requestSubmit(); } };
 q('conversationView').onscroll = () => { state.following = isNearConversationBottom(); if (state.following) q('newReplyButton').classList.add('hidden'); };
 q('newReplyButton').onclick = followLatestReply;
 window.addEventListener('online', () => { state.streamFailures.add('overview'); renderFreshness(); if (state.selectedHost) startOverviewStream(); if (state.selectedThread && document.body.classList.contains('detail-open')) { void loadThread(state.selectedThread); startEventStream(); } });
@@ -1495,8 +1543,9 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', updateViewportHeight);
 }
 
+initImageUi();
 updateViewportHeight();
-void refreshOverview({preserveDetail: false});
+void refreshOverview({preserveDetail: false}).then(() => { if (new URLSearchParams(location.search).get('new') === '1') setNewTaskOpen(true); });
 setInterval(renderFreshness, 1000);
 setInterval(() => {
   if (!navigator.onLine) return;
@@ -1505,5 +1554,9 @@ setInterval(() => {
 }, 5000);
 """
 
+
+from .desktop_image_ui import IMAGE_UI_JS
+
+DESKTOP_DASHBOARD_JS = IMAGE_UI_JS + DESKTOP_DASHBOARD_JS
 
 __all__ = ["DESKTOP_DASHBOARD_HTML", "DESKTOP_DASHBOARD_JS"]

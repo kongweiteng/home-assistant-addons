@@ -14,10 +14,16 @@ let statusReconnectTimer = null;
 let statusReconnectDelay = 1000;
 let statusLastMessageAt = 0;
 let csrfRefreshTimer = null;
+let toolVisibleCount = 12;
+let toolRenderKey = '';
+const expandedTools = new Set();
 const viewNames = new Set(['overview', 'tools', 'runners']);
+const requestedView = window.location.hash.replace(/^#/, '') || new URLSearchParams(window.location.search).get('view');
+const enteringTaskWorkspace = !viewNames.has(requestedView);
+if (enteringTaskWorkspace) window.location.replace('desktop/');
 
 function selectedView() {
-  const candidate = window.location.hash.replace(/^#/, '');
+  const candidate = window.location.hash.replace(/^#/, '') || new URLSearchParams(window.location.search).get('view');
   return viewNames.has(candidate) ? candidate : 'overview';
 }
 
@@ -116,15 +122,40 @@ function serviceText(value) {
 
 function renderTools() {
   const body = q('toolRows');
-  body.replaceChildren();
   if (!catalog) return;
   const serviceFilter = q('serviceFilter').value;
   const riskFilter = q('riskFilter').value;
-  for (const tool of catalog.tools) {
-    if (serviceFilter !== 'all' && tool.service !== serviceFilter) continue;
-    if (riskFilter !== 'all' && tool.risk_type !== riskFilter) continue;
-    const row = document.createElement('tr');
-    const name = document.createElement('td');
+  const search = (q('toolSearch')?.value || '').trim().toLocaleLowerCase();
+  const filtered = catalog.tools.filter(tool =>
+    (serviceFilter === 'all' || tool.service === serviceFilter)
+    && (riskFilter === 'all' || tool.risk_type === riskFilter)
+    && (!search || [tool.display_name, tool.name, serviceText(tool.service), ...(tool.intent_examples || [])].join(' ').toLocaleLowerCase().includes(search))
+  ).sort((left, right) => left.service.localeCompare(right.service) || left.display_name.localeCompare(right.display_name, 'zh-CN'));
+  const visible = filtered.slice(0, toolVisibleCount);
+  const key = JSON.stringify([visible, catalog.policy_error, search, serviceFilter, riskFilter, toolVisibleCount]);
+  q('toolCount').textContent = `显示 ${visible.length} / ${filtered.length} 项工具 · ${catalog.tools.filter(tool => tool.callable).length} 项可用`;
+  q('loadMoreTools').hidden = visible.length >= filtered.length;
+  if (key === toolRenderKey) return;
+  toolRenderKey = key;
+  const focusedTool = document.activeElement?.closest('[data-tool-name]')?.dataset.toolName;
+  body.replaceChildren();
+  let lastService = null;
+  for (const tool of visible) {
+    if (lastService !== tool.service) {
+      const heading = document.createElement('h2');
+      heading.className = 'tool-group-heading';
+      heading.textContent = serviceText(tool.service);
+      body.append(heading);
+      lastService = tool.service;
+    }
+    const row = document.createElement('details');
+    row.className = 'tool-card';
+    row.dataset.toolName = tool.name;
+    row.open = expandedTools.has(tool.name);
+    row.ontoggle = () => { if (row.open) expandedTools.add(tool.name); else expandedTools.delete(tool.name); };
+    const summary = document.createElement('summary');
+    const name = document.createElement('div');
+    name.className = 'tool-heading';
     const title = document.createElement('div');
     const technical = document.createElement('div');
     title.className = 'tool-name';
@@ -132,9 +163,11 @@ function renderTools() {
     technical.className = 'technical';
     technical.textContent = tool.name;
     name.append(title, technical);
-    const type = document.createElement('td');
-    type.append(serviceText(tool.service), document.createElement('br'), riskText(tool.risk_type));
-    const states = document.createElement('td');
+    summary.append(name, badge(tool.callable ? '可用' : '不可用', tool.callable ? 'good' : 'warn'));
+    const description = document.createElement('div');
+    description.className = 'tool-description';
+    const type = document.createElement('p');
+    type.textContent = `${serviceText(tool.service)} · ${riskText(tool.risk_type)}`;
     const badges = document.createElement('div');
     badges.className = 'badges';
     badges.append(
@@ -146,33 +179,29 @@ function renderTools() {
       ),
       badge(tool.callable ? '可调用' : '不可调用', tool.callable ? 'good' : 'bad'),
     );
-    states.append(badges);
-    const intent = document.createElement('td');
-    intent.className = 'intent';
-    intent.textContent = tool.intent_examples.join('；');
-    const recent = document.createElement('td');
+    const intent = document.createElement('p');
+    intent.textContent = `用途示例：${tool.intent_examples.join('；') || '暂无'}`;
+    const recent = document.createElement('p');
     recent.className = 'muted';
     recent.textContent = tool.last_invocation
-      ? `${tool.last_invocation.outcome} · ${tool.last_invocation.error_code || '无错误'} · ${tool.last_invocation.duration_ms}ms`
-      : '暂无';
-    const action = document.createElement('td');
+      ? `最近调用：${tool.last_invocation.outcome} · ${tool.last_invocation.error_code || '无错误'} · ${tool.last_invocation.duration_ms}ms`
+      : '最近调用：暂无';
     const toggle = document.createElement('button');
     toggle.className = `toggle ${tool.enabled ? 'on' : ''}`;
     toggle.textContent = tool.enabled ? '已开启' : '已关闭';
+    toggle.setAttribute('aria-label', `${tool.enabled ? '关闭' : '开启'} ${tool.display_name}`);
     toggle.disabled = catalog.policy_error !== null;
     toggle.onclick = () => setTool(tool, !tool.enabled, toggle);
-    action.append(toggle);
-    row.append(name, type, states, intent, recent, action);
+    description.append(type, badges, intent, recent, toggle);
+    row.append(summary, description);
     body.append(row);
+    if (focusedTool === tool.name) summary.focus({preventScroll: true});
   }
-  if (!body.children.length) {
-    const row = document.createElement('tr');
-    const cell = document.createElement('td');
-    cell.colSpan = 6;
-    cell.className = 'muted';
-    cell.textContent = '当前筛选条件下没有工具。';
-    row.append(cell);
-    body.append(row);
+  if (!visible.length) {
+    const empty = document.createElement('div');
+    empty.className = 'tool-empty muted';
+    empty.textContent = '没有找到工具，请尝试其他名称或筛选条件。';
+    body.append(empty);
   }
 }
 
@@ -729,7 +758,7 @@ function connectStatusStream() {
     if (source !== statusStream) return;
     statusReconnectDelay = 1000;
     statusLastMessageAt = Date.now();
-    setStatusStreamState('good', '实时已连接');
+    setStatusStreamState('warn', '已连接 · 等待数据');
   };
   const onFrame = event => {
     if (source !== statusStream) return;
@@ -834,8 +863,11 @@ q('closeRunnerCredential').onclick = closeCredentialRotation;
 q('runnerStateFilter').onchange = renderRunners;
 q('runnerPlatformFilter').onchange = renderRunners;
 q('reloadRunners').onclick = refreshRunners;
-q('serviceFilter').onchange = renderTools;
-q('riskFilter').onchange = renderTools;
+function resetToolFilter() { toolVisibleCount = 12; renderTools(); }
+q('serviceFilter').onchange = resetToolFilter;
+q('riskFilter').onchange = resetToolFilter;
+q('toolSearch').oninput = resetToolFilter;
+q('loadMoreTools').onclick = () => { toolVisibleCount += 12; renderTools(); };
 q('reloadTools').onclick = refresh;
 q('login').onclick = async () => {
   try { await call('api/auth/device/start'); await refresh(); } catch (error) { alert(error.message); }
@@ -852,11 +884,27 @@ q('logout').onclick = async () => {
 };
 
 activateView({scroll: false});
-refresh().finally(() => scheduleStatusReconnect(true));
+if (!enteringTaskWorkspace) refresh().finally(() => scheduleStatusReconnect(true));
 window.addEventListener('hashchange', () => activateView());
+for (const link of document.querySelectorAll('[data-view-link]')) {
+  link.addEventListener('click', event => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    const view = link.dataset.viewLink;
+    const url = new URL(window.location.href);
+    url.searchParams.set('view', view);
+    url.hash = view;
+    window.history.pushState({}, '', url);
+    activateView();
+  });
+}
+window.addEventListener('popstate', () => activateView());
 window.setInterval(() => {
   if (statusStream && statusLastMessageAt && Date.now() - statusLastMessageAt > 16000) {
     scheduleStatusReconnect();
+  } else if (statusStream?.readyState === EventSource.OPEN && statusLastMessageAt && q('statusStreamState').classList.contains('good')) {
+    const age = Math.floor((Date.now() - statusLastMessageAt) / 1000);
+    setStatusStreamState('good', age < 2 ? '实时已连接 · 刚刚收到' : `实时已连接 · ${age}秒前收到`);
   }
 }, 2000);
 window.addEventListener('offline', () => scheduleStatusReconnect());

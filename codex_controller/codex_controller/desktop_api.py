@@ -8,6 +8,7 @@ from urllib.parse import parse_qs
 
 from .desktop_service import DesktopControllerService
 from .store import StoreError
+from .desktop_images import IMAGE_REF_RE
 
 
 THREAD_PATH_RE = re.compile(r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})$")
@@ -33,6 +34,12 @@ def get_desktop_api(
     query: str,
 ) -> dict[str, Any]:
     parameters = _query(query)
+    if path.startswith("/api/desktop/v1/images/"):
+        _only(parameters, set())
+        image_ref = path.rsplit("/", 1)[-1]
+        if not IMAGE_REF_RE.fullmatch(image_ref):
+            raise StoreError("desktop_image_ref_invalid", "图片引用无效", status=400)
+        return service.image(image_ref)
     if path == "/api/desktop/v1/hosts":
         _only(parameters, set())
         return service.hosts()
@@ -82,6 +89,8 @@ def post_desktop_api(
     path: str,
     payload: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if path == "/api/desktop/v1/images":
+        return service.upload_image(payload)
     if path == "/api/desktop/v1/threads":
         return service.create(payload)
     queue_add = QUEUE_ADD_PATH_RE.fullmatch(path)

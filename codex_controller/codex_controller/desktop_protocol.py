@@ -8,6 +8,7 @@ import json
 import re
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
+from .desktop_images import validate_images
 
 
 DESKTOP_PROTOCOL_VERSION = 1
@@ -151,6 +152,7 @@ def build_desktop_command(
     now: dt.datetime,
     expected_turn_ref: str | None = None,
     input_text: str | None = None,
+    images: list[dict[str, str]] | None = None,
     mode: str | None = None,
     model: str | None = None,
     effort: str | None = None,
@@ -196,6 +198,8 @@ def build_desktop_command(
         document["expected_turn_ref"] = expected_turn_ref
     if input_text is not None:
         document["input"] = input_text
+    if images:
+        document["images"] = images
     if mode is not None:
         document["mode"] = mode
     if model is not None:
@@ -226,6 +230,7 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         "body_digest",
     }
     optional = {
+        "images",
         "project_ref",
         "expected_turn_ref",
         "input",
@@ -268,6 +273,13 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
     if expected_turn is not None:
         _ref(expected_turn, "TR")
     input_text = document.get("input")
+    if "images" in document:
+        if action not in {"continue", "create"} and not (action == "steer" and document.get("mode") == "safe"):
+            raise DesktopProtocolError("desktop_image_action_invalid", "该动作不支持图片")
+        try:
+            validate_images(document["images"])
+        except (ValueError, TypeError) as exc:
+            raise DesktopProtocolError("desktop_image_invalid", "图片内容无效") from exc
     if action in {"steer", "continue", "create", "queue_add", "queue_update"}:
         _safe_input(input_text)
     elif input_text is not None:
@@ -549,7 +561,8 @@ def _base(document: Mapping[str, Any], message_type: str) -> None:
     if document.get("version") != DESKTOP_PROTOCOL_VERSION or document.get("message_type") != message_type:
         raise DesktopProtocolError("desktop_version_invalid", "Desktop 协议版本或消息类型无效")
     _runner(document.get("runner_id"))
-    if len(canonical_json(document).encode("utf-8")) > MAX_DOCUMENT_BYTES:
+    maximum = 512 * 1024 if message_type == "desktop_command" else MAX_DOCUMENT_BYTES
+    if len(canonical_json(document).encode("utf-8")) > maximum:
         raise DesktopProtocolError("desktop_payload_too_large", "Desktop 文档过大")
 
 

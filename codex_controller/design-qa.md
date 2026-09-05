@@ -1,48 +1,53 @@
-# Codex Controller mobile/Web design QA
+# Controller scheme 1 responsive design QA
 
-**Comparison Target**
+Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.36.
 
-- Source visual truth: `/var/folders/9j/497_wvn523v1nh0cc48n_lnr0000gn/T/codex-clipboard-afd04192-94f8-4dc7-9b65-e2f279d33bef.jpg`, `/var/folders/9j/497_wvn523v1nh0cc48n_lnr0000gn/T/codex-clipboard-b6f0bb8d-68c0-4a17-911a-f83e889616e4.png`, `/var/folders/9j/497_wvn523v1nh0cc48n_lnr0000gn/T/codex-clipboard-4e15c8d8-b550-4603-ab5b-5df3428e0536.jpg`, and `/var/folders/9j/497_wvn523v1nh0cc48n_lnr0000gn/T/codex-clipboard-11817e0f-e66e-4fd6-8711-3ac9df1d3a1b.png`. These establish the prior desktop information architecture, the real narrow-phone failure state, and the mobile new-task sheet that needed correction. The Codex Mac light UI visible in the combined evidence is the approved visual direction rather than a pixel-identical mock.
-- Implementation screenshots: `/Users/kongweiteng/kwt/homeassistant/.build/codex-controller-0535-design-qa-evidence/new-task-mobile-390x700.png`, `/Users/kongweiteng/kwt/homeassistant/.build/codex-controller-0535-design-qa-evidence/new-task-mobile-cropped.png`, `/Users/kongweiteng/kwt/homeassistant/.build/codex-controller-0535-design-qa-evidence/controller-overview-desktop.png`, and `/Users/kongweiteng/kwt/homeassistant/.build/codex-controller-0535-design-qa-evidence/controller-overview-cropped.png`.
-- Viewport: mobile fixture `390 x 700` CSS pixels plus wide desktop capture. The host screenshots include browser chrome; fidelity judgment uses the cropped app regions.
-- State: light theme, task list behind a modal backdrop, new-task sheet open, task text focused, Runner without `create_thread_v1` so the primary action is intentionally disabled. Wide desktop evidence shows the same state and content.
-- Full-view comparison evidence: `/Users/kongweiteng/kwt/homeassistant/.build/codex-controller-0535-design-qa-evidence/new-task-comparison.png` places the prior narrow-phone source, Codex Mac light reference, and current implementation together in one image.
-- Focused region comparison evidence: `new-task-mobile-cropped.png` and `controller-overview-cropped.png` make typography, form spacing, focus ring, disabled state, sheet radius, and overflow readable. No further crop is needed because the task sheet is the highest-density and highest-risk mobile region.
+## Comparison target and evidence
 
-**Findings**
+- Source visual truth: approved scheme 1 prototype, light task-first layout. Private evidence directory: `.build/design-qa/codex-controller-responsive/` in the integration workspace. References: `scheme1-reference-desktop.png`, `scheme1-reference-mobile-list.png`, `scheme1-reference-mobile-detail.png`.
+- Implementation: actual Controller HTML/JS served by a loopback-only synthetic QA server, not production HA. Captures: `scheme1-desktop.png`, `scheme1-mobile-list.png`, `scheme1-mobile-detail.png`.
+- Viewports: desktop 1440 x 900; mobile 390 x 844; short-screen 390 x 500. Same light theme and task-list/active-conversation states. Reference retains a 34px prototype selector strip; synthetic task text and activity differ. Compare structure and controls, not demo chrome, exact message positions or synthetic latency.
+- Full-view combined evidence: `scheme1-compare-desktop.png`, `scheme1-compare-mobile-list.png`, `scheme1-compare-mobile-detail.png` place reference and implementation side by side at equal scale.
+- Focused combined evidence: `scheme1-compare-mobile-detail-header.png`, `scheme1-compare-mobile-detail-composer.png`. Controls remain readable without shrinking the full desktop comparison.
+- Additional states: `scheme1-mobile-short.png`, `scheme1-mobile-new.png`, `scheme1-mobile-image-draft.png`, `scheme1-mobile-image-lightbox.png`, `scheme1-mobile-tools.png`, `scheme1-mobile-settings.png`, `scheme1-mobile-runners.png`. Screenshots remain private, not shipped with the Add-on.
 
-- No actionable P0, P1, or P2 visual mismatch remains in the compared task-list/new-task surfaces.
-- Typography: the implementation consistently uses the Apple/PingFang system stack with restrained weights, readable line height, and clear title/label/helper hierarchy. Long Chinese copy wraps without collision; labels and disabled helper text remain legible. The light treatment is visibly closer to the approved Codex Mac direction than the earlier industrial dark surface.
-- Spacing and layout rhythm: the mobile sheet uses full-width controls, stable vertical gaps, a clear drag handle, large close target, and a bounded scroll container. The `390 x 700` state remains usable without horizontal overflow; the wide view preserves the three-column information architecture. Radii and borders are quiet and consistent rather than card-heavy.
-- Colors and tokens: warm off-white background, white surfaces, neutral text, blue focus, and semantic green/amber/red states form a coherent light token set. Contrast and focus indication are adequate in the captured states, and the modal backdrop separates context without visually burying it.
-- Image quality and asset fidelity: the workbench itself has no required product imagery, logo illustration, or decorative raster asset. No source asset was replaced by emoji, CSS art, placeholder illustration, or handcrafted SVG. The robot/avatar visible in screenshots belongs to the surrounding HA/browser environment and is not part of this implementation.
-- Copy and content: labels describe the same Mac task model in plain Chinese. The unavailable-create explanation is specific and placed next to the disabled action; the draft/request-ID recovery copy supports the non-duplicating behavior without exposing implementation noise in the main flow.
-- Icons and affordances: the critical controls use explicit text labels and native form affordances; close, cancel, and primary action are unambiguous. All critical mobile targets are at least 44 px and do not depend on hover.
-- Responsiveness and accessibility: the sheet is a bottom sheet on narrow screens and a centered dialog on wide screens; dynamic viewport and safe-area spacing prevent the earlier bottom-navigation/input overlap. Focus is visible, dialog focus is trapped, Escape closes it on keyboard devices, and disabled state is semantically expressed.
+## Findings and required fidelity surfaces
 
-**Open Questions**
+- No actionable visual P0/P1/P2 issue remains in the compared surfaces. Functional regression gates are separate; local QA is not production or handset acceptance.
+- Fonts and typography: system Apple/PingFang/sans-serif stack, restrained headings and muted metadata preserve reference hierarchy. Chinese task titles truncate within their boundary; messages wrap. Mobile composer text is 16px. Full timestamps and capability hints intentionally add traceability and density.
+- Spacing and layout: 350px desktop task column and flexible conversation reproduce scheme 1's two columns. Mobile is a list followed by full-screen conversation, with five navigation entries outside the scrolling list. Composer, receipts and conversation share bounded flex space. At 390 x 500 the input remains visible without horizontal overflow or overlap. Project choice is a dialog, not a permanent third column.
+- Colors and tokens: off-white list, light conversation, quiet gray borders, dark primary action and restrained semantic colors match the light direction. Activity summaries retain existing amber semantics rather than the demo blue. Image close uses explicit dark-on-white contrast.
+- Image quality and assets: official Phosphor icons match the prototype family; no handcrafted icon or decorative image substitute. Viewer uses contain and thumbnails intentionally crop. Preview shows the actual compressed upload, not a higher-quality original. A synthetic UI screenshot remained legible after compression; this does not establish quality for every photo or dense screenshot. Limits and a preview reminder are visible.
+- Copy and content: concise tasks/tools/status/settings navigation. Actual connection state replaces illustrative latency. Four delivery stages distinguish acceptance from Mac confirmation. Queue, image constraints and advanced model options are intentional extensions to the simpler prototype. The watermark and sample messages exist only in the private fixture.
+- Accessibility: main touch actions, image removal and close are at least 44px. Icons have explicit labels; disclosures and dialogs retain semantics. Mobile Enter preserves newlines, while desktop sending shortcuts remain. Physical keyboard, zoom and safe-area behavior require separate handset acceptance.
 
-- No product decision blocks handoff. A physical HA companion-app pass is still required for the real device keyboard, safe-area inset, browser zoom/text scaling, and public-network latency; that is runtime acceptance, not an actionable mismatch in the captured implementation.
-- The Controller settings page's new overview/tools/Runner section navigation has automated markup/responsive coverage but no separate same-state visual source target in this QA set. It is outside the strict task-sheet fidelity comparison and should be included in the physical phone smoke pass.
+## Patches since preceding QA
 
-**Patches Made Since Previous QA Pass**
+- Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
+- Separated management pages with grouped/searchable incremental tools and live status.
+- Added official icons, visible lightbox close contrast and 44px removal targets.
+- Corrected short-screen composer, project dialog placement and task-switch draft/receipt races.
+- Replaced create-result polling with bounded host SSE receipts and reconnect recovery.
+- Disambiguated execution-failure and recovery-required task filters.
 
-- Replaced the industrial dark presentation with a Codex-like light palette and quieter borders/elevation.
-- Added a `920px` single-column mobile/tablet mode, dynamic viewport height, safe-area padding, fixed composer handling, and five-item mobile navigation including connection status.
-- Made the new-task surface a bounded mobile bottom sheet; reduced narrow-screen textarea height, preserved two-column cancel/primary actions where practical, and kept the content internally scrollable for short screens and keyboards.
-- Added visible focus, keyboard focus trapping, Escape dismissal, explicit disabled/recovery copy, and responsive connection/status surfaces.
+## Interaction checks and boundaries
 
-**Implementation Checklist**
+- Local fixture exercised project scope, task selection, text task creation and exact mock receipt, tools search, management navigation, image upload/preview/remove, pure-image mock send and lazy history read.
+- Automated gates cover unknown receipts, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling.
+- Physical HA companion app, Mac image interpretation, same-original-task delivery and off-LAN latency remain pending. Mock receipts and screenshots cannot prove these.
+- New-task form is text-only; images can be added after creation. A new-task image picker remains a functional follow-up, not a completed feature.
 
-- [x] Compare the prior phone surface, Codex Mac light direction, and implementation in one combined artifact.
-- [x] Inspect the full mobile sheet and focused form region at the short `390 x 700` target.
-- [x] Inspect the same state in the wide desktop layout.
-- [x] Check typography, spacing, colors, image/asset fidelity, copy, icons, responsive behavior, interaction states, and accessibility.
-- [x] Confirm no actionable P0/P1/P2 finding remains.
-- [ ] Run the separate physical HA companion-app acceptance for keyboard/safe-area/text-scale and the overview/tools/Runner navigation.
+## Implementation checklist
 
-**Follow-up Polish**
+- [x] Compare reference and source in combined full and focused artifacts.
+- [x] Inspect typography, spacing, colors, assets, copy and responsiveness.
+- [x] Exercise local navigation, creation and conversation-image interactions.
+- [x] Resolve compared visual P0/P1/P2 findings.
+- [ ] Physical-phone keyboard, safe-area and zoom acceptance.
+- [ ] Production release/upgrade and actual off-LAN image/receipt/freshness acceptance.
 
-- P3: after physical-phone acceptance, consider replacing text-only bottom-navigation labels with the same official icon family used by the Codex desktop product. This is optional polish; the present labels are clearer than approximate or custom-drawn icons.
+## Follow-up polish
+
+- P3: consider more compact image-limit hints and receipts after physical-phone feedback, while retaining accessible safety information.
 
 final result: passed

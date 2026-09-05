@@ -28,6 +28,15 @@
 - Controller 通过 `homeassistant_api: true` 的运行时 Supervisor token，只调用 `http://supervisor/core/api` 下固定实体状态和固定 `switch.turn_on|turn_off`。没有任意 URL、实体、domain、service、温度或时间参数。
 - Home Assistant 2xx 只表示服务受理。微信必须明确提示以 AITO switch 的真实回读 `confirmed` 为准，不把提交成功当成车辆完成。
 
+## 方案 1 与图文对话（0.5.36）
+
+- 默认根入口进入任务工作台；旧 `?view=tools|runners|overview` 和 hash 书签继续可用。Web 双栏，手机底部导航与全屏对话；设置中的 Controller 登录与 Mac Runner 已登录账号是两个独立域。
+- 图片入口支持文件选择、粘贴、预览和移除。PNG/JPEG/WebP 在浏览器压缩到每张 64 KiB、最多 4 张；预览的是实际发送版本，文字截图不清晰时应先裁剪，不能把压缩版本称为原图。新建表单目前输入文字，创建后可继续发图。
+- POST `api/desktop/v1/images` 提交 host_ref/request_id/mime_type/data_base64；返回 image_ref/mime_type/byte_size/expires_at。GET `api/desktop/v1/images/{image_ref}` 仅通过同一 Ingress 身份边界和 X-CSRF-Token 显式读取；24 小时后过期，无公开永久 URL。
+- 图文消息提交 image_refs，不接受任意 URL/路径；能力为 image_input_v1。上传并不是发给 Mac，发送结果以 Mac 确认为准；过期附件可保留当前页面的压缩副本重传，未知命令仅显式同 request_id 核对。页面刷新会丢失尚未发送的内存草稿。
+- create/continue/safe steer 后端允许图片，native steer/queue 明确拒绝。原始图片字节只在受限命令内经过 WSS，SSE 和命令日志只保留图片引用。历史图片按需加载，缓存有界，推送刷新不清除已加载缩略图。
+- 新建只提交一次，随后 host SSE 提供最多 20 条 create_commands 状态。重连 ready 可恢复回执；回执迟到不会抢走已关闭新建页后的当前任务。
+
 ## Codex Desktop 原任务接管
 
 - `0.5.17` 完整保留 `0.5.16` 的 `/desktop` 独立 Ingress 工作台、Owner/IPC availability refresh 和 M8 owner-only 固定工具，以及 `/api/desktop/v1/hosts`、`projects`、`threads`、单 Thread、事件长轮询和 `steer`、`interrupt`、`continue`、`archive`、`unarchive` 控制契约。页面支持多 Mac、多项目、多原 Thread、状态/标题筛选、任务历史、实时事件、当前 App 模型目录和能力感知控制；手机采用单栏，桌面采用三栏。

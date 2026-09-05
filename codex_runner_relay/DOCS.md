@@ -1,5 +1,7 @@
 # Codex Runner Relay 使用说明
 
+`0.2.23` 的安装目录新增精确 Runner `0.3.24`，保留既有版本。图片字节只作为已有 Desktop 命令中的有界输入转发；Relay 不保存图片副本，不修改图片 TTL、任务身份或业务控制权限。
+
 ## 内部配置
 
 - `controller_base_url`：固定为 `http://local-codex-controller:8102`；旧短主机名、其他端口、HTTPS 和附加路径都会拒绝启动。

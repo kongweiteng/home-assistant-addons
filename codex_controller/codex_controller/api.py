@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlsplit
 from .app_server import AppServerError
 from .desktop_api import get_desktop_api, post_desktop_api
 from .desktop_dashboard import DESKTOP_DASHBOARD_HTML, DESKTOP_DASHBOARD_JS
+from .controller_shell import build_management_html
 from .desktop_service import DesktopControllerService
 from .runner_api import (
     RUNNER_ACTION_RE,
@@ -242,7 +243,7 @@ def create_server(
             time.sleep(5)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.5.35"
+        server_version = "CodexController/0.5.36"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -365,6 +366,9 @@ def create_server(
                 )
                 return
             if path.startswith("/api/desktop/v1/"):
+                if path.startswith("/api/desktop/v1/images/") and not self._csrf_authorized():
+                    self._json(HTTPStatus.FORBIDDEN, {"error": {"code": "csrf_invalid"}})
+                    return
                 if service.desktop_controller is None:
                     self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
                     return
@@ -757,7 +761,7 @@ def create_server(
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header(
                 "Content-Security-Policy",
-                "default-src 'self'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
+                "default-src 'self'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'self'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'",
             )
 
     return ThreadingHTTPServer((host, port), Handler)
@@ -790,6 +794,8 @@ DASHBOARD_HTML = """<!doctype html>
 <div id="runnerDetail" class="card hidden"><strong id="runnerDetailTitle">Runner 详情</strong><p id="runnerDetailBody" class="muted"></p></div></section>
 <div id="runnerDisabled" class="card notice hidden"><strong>Runner Center v2 已由 Add-on 配置关闭</strong><p class="muted">普通 Codex 对话、MCP、Remote Work v1、微信 Poller、通知和装修业务链路继续保持原行为。</p></div></section></main><nav class="mobile-nav" aria-label="移动端导航"><a class="active" data-view-link="overview" href="#overview">总览</a><a class="primary" href="desktop/">任务</a><a data-view-link="tools" href="#tools">工具</a><a data-view-link="runners" href="#runners">Runner</a></nav></div><script src="app.js"></script></body></html>"""
 
+
+DASHBOARD_HTML = build_management_html(DASHBOARD_HTML)
 
 _LEGACY_DASHBOARD_JS_031 = r"""const q=id=>document.getElementById(id);let csrf='',catalog=null,statusDoc=null;
 function requestId(){const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('')}

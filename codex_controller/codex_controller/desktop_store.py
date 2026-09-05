@@ -741,8 +741,16 @@ class DesktopStore:
                 "SELECT * FROM desktop_commands WHERE thread_ref=? ORDER BY created_at DESC LIMIT 1",
                 (thread_ref,),
             ).fetchone()
+            image_commands = connection.execute(
+                "SELECT * FROM desktop_commands WHERE thread_ref=? AND json_type(command_json,'$.image_refs')='array' ORDER BY created_at DESC LIMIT 50",
+                (thread_ref,),
+            ).fetchall()
         result = self._thread_public(row, include_snapshot=True)
         result["latest_command"] = None if command is None else self._command_row(command)
+        result["image_messages"] = [
+            {**self._command_row(item), "input": json.loads(item["command_json"]).get("input", "")}
+            for item in reversed(image_commands)
+        ]
         return result
 
     def events(self, thread_ref: str, *, after_cursor: int, limit: int) -> dict[str, Any]:
@@ -1214,6 +1222,7 @@ class DesktopStore:
             "mode": command.get("mode"),
             "model": command.get("model"),
             "effort": command.get("effort"),
+            "image_refs": command.get("image_refs", []),
             "queue_ref": command.get("queue_ref"),
             "queue_refs": command.get("queue_refs"),
             "expected_turn_ref": command.get("expected_turn_ref"),

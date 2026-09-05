@@ -15,6 +15,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 ## 当前阶段
 
+- `0.5.36` 按方案 1 将默认入口设为任务，Web 两栏、手机列表/全屏对话；工具、运行设备与设置分开。既有对话可选图或粘贴、预览移除、仅图发送及按需查看历史图片；配套 Runner `0.3.24`/Relay `0.2.23`，继续复用 Mac 登录，不要求 OpenAI API Key。新建回执走 SSE，不重复 POST 轮询。新建表单当前仍为文字，创建后可在对话内加图；后端 create 已支持受控 image_refs。
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
 - `0.5.35` 将总览、任务列表和任务详情统一为 SSE 持久连接，支持增量帧、心跳、游标续传、裁剪后的有界 baseline 恢复以及网络/前台自动重连；首屏最近 40 个任务，后续滚动分页，不再使用页面长轮询。浅色移动优先界面在手机/平板采用单栏对话，在宽屏采用项目/任务/对话三栏，并保留新建、发送、公开思考摘要、模型/推理强度、队列、停止和归档闭环。配套 Runner `0.3.23` 使用持久 app-server 会话池与活动任务有界并发；仍复用 Mac Codex App 登录，不要求 OpenAI API Key，也不传输隐藏 reasoning。

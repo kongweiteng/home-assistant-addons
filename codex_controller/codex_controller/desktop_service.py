@@ -24,6 +24,8 @@ from .desktop_protocol import (
     validate_public_input,
 )
 from .desktop_store import DesktopStore
+from .desktop_image_store import DesktopImageStore, journal_command
+from .desktop_images import IMAGE_REF_RE
 from .runner_relay import RelayPublishError
 from .store import StoreError
 
@@ -69,6 +71,47 @@ class DesktopControllerService:
         self._thread_change_sequences: dict[str, int] = {}
         self._command_lock = threading.Lock()
         self._create_journal = _DesktopCreateJournal(store.database_path)
+        self._images = DesktopImageStore(store.database_path)
+
+    def upload_image(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if set(payload) != {"host_ref", "request_id", "mime_type", "data_base64"}:
+            raise StoreError("desktop_fields_invalid", "图片上传字段无效", status=400)
+        self._ref(payload.get("host_ref"), "HS")
+        if not isinstance(payload.get("request_id"), str) or not REQUEST_RE.fullmatch(payload["request_id"]):
+            raise StoreError("desktop_request_id_invalid", "图片上传请求编号无效", status=400)
+        self._image_capability(payload["host_ref"])
+        return self._images.upload(payload, now=self._now())
+
+    def image(self, image_ref: str) -> dict[str, Any]:
+        return self._images.get(image_ref, now=self._now())
+
+    def _image_capability(self, host_ref: str) -> None:
+        host = next((item for item in self.hosts()["hosts"] if item["host_ref"] == host_ref), None)
+        runner_id = self.store.host_runner_id(host_ref)
+        if self.runner_authorizer is None or not self.runner_authorizer(runner_id):
+            raise StoreError("desktop_runner_not_authorized", "当前主机不允许接收图片", status=403)
+        if not host or not host.get("online") or not host.get("control_enabled") or "image_input_v1" not in host.get("capabilities", []):
+            raise StoreError("desktop_image_capability_unavailable", "当前 Mac 未提供图片输入能力或已离线", status=409)
+
+    def _resolve_images(self, normalized: Mapping[str, Any], host_ref: str):
+        refs = normalized.get("image_refs")
+        if not refs:
+            return None
+        self._image_capability(host_ref)
+        return self._images.resolve(refs, host_ref=host_ref, now=self._now())
+
+    @staticmethod
+    def _normalize_image_refs(result: dict[str, Any], action: str) -> None:
+        if "image_refs" not in result:
+            return
+        refs = result["image_refs"]
+        if not isinstance(refs, list) or not 1 <= len(refs) <= 4 or any(not isinstance(ref, str) or not IMAGE_REF_RE.fullmatch(ref) for ref in refs) or len(set(refs)) != len(refs):
+            raise StoreError("desktop_image_refs_invalid", "每条消息最多添加 4 张不同图片", status=400)
+        if action not in {"continue", "create"} and not (action == "steer" and result.get("mode", "safe") == "safe"):
+            raise StoreError("desktop_image_action_invalid", "当前操作不支持图片，请使用继续对话或安全调整", status=400)
+        # Native text contracts require a non-empty text item even for image-only input.
+        if isinstance(result.get("input"), str) and not result["input"].strip():
+            result["input"] = "请查看附加图片。"
 
     def receive(self, event_type: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -99,6 +142,7 @@ class DesktopControllerService:
 
     def sweep(self) -> int:
         current = self._now().isoformat()
+        self._images.sweep(now=self._now())
         changed = self.store.sweep_commands(now=current) + self._create_journal.sweep(now=current)
         if changed:
             self._notify_change()
@@ -234,7 +278,9 @@ class DesktopControllerService:
 
     def thread(self, thread_ref: str) -> dict[str, Any]:
         self._ref(thread_ref, "TH")
-        return self.store.thread(thread_ref)
+        detail = self.store.thread(thread_ref)
+        detail["image_messages"] = self._create_journal.image_messages(thread_ref) + detail.get("image_messages", [])
+        return detail
 
     def events(
         self,
@@ -310,6 +356,7 @@ class DesktopControllerService:
                 "host_ref": host_ref,
                 "project_ref": project_ref,
                 "action": "create",
+                **({"image_refs": normalized["image_refs"]} if normalized.get("image_refs") else {}),
                 "input": normalized["input"],
                 "model": normalized.get("model"),
                 "effort": normalized.get("effort"),
@@ -336,6 +383,7 @@ class DesktopControllerService:
             expected_control_revision=None,
             action="create",
             input_text=str(normalized["input"]),
+            images=self._resolve_images(normalized, host_ref),
             model=normalized.get("model"),
             effort=normalized.get("effort"),
             now=current,
@@ -396,6 +444,7 @@ class DesktopControllerService:
                 "expected_thread_revision": normalized["thread_revision"],
                 "expected_turn_ref": normalized.get("expected_turn_ref"),
                 "action": action,
+                **({"image_refs": normalized["image_refs"]} if normalized.get("image_refs") else {}),
                 "input": normalized.get("input"),
                 "mode": normalized.get("mode"),
                 "model": normalized.get("model"),
@@ -444,6 +493,7 @@ class DesktopControllerService:
             action=action,
             expected_turn_ref=normalized.get("expected_turn_ref"),
             input_text=normalized.get("input"),
+            images=self._resolve_images(normalized, str(thread["host_ref"])),
             mode=normalized.get("mode"),
             model=normalized.get("model"),
             effort=normalized.get("effort"),
@@ -451,7 +501,7 @@ class DesktopControllerService:
             queue_refs=normalized.get("queue_refs"),
             now=current,
         )
-        stored, created = self.store.prepare_command(command=command, intent_digest=intent)
+        stored, created = self.store.prepare_command(command=journal_command(command), intent_digest=intent)
         if not created:
             return stored
         try:
@@ -761,9 +811,12 @@ class DesktopControllerService:
         if required is None:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
         allowed = required | ({"mode", "model", "effort"} if action == "steer" else {"model", "effort"} if action == "continue" else set())
+        if action in {"continue", "steer"}:
+            allowed |= {"image_refs"}
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop API 字段无效", status=400)
         result = dict(payload)
+        self._normalize_image_refs(result, action)
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not REQUEST_RE.fullmatch(request_id):
             raise StoreError("desktop_request_id_invalid", "Desktop request_id 无效", status=400)
@@ -817,10 +870,11 @@ class DesktopControllerService:
         if not isinstance(payload, Mapping):
             raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
         required = {"request_id", "host_ref", "project_ref", "input"}
-        allowed = required | {"model", "effort"}
+        allowed = required | {"model", "effort", "image_refs"}
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop 新任务字段无效", status=400)
         result = dict(payload)
+        self._normalize_image_refs(result, "create")
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not REQUEST_RE.fullmatch(request_id):
             raise StoreError("desktop_request_id_invalid", "Desktop request_id 无效", status=400)
@@ -1047,6 +1101,8 @@ class DesktopControllerService:
             data["resync_required"] = resync_required
         if include_host:
             data["host"] = self._host_document(scope_ref)
+        if scope_kind == "host":
+            data["create_commands"] = self._create_journal.host_commands(scope_ref)
         return {"event": event, "cursor": cursor, "data": data}
 
     def _host_document(self, host_ref: str) -> dict[str, Any]:
@@ -1096,6 +1152,27 @@ class DesktopControllerService:
 class _DesktopCreateJournal:
     """Durable create-request receipts without inventing a Controller Thread row."""
 
+    def host_commands(self, host_ref: str) -> list[dict[str, Any]]:
+        """Small replayable create receipts for every host SSE frame, without bodies."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT request_id,state,'create' AS action,updated_at,error_code,"
+                "json_extract(receipt_json,'$.thread_ref') AS thread_ref,"
+                "json_extract(receipt_json,'$.turn_ref') AS turn_ref "
+                "FROM desktop_thread_create_commands WHERE host_ref=? "
+                "ORDER BY updated_at DESC,request_id DESC LIMIT 20",
+                (host_ref,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def image_messages(self, thread_ref: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM desktop_thread_create_commands WHERE json_extract(receipt_json,'$.thread_ref')=? AND json_type(command_json,'$.image_refs')='array' ORDER BY created_at DESC LIMIT 5",
+                (thread_ref,),
+            ).fetchall()
+        return [{**self._row(row), "input": json.loads(row["command_json"]).get("input", "")} for row in reversed(rows)]
+
     _STATES = frozenset(
         {
             "pending",
@@ -1120,6 +1197,10 @@ class _DesktopCreateJournal:
                 "runner_id TEXT NOT NULL,host_ref TEXT NOT NULL,project_ref TEXT NOT NULL,state TEXT NOT NULL,"
                 "error_code TEXT,command_json TEXT,receipt_json TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,"
                 "orphan INTEGER NOT NULL DEFAULT 0,relay_delivered_at TEXT,runner_received_at TEXT,mac_confirmed_at TEXT)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS desktop_create_host_updates "
+                "ON desktop_thread_create_commands(host_ref,updated_at DESC,request_id DESC)"
             )
             columns = {
                 str(row["name"])
@@ -1165,7 +1246,7 @@ class _DesktopCreateJournal:
                     command["runner_id"],
                     command["host_ref"],
                     command["project_ref"],
-                    canonical_json(command),
+                    canonical_json(journal_command(command)),
                     command["created_at"],
                     command["created_at"],
                 ),
@@ -1352,6 +1433,7 @@ class _DesktopCreateJournal:
             "project_ref": row["project_ref"],
             "action": "create",
             "model": command.get("model"),
+            "image_refs": command.get("image_refs", []),
             "effort": command.get("effort"),
             "state": row["state"],
             "error_code": row["error_code"],

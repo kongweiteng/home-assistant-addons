@@ -26,7 +26,7 @@
 
 - ticket 与 Controller enrollment 使用同一短期 bearer 值，只能出现在 URL 路径和返回给请求方的安装脚本中，不得进入普通日志、健康状态或持久存储。
 - Relay 调用 Controller 的 `install-bootstrap` 只检查 pending、有效期、撤销/领取状态、Runner 平台和项目白名单，不消费 enrollment。
-- 返回脚本下载固定 installer，核对字节大小和 SHA-256，再下载并核对固定平台 bundle。Relay `0.2.21` 的滚动目录精确接受 Python `3.11.13`、Codex `0.146.0` 与 Runner `0.3.23`，同时保留已冻结的 `0.3.6/0.3.11/0.3.12/0.3.13/0.3.14/0.3.15/0.3.16/0.3.17/0.3.18/0.3.19/0.3.20/0.3.21/0.3.22` bootstrap；其他 Runner 版本仍拒绝。
+- 返回脚本下载固定 installer，核对字节大小和 SHA-256，再下载并核对固定平台 bundle。Relay `0.2.22` 的滚动目录精确接受 Python `3.11.13`、Codex `0.146.0` 与 Runner `0.3.23`，同时保留已冻结的 `0.3.6/0.3.11/0.3.12/0.3.13/0.3.14/0.3.15/0.3.16/0.3.17/0.3.18/0.3.19/0.3.20/0.3.21/0.3.22` bootstrap；其他 Runner 版本仍拒绝。
 - Controller 返回的 Registry `labels` 与 `policy_revision` 只作为摘要固定安装参数透传；Relay 不扩大、不缓存，也不据此拥有调度策略。
 - ticket 过期、撤销、领取、Runner 状态不允许或 Controller 拒绝时，对外统一返回不可用，不泄露具体票据内容。
 

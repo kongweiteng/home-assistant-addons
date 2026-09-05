@@ -14,7 +14,7 @@ import secrets
 import shutil
 import time
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .protocol import ProtocolError
 from .service import GatewayService
@@ -51,7 +51,7 @@ def create_server(
         ).decode("ascii").rstrip("=")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "WeixinGateway/0.4.7"
+        server_version = "WeixinGateway/0.4.9"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -72,11 +72,24 @@ def create_server(
                 document["csrf_token"] = csrf_token()
                 self._json(HTTPStatus.OK, document)
                 return
+            if path == "/api/status/stream":
+                self._status_stream()
+                return
             if path == "/api/users":
                 self._json(HTTPStatus.OK, {"version": 1, "result": service.users()})
                 return
             if path == "/api/conversations":
                 self._json(HTTPStatus.OK, {"version": 1, "result": service.conversations()})
+                return
+            if path == "/internal/v1/failures":
+                if not self._authorized():
+                    return
+                self._json(HTTPStatus.OK, {"version": 1, "result": service.failures()})
+                return
+            if path == "/internal/v1/failures/stream":
+                if not self._authorized():
+                    return
+                self._failure_stream()
                 return
             if path == "/api/qr/image":
                 qr = service.qr_image_path
@@ -275,6 +288,7 @@ def create_server(
             except Exception:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"code": "internal_error", "message": "微信网关操作失败，未返回私有详情。"}})
             else:
+                service.publish_status_change(details=True)
                 self._json(HTTPStatus.OK, {"version": 1, "result": result})
 
         def _call(self, callback: Any) -> None:
@@ -285,6 +299,7 @@ def create_server(
             except Exception:
                 self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": {"code": "internal_error", "message": "微信网关操作失败，未返回私有详情。"}})
             else:
+                service.publish_status_change(details=True)
                 self._json(HTTPStatus.OK, {"version": 1, "result": result})
 
         def _asset(self, status: HTTPStatus, content_type: str, body: bytes) -> None:
@@ -315,6 +330,59 @@ def create_server(
             self.end_headers()
             shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
 
+        def _failure_stream(self) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                for frame in service.failure_stream():
+                    if frame is None:
+                        encoded = b": keepalive\n\n"
+                    else:
+                        body = json.dumps(frame, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        encoded = f"event: failures\nid: {frame['revision']}\ndata: {body}\n\n".encode("utf-8")
+                    self.wfile.write(encoded)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
+
+        def _status_stream(self) -> None:
+            raw_cursor = self.headers.get("Last-Event-ID", "").strip()
+            if not raw_cursor:
+                raw_cursor = (parse_qs(urlsplit(self.path).query).get("last_event_id") or [""])[0]
+            try:
+                last_event_id = int(raw_cursor) if raw_cursor else None
+                if last_event_id is not None and last_event_id < 0:
+                    last_event_id = None
+            except ValueError:
+                last_event_id = None
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                for frame in service.status_stream(last_event_id=last_event_id):
+                    if frame is None:
+                        encoded = b": keepalive\n\n"
+                    else:
+                        frame["status"]["csrf_token"] = csrf_token()
+                        body = json.dumps(frame, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                        encoded = f"event: status\nid: {frame['revision']}\ndata: {body}\n\n".encode("utf-8")
+                    self.wfile.write(encoded)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
+                return
+
         def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
             body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             self._asset(status, "application/json; charset=utf-8", body)
@@ -336,8 +404,8 @@ def create_server(
 
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>微信网关</title>
-<style>body{margin:0;background:#0b1220;color:#edf4ff;font:15px system-ui}main{max-width:1180px;margin:auto;padding:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.card,.panel{background:#121c2e;border:1px solid #263751;border-radius:12px;padding:16px}.panel{margin-top:16px}.panel-head,.form-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.panel-head h2{margin:7px 0 0}.form-row{justify-content:flex-start;align-items:center;flex-wrap:wrap}.scope{display:inline-block;padding:3px 8px;border-radius:999px;background:#263751;color:#b9c9dd;font-size:12px}.scope.identity{background:#253f65;color:#bcd9ff}.scope.user{background:#214c42;color:#a8ead6}.summary{padding:12px;border:1px solid #263751;border-radius:10px;background:#0d1728}.notice{padding:10px 12px;border-left:3px solid #ffcb6b;background:#1b2230}b{font-size:22px;display:block;margin-top:8px}.muted{color:#91a4bd}.ok{color:#42d392}.warn{color:#ffcb6b}.error{color:#ff7b8b}code{color:#42d392;overflow-wrap:anywhere}button,input{border-radius:9px;padding:9px 12px;font:inherit}button{border:0;background:#2374e1;color:white;cursor:pointer;margin:2px}button.secondary{background:#314158}button.danger{background:#a83c4b}button:disabled{opacity:.45;cursor:not-allowed}input{border:1px solid #40516a;background:#0d1728;color:#edf4ff;min-width:220px}table{width:100%;border-collapse:collapse;min-width:820px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #263751;vertical-align:top;white-space:pre-line}.scroll{overflow:auto}.badge{display:inline-block;padding:3px 7px;border-radius:999px;background:#263751;font-size:12px}img{max-width:min(320px,calc(100% - 24px));background:white;padding:12px;border-radius:12px}.actions{display:flex;flex-wrap:wrap;gap:4px}.banner{min-height:22px;margin:10px 0}[hidden]{display:none!important}@media(max-width:640px){main{padding:16px}.panel-head{display:block}.panel-head .badge{margin-top:10px}}</style></head>
-<body><main><h1>微信网关</h1><p class="muted">一人一个 ClawBot，多身份共用同一 Controller/Codex；每个身份独立 Poller、会话路由和故障状态。</p><p id="banner" class="banner muted">正在加载安全状态…</p>
+<style>*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#edf4ff;font:15px system-ui;overflow-x:hidden}main{width:100%;max-width:1180px;margin:auto;padding:24px}.title-row{display:flex;align-items:center;justify-content:space-between;gap:12px}.title-row h1{margin-right:auto}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.card,.panel{background:#121c2e;border:1px solid #263751;border-radius:12px;padding:16px}.panel{margin-top:16px}.panel-head,.form-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.panel-head h2{margin:7px 0 0}.form-row{justify-content:flex-start;align-items:center;flex-wrap:wrap}.scope{display:inline-block;padding:3px 8px;border-radius:999px;background:#263751;color:#b9c9dd;font-size:12px}.scope.identity{background:#253f65;color:#bcd9ff}.scope.user{background:#214c42;color:#a8ead6}.summary{padding:12px;border:1px solid #263751;border-radius:10px;background:#0d1728}.notice{padding:10px 12px;border-left:3px solid #ffcb6b;background:#1b2230}b{font-size:22px;display:block;margin-top:8px}.muted{color:#91a4bd}.ok{color:#42d392}.warn{color:#ffcb6b}.error{color:#ff7b8b}code{color:#42d392;overflow-wrap:anywhere}button,input{max-width:100%;border-radius:9px;padding:9px 12px;font:inherit}button{border:0;background:#2374e1;color:white;cursor:pointer;margin:2px}button.secondary{background:#314158}button.danger{background:#a83c4b}button:disabled{opacity:.45;cursor:not-allowed}input{border:1px solid #40516a;background:#0d1728;color:#edf4ff;min-width:220px}table{width:100%;border-collapse:collapse;min-width:820px}th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #263751;vertical-align:top;white-space:pre-line}.scroll{max-width:100%;overflow:auto}.badge{display:inline-block;padding:3px 7px;border-radius:999px;background:#263751;font-size:12px}.realtime{white-space:nowrap}.realtime::before{content:'';display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:currentColor}img{max-width:min(320px,calc(100% - 24px));background:white;padding:12px;border-radius:12px}.actions{display:flex;flex-wrap:wrap;gap:4px}.banner{min-height:22px;margin:10px 0}[hidden]{display:none!important}@media(max-width:640px){main{padding:16px}.title-row{align-items:flex-start;flex-wrap:wrap}.title-row h1{width:100%;margin-bottom:0}.panel-head{display:block}.panel-head .badge{margin-top:10px}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.card{min-width:0;padding:13px}.card b{font-size:18px;overflow-wrap:anywhere}.form-row input{flex:1 1 220px}}</style></head>
+<body><main><div class="title-row"><h1>微信网关</h1><span id="realtimeState" class="badge realtime warn" role="status" aria-live="polite">实时链路连接中</span></div><p class="muted">一人一个 ClawBot，多身份共用同一 Controller/Codex；每个身份独立 Poller、会话路由和故障状态。</p><p id="banner" class="banner muted">正在加载安全状态…</p>
 <div class="grid"><div class="card">Owner Poller<b id="poller">加载中</b></div><div class="card">Poller 配置<b id="pollerDesired">加载中</b></div><div class="card">ClawBot 身份<b id="identityCount">-</b></div><div class="card">Owner 状态<b id="pairing">加载中</b></div><div class="card">有效用户<b id="activeUsers">-</b></div><div class="card">待提交<b id="pending">-</b></div><div class="card">待回复<b id="submitted">-</b></div></div>
 <section class="panel"><div class="panel-head"><div><span class="scope identity">Owner 身份</span><h2>Owner ClawBot</h2></div><span id="identityAccount" class="badge">尚未登录</span></div><p>这里仅初始化或重新认证当前 Owner 的 ClawBot。已有 Owner 时只接受同一 ClawBot、同一 Owner 扫码，不会清空成员、会话或历史任务。</p><p id="identityStatus" class="muted">正在读取身份状态…</p><button id="qrStart">扫码登录 Owner ClawBot</button><p id="qrState" class="muted">尚未生成二维码</p><img id="qrImage" hidden alt="Owner ClawBot 登录二维码"><div id="ownerVerify" class="form-row" hidden><input id="ownerVerifyCode" inputmode="numeric" autocomplete="one-time-code" placeholder="输入微信显示的数字"><button id="ownerVerifySubmit">提交验证码</button></div></section>
 <section class="panel" id="ownerSetupPanel"><div class="panel-head"><div><span class="scope user">首次初始化</span><h2>绑定 Owner</h2></div><span id="ownerSetupState" class="badge">等待状态</span></div><p>第一个向 Owner ClawBot 私聊发送正确绑定码的微信用户成为 Owner；绑定消息不会进入 Codex。</p><p id="ownerSetupText" class="muted">正在读取状态…</p><button id="pairStart">生成一次性绑定码</button><p id="pairCodeRow" hidden>本次绑定码：<code id="pairCode">尚未生成</code></p><p id="pairExpiry" class="muted"></p></section>
@@ -349,32 +417,37 @@ DASHBOARD_HTML = """<!doctype html>
 <section class="panel"><h2>安全状态</h2><p id="details" class="muted">加载中</p></section><script src="app.js"></script></main></body></html>"""
 
 
-DASHBOARD_JS = r"""const q=id=>document.getElementById(id);let csrf='',revision=0,pollerRevision=0,currentPairCode='',currentIdentityPresent=false,currentOnboarding='';
+DASHBOARD_JS = r"""const q=id=>document.getElementById(id);let csrf='',revision=0,pollerRevision=0,currentPairCode='',currentIdentityPresent=false,currentOnboarding='',statusSource=null,reconnectTimer=null,reconnectAttempt=0,lastStatusEventId='',latestStatus=null,latestUsers=[],lastDetailsRevision=-1,loadingDetailsRevision=null,detailsRequest=0;
 const requestId=()=>globalThis.crypto?.randomUUID?.().replaceAll('-','')||`${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const cell=text=>{const td=document.createElement('td');td.textContent=text??'—';return td};
 const button=(label,kind,handler)=>{const value=document.createElement('button');value.textContent=label;if(kind)value.className=kind;value.onclick=handler;return value};
-const formatTime=value=>{if(!value)return'';const date=new Date(value);return Number.isNaN(date.getTime())?value:date.toLocaleString('zh-CN',{hour12:false})};
+const formatTime=value=>{if(!value)return'';const date=new Date(value);return Number.isNaN(date.getTime())?value:date.toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'})};
 function banner(message,kind='muted'){q('banner').textContent=message;q('banner').className=`banner ${kind}`}
+function realtime(message,kind='warn'){q('realtimeState').textContent=message;q('realtimeState').className=`badge realtime ${kind}`}
 async function readJson(path){const response=await fetch(path,{cache:'no-store'}),document=await response.json();if(!response.ok)throw new Error(document.error?.message||document.error?.code||'读取失败');return document.result??document}
 async function mutate(path,method,payload){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(payload)}),document=await response.json();if(!response.ok)throw new Error(document.error?.message||document.error?.code||'操作失败');return document.result}
-async function userAction(user,action){try{const result=await mutate(`api/users/${user.wx_short}/${action}`,'POST',{revision,request_id:requestId()});revision=result.revision;banner('用户状态已更新','ok');await refresh()}catch(error){banner(error.message,'error')}}
-async function rename(user){const alias=prompt('输入新的用户别名',user.alias);if(alias===null)return;try{const result=await mutate(`api/users/${user.wx_short}`,'PATCH',{alias,revision,request_id:requestId()});revision=result.revision;banner('别名已更新','ok');await refresh()}catch(error){banner(error.message,'error')}}
-async function transfer(user){const confirmation=prompt(`确认把 Owner 转移给 ${user.alias}？请输入 TRANSFER_OWNER`,'');if(confirmation===null)return;try{const result=await mutate('api/owner-transfer','POST',{target_wx_short:user.wx_short,confirmation,revision,request_id:requestId()});revision=result.revision;banner('Owner 已转移，主动通知目标同步更新','ok');await refresh()}catch(error){banner(error.message,'error')}}
-async function pollerAction(action){try{const result=await mutate(`api/poller/${action}`,'POST',{revision:pollerRevision,request_id:requestId()});pollerRevision=result.revision;banner(action==='start'?'全部 Poller 已开启':'全部 Poller 已关闭','ok');await refresh()}catch(error){banner(error.message,'error');await refresh()}}
-async function startOnboarding(user=null){const alias=user?.alias||q('memberAlias').value.trim();if(!alias){banner('请先填写成员别名','warn');return}try{const result=await mutate('api/onboarding/start','POST',{alias,target_wx_short:user?.wx_short||null,revision,request_id:requestId(),ttl_seconds:900});revision=result.revision;currentOnboarding=result.session_short;q('onboardingCode').textContent=result.code||'请求已处理，接入码明文不会再次显示';banner(user?'已为现有成员生成独立 ClawBot 接入二维码':'成员接入二维码已生成，请通过可信渠道私发','warn');await refresh()}catch(error){banner(error.message,'error')}}
+async function userAction(user,action){try{const result=await mutate(`api/users/${user.wx_short}/${action}`,'POST',{revision,request_id:requestId()});revision=result.revision;banner('用户状态已更新，实时状态正在同步','ok')}catch(error){banner(error.message,'error')}}
+async function rename(user){const alias=prompt('输入新的用户别名',user.alias);if(alias===null)return;try{const result=await mutate(`api/users/${user.wx_short}`,'PATCH',{alias,revision,request_id:requestId()});revision=result.revision;banner('别名已更新，实时状态正在同步','ok')}catch(error){banner(error.message,'error')}}
+async function transfer(user){const confirmation=prompt(`确认把 Owner 转移给 ${user.alias}？请输入 TRANSFER_OWNER`,'');if(confirmation===null)return;try{const result=await mutate('api/owner-transfer','POST',{target_wx_short:user.wx_short,confirmation,revision,request_id:requestId()});revision=result.revision;banner('Owner 已转移，主动通知目标同步更新','ok')}catch(error){banner(error.message,'error')}}
+async function pollerAction(action){try{const result=await mutate(`api/poller/${action}`,'POST',{revision:pollerRevision,request_id:requestId()});pollerRevision=result.revision;banner(action==='start'?'全部 Poller 已开启':'全部 Poller 已关闭','ok')}catch(error){banner(error.message,'error')}}
+async function startOnboarding(user=null){const alias=user?.alias||q('memberAlias').value.trim();if(!alias){banner('请先填写成员别名','warn');return}try{const result=await mutate('api/onboarding/start','POST',{alias,target_wx_short:user?.wx_short||null,revision,request_id:requestId(),ttl_seconds:900});revision=result.revision;currentOnboarding=result.session_short;q('onboardingCode').textContent=result.code||'请求已处理，接入码明文不会再次显示';banner(user?'已为现有成员生成独立 ClawBot 接入二维码':'成员接入二维码已生成，请通过可信渠道私发','warn')}catch(error){banner(error.message,'error')}}
 function renderUsers(users){const body=q('usersBody');body.replaceChildren();if(!users.length){const row=document.createElement('tr');const td=cell('尚无用户');td.colSpan=7;row.append(td);body.append(row);return}for(const user of users){const row=document.createElement('tr');row.append(cell(`${user.alias}\n${user.wx_short}`),cell(`${user.role} / ${user.status}${user.has_context?' / context 已有':' / context 缺少'}`),cell(`${user.identity_short||'未绑定'}\n${user.binding_type||'—'} / ${user.identity_state||'—'} / ${user.identity_runtime_state||'—'}`),cell(user.conversation_short),cell(user.thread_short),cell(user.last_seen_at));const actions=document.createElement('td'),wrap=document.createElement('div');wrap.className='actions';wrap.append(button('改名','secondary',()=>rename(user)));if(user.role==='member'&&user.status==='active'){if(user.binding_type==='legacy_shared')wrap.append(button('绑定独立 ClawBot','',()=>startOnboarding(user)));wrap.append(button('暂停','secondary',()=>userAction(user,'suspend')),button('移除','danger',()=>userAction(user,'revoke')));if(user.binding_type==='primary'&&user.identity_state==='active')wrap.append(button('转为 Owner','',()=>transfer(user)))}else if(user.role==='member'&&user.status==='suspended'){wrap.append(button('恢复','',()=>userAction(user,'resume')),button('移除','danger',()=>userAction(user,'revoke')))}actions.append(wrap);row.append(actions);body.append(row)}}
 function renderIdentities(statusDocument){const body=q('identitiesBody');body.replaceChildren();const items=statusDocument.identities||[];if(!items.length){const row=document.createElement('tr');const td=cell('尚无 ClawBot 身份');td.colSpan=5;row.append(td);body.append(row);return}for(const item of items){const bindings=(item.bindings||[]).map(value=>`${value.alias} · ${value.wx_short} · ${value.role}/${value.binding_type}`).join('\n')||'等待绑定';const row=document.createElement('tr');row.append(cell(item.identity_short),cell(item.state),cell(item.runtime_state),cell(bindings),cell(`${formatTime(item.last_seen_at)||'—'}\n${item.last_error||'无错误'}`));body.append(row)}}
 function renderConversations(items){const body=q('conversationsBody');body.replaceChildren();if(!items.length){const row=document.createElement('tr');const td=cell('尚无会话');td.colSpan=5;row.append(td);body.append(row);return}for(const item of items){const row=document.createElement('tr');row.append(cell(`${item.alias} · ${item.wx_short}`),cell(item.conversation_short),cell(item.thread_short),cell(item.last_job_short),cell(formatTime(item.last_seen_at)));body.append(row)}}
 function renderPollerControls(status){const enabled=Boolean(status.poller_enabled),override=status.poller_override||'跟随配置默认',maintenance=status.poller_maintenance||{};q('pollerDesired').textContent=enabled?'已开启':'已关闭';q('pollerStart').disabled=enabled;q('pollerStop').disabled=!enabled;q('pollerControlText').textContent=`当前运行态：${status.poller_state} · desired：${enabled?'enabled':'disabled'} · 覆盖：${override} · 配置默认：${status.poller_default_enabled?'enabled':'disabled'} · revision：${status.poller_revision}${maintenance.active?` · 维护暂停至 ${formatTime(maintenance.expires_at)}`:''}`}
 function renderOwner(status,users){const pairingState=status.owner_pairing?.state||'unavailable',owner=users.find(user=>user.role==='owner'&&user.status==='active'),pollerStopped=['disabled','stopped'].includes(status.poller_state);currentIdentityPresent=Boolean(status.identity);q('identityAccount').textContent=currentIdentityPresent?status.identity.identity_short:'尚未登录';q('identityStatus').textContent=currentIdentityPresent?`Owner ClawBot 已就绪；当前 Poller 为 ${status.poller_state}。`:'尚未建立 Owner ClawBot，请先扫码登录。';q('qrStart').textContent=currentIdentityPresent?'重新认证同一 ClawBot':'扫码登录 Owner ClawBot';q('qrStart').disabled=!pollerStopped;q('qrState').textContent=`二维码状态：${status.qr.state}${status.qr.error_code?` / ${status.qr.error_code}`:''}`;q('qrImage').hidden=!status.qr.has_image;if(status.qr.has_image)q('qrImage').src=`api/qr/image?${Date.now()}`;q('ownerVerify').hidden=status.qr.state!=='need_verifycode';const bound=pairingState==='bound';q('ownerSetupPanel').hidden=bound;q('currentOwnerPanel').hidden=!bound;q('ownerSetupState').textContent=pairingState;q('pairStart').disabled=!currentIdentityPresent||status.poller_state!=='pairing'||pairingState==='waiting';q('ownerSetupText').textContent=!currentIdentityPresent?'请先完成 Owner ClawBot 扫码登录。':status.poller_state!=='pairing'?'首次绑定仅在 Poller 进入 pairing 后开放。':pairingState==='waiting'?'绑定码正在等待 Owner 发送。':'可以生成一次性 Owner 绑定码。';q('pairCodeRow').hidden=pairingState!=='waiting';if(pairingState==='waiting')q('pairCode').textContent=currentPairCode||'已生成，明文仅在生成时显示';else currentPairCode='';q('pairExpiry').textContent=pairingState==='waiting'&&status.owner_pairing?.expires_at?`有效期至 ${formatTime(status.owner_pairing.expires_at)}`:'';q('currentOwner').textContent=owner?`${owner.alias} · ${owner.wx_short} · ${owner.identity_short||'无 ClawBot'} · ${owner.has_context?'context 已有':'context 缺少'}`:'未找到唯一 active Owner。';q('onboardingStart').disabled=!bound||!status.poller_enabled}
 function renderOnboarding(status){const onboarding=status.onboarding||{},qr=onboarding.qr||{},current=qr.session_short?qr:onboarding.current||{};currentOnboarding=current.session_short||'';q('onboardingState').textContent=currentOnboarding?`会话 ${currentOnboarding} · ${qr.state||current.state}${current.expires_at?` · 有效期至 ${formatTime(current.expires_at)}`:''}${qr.error_code?` · ${qr.error_code}`:''}`:'暂无进行中的接入。';q('onboardingCancel').disabled=!currentOnboarding;q('onboardingImage').hidden=!qr.has_image;if(qr.has_image)q('onboardingImage').src=`api/onboarding/qr/image?${Date.now()}`;q('memberVerify').hidden=qr.state!=='need_verifycode'}
-async function refresh(){try{const [status,users,conversations]=await Promise.all([readJson('api/status'),readJson('api/users'),readJson('api/conversations')]);csrf=status.csrf_token;revision=users.revision;pollerRevision=status.poller_revision;q('poller').textContent=status.poller_state;renderPollerControls(status);q('identityCount').textContent=`${status.identities.identities.length} / ${status.identities.limits.max_active_identities}`;q('identityLimit').textContent=`最多 ${status.identities.limits.max_active_identities} 个活动身份`;q('pairing').textContent=status.owner_pairing?.state||'不可用';q('activeUsers').textContent=`${status.users.active} / ${status.users.total}`;q('pending').textContent=status.queue.messages.pending_controller;q('submitted').textContent=status.queue.messages.controller_submitted;q('details').textContent=`Controller ${status.controller_configured?'已配置':'未配置'} · capability ${status.controller_capability_state} · Remote Work ${status.remote_work.enabled?'已启用':'关闭'} · Agent ${status.remote_work.agent?.online?'online':'offline/unknown'} · Remote outbox ${status.remote_work.pending_outbox} · Owner context ${status.identity?.context_count??0} · spool ${status.queue.spool_bytes} bytes · error ${status.last_error||'无'}`;renderOwner(status,users.users);renderOnboarding(status);renderIdentities(status.identities);renderUsers(users.users);renderConversations(conversations.conversations);banner('状态已刷新','ok')}catch(error){banner(error.message,'error');q('details').textContent='状态读取失败'}}
+async function loadDetails(status){const target=Number(status.details_revision??status.users?.revision??0);if(target===lastDetailsRevision||target===loadingDetailsRevision)return;loadingDetailsRevision=target;const request=++detailsRequest;try{const [users,conversations]=await Promise.all([readJson('api/users'),readJson('api/conversations')]);if(request!==detailsRequest)return;revision=users.revision;latestUsers=users.users;lastDetailsRevision=target;renderUsers(users.users);renderConversations(conversations.conversations);if(latestStatus)renderOwner(latestStatus,latestUsers)}catch(error){if(request===detailsRequest)banner(error.message,'error')}finally{if(loadingDetailsRevision===target)loadingDetailsRevision=null}}
+function renderStatus(status){latestStatus=status;csrf=status.csrf_token||csrf;pollerRevision=status.poller_revision;q('poller').textContent=status.poller_state;renderPollerControls(status);q('identityCount').textContent=`${status.identities.identities.length} / ${status.identities.limits.max_active_identities}`;q('identityLimit').textContent=`最多 ${status.identities.limits.max_active_identities} 个活动身份`;q('pairing').textContent=status.owner_pairing?.state||'不可用';q('activeUsers').textContent=`${status.users.active} / ${status.users.total}`;q('pending').textContent=status.queue.messages.pending_controller;q('submitted').textContent=status.queue.messages.controller_submitted;q('details').textContent=`Controller ${status.controller_configured?'已配置':'未配置'} · capability ${status.controller_capability_state} · Remote Work ${status.remote_work.enabled?'已启用':'关闭'} · Agent ${status.remote_work.agent?.online?'online':'offline/unknown'} · Remote outbox ${status.remote_work.pending_outbox} · Owner context ${status.identity?.context_count??0} · spool ${status.queue.spool_bytes} bytes · error ${status.last_error||'无'}`;renderOwner(status,latestUsers);renderOnboarding(status);renderIdentities(status.identities);void loadDetails(status)}
+function handleStatusEvent(event){try{const frame=JSON.parse(event.data);if(!frame||typeof frame.revision!=='number'||!frame.status)throw new Error('实时状态格式无效');lastStatusEventId=String(event.lastEventId||frame.revision);reconnectAttempt=0;renderStatus(frame.status);realtime('实时 · 已连接','ok');if(q('banner').textContent==='正在加载安全状态…')banner('状态已实时同步','ok')}catch(error){banner(error.message,'error')}}
+function scheduleReconnect(){if(reconnectTimer!==null||!navigator.onLine)return;const delay=Math.min(30000,1000*(2**Math.min(reconnectAttempt,5)));reconnectAttempt+=1;realtime(`实时链路重连中 · ${Math.ceil(delay/1000)} 秒`,'warn');reconnectTimer=setTimeout(()=>{reconnectTimer=null;connectStatus()},delay)}
+function connectStatus(force=false){if(reconnectTimer!==null){clearTimeout(reconnectTimer);reconnectTimer=null}if(!navigator.onLine){realtime('实时链路离线，等待网络','error');return}if(statusSource){statusSource.close();statusSource=null}if(force)reconnectAttempt=0;const url=new URL('api/status/stream',location.href);if(lastStatusEventId)url.searchParams.set('last_event_id',lastStatusEventId);const source=new EventSource(url.href);statusSource=source;realtime('实时链路连接中','warn');source.addEventListener('status',handleStatusEvent);source.onopen=()=>realtime('实时 · 已连接','ok');source.onerror=()=>{if(statusSource!==source)return;source.close();statusSource=null;scheduleReconnect()}}
 q('onboardingStart').onclick=()=>startOnboarding();
 q('pollerStart').onclick=()=>pollerAction('start');
 q('pollerStop').onclick=()=>pollerAction('stop');
-q('onboardingCancel').onclick=async()=>{if(!currentOnboarding)return;try{const result=await mutate(`api/onboarding/${currentOnboarding}/cancel`,'POST',{revision,request_id:requestId()});revision=result.revision;currentOnboarding='';q('onboardingCode').textContent='已取消';banner('成员接入已取消','ok');await refresh()}catch(error){banner(error.message,'error')}};
-q('memberVerifySubmit').onclick=async()=>{if(!currentOnboarding)return;try{await mutate(`api/onboarding/${currentOnboarding}/verify`,'POST',{verify_code:q('memberVerifyCode').value});q('memberVerifyCode').value='';banner('验证码已提交','ok');await refresh()}catch(error){banner(error.message,'error')}};
-q('ownerVerifySubmit').onclick=async()=>{try{await mutate('api/qr/verify','POST',{verify_code:q('ownerVerifyCode').value});q('ownerVerifyCode').value='';banner('Owner 验证码已提交','ok');await refresh()}catch(error){banner(error.message,'error')}};
-q('qrStart').onclick=async()=>{if(currentIdentityPresent&&!confirm('只允许重新认证同一个 Owner ClawBot，且必须由当前 Owner 扫码。继续？'))return;try{await mutate('api/qr/start','POST',{});await refresh()}catch(error){banner(error.message,'error')}};
-q('pairStart').onclick=async()=>{try{const result=await mutate('api/owner-pairing/start','POST',{});currentPairCode=result.code;q('pairCode').textContent=currentPairCode;await refresh()}catch(error){banner(error.message,'error')}};
-refresh();setInterval(refresh,5000);"""
+q('onboardingCancel').onclick=async()=>{if(!currentOnboarding)return;try{const result=await mutate(`api/onboarding/${currentOnboarding}/cancel`,'POST',{revision,request_id:requestId()});revision=result.revision;currentOnboarding='';q('onboardingCode').textContent='已取消';banner('成员接入已取消','ok')}catch(error){banner(error.message,'error')}};
+q('memberVerifySubmit').onclick=async()=>{if(!currentOnboarding)return;try{await mutate(`api/onboarding/${currentOnboarding}/verify`,'POST',{verify_code:q('memberVerifyCode').value});q('memberVerifyCode').value='';banner('验证码已提交','ok')}catch(error){banner(error.message,'error')}};
+q('ownerVerifySubmit').onclick=async()=>{try{await mutate('api/qr/verify','POST',{verify_code:q('ownerVerifyCode').value});q('ownerVerifyCode').value='';banner('Owner 验证码已提交','ok')}catch(error){banner(error.message,'error')}};
+q('qrStart').onclick=async()=>{if(currentIdentityPresent&&!confirm('只允许重新认证同一个 Owner ClawBot，且必须由当前 Owner 扫码。继续？'))return;try{await mutate('api/qr/start','POST',{});banner('Owner 二维码流程已启动','ok')}catch(error){banner(error.message,'error')}};
+q('pairStart').onclick=async()=>{try{const result=await mutate('api/owner-pairing/start','POST',{});currentPairCode=result.code;q('pairCode').textContent=currentPairCode;banner('一次性绑定码已生成','ok')}catch(error){banner(error.message,'error')}};
+addEventListener('online',()=>connectStatus(true));addEventListener('offline',()=>{if(statusSource){statusSource.close();statusSource=null}if(reconnectTimer!==null){clearTimeout(reconnectTimer);reconnectTimer=null}realtime('实时链路离线，等待网络','error')});document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')connectStatus(true)});connectStatus();"""

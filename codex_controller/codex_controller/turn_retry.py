@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 import secrets
 from typing import Any
 
@@ -69,6 +70,53 @@ OBJECT_ERROR_TYPES: dict[str, tuple[str, str, bool]] = {
     ),
 }
 
+# Some Responses-compatible providers collapse their public machine error into
+# `codexErrorInfo="other"`.  Retain no provider text, but recover a stable,
+# allowlisted diagnosis when the bounded public message contains an unambiguous
+# marker.  Ordering is deliberate: auth/model/usage are definitive before the
+# broader network/server buckets.
+OTHER_MESSAGE_TYPES: tuple[tuple[re.Pattern[str], tuple[str, str, bool]], ...] = (
+    (
+        re.compile(r"(?:\b401\b|unauthori[sz]ed|authentication failed|invalid api[ -]?key|api[ -]?key[^\n]{0,32}(?:missing|required))", re.I),
+        ("unauthorized", "codex_unauthorized", False),
+    ),
+    (
+        re.compile(r"(?:unknown model|model[^\n]{0,80}(?:not found|does not exist|not supported|unavailable))", re.I),
+        ("model_unavailable", "model_unavailable", False),
+    ),
+    (
+        re.compile(r"(?:usage limit|quota exceeded|insufficient quota|billing limit)", re.I),
+        ("usage_limit_exceeded", "usage_limit_exceeded", False),
+    ),
+    (
+        re.compile(r"(?:rate limit|too many requests|\b429\b)", re.I),
+        ("rate_limit_exceeded", "rate_limit_exceeded", True),
+    ),
+    (
+        re.compile(r"(?:connection (?:failed|refused|reset)|network (?:error|unavailable)|timed? out|timeout)", re.I),
+        ("http_connection_failed", "upstream_http_connection_failed", True),
+    ),
+    (
+        re.compile(r"(?:server overloaded|temporarily unavailable|service unavailable|\b503\b)", re.I),
+        ("server_overloaded", "app_server_overloaded", True),
+    ),
+    (
+        re.compile(r"(?:bad request|invalid request|\b400\b)", re.I),
+        ("bad_request", "codex_bad_request", False),
+    ),
+)
+
+
+def _classify_other_message(error: Any) -> TurnErrorClassification:
+    message = error.get("message") if isinstance(error, dict) else None
+    if not isinstance(message, str) or not 1 <= len(message) <= 4096:
+        return TurnErrorClassification("other", "turn_failed", None, False)
+    for pattern, mapped in OTHER_MESSAGE_TYPES:
+        if pattern.search(message):
+            error_type, error_code, retryable = mapped
+            return TurnErrorClassification(error_type, error_code, None, retryable)
+    return TurnErrorClassification("other", "turn_failed", None, False)
+
 
 def _http_status(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
@@ -80,6 +128,19 @@ def _http_retryable(status: int | None) -> bool:
     return status is None or status in RETRYABLE_HTTP_STATUSES or 500 <= status <= 599
 
 
+def _response_attempts_classification(
+    status: int | None,
+) -> tuple[str, str, bool] | None:
+    """Recover a precise public diagnosis from a bounded HTTP status only."""
+
+    return {
+        400: ("bad_request", "codex_bad_request", False),
+        401: ("unauthorized", "codex_unauthorized", False),
+        429: ("rate_limit_exceeded", "rate_limit_exceeded", True),
+        503: ("server_overloaded", "app_server_overloaded", True),
+    }.get(status)
+
+
 def classify_turn_error(error: Any) -> TurnErrorClassification:
     """Classify a v2 TurnError without retaining message or additionalDetails."""
 
@@ -88,6 +149,8 @@ def classify_turn_error(error: Any) -> TurnErrorClassification:
         mapped = STRING_ERROR_TYPES.get(info)
         if mapped is not None:
             error_type, error_code, retryable = mapped
+            if info == "other":
+                return _classify_other_message(error)
             return TurnErrorClassification(error_type, error_code, None, retryable)
         return TurnErrorClassification("unknown", "turn_failed", None, False)
     if isinstance(info, dict) and len(info) == 1:
@@ -96,6 +159,10 @@ def classify_turn_error(error: Any) -> TurnErrorClassification:
         if mapped is not None:
             error_type, error_code, retryable_by_type = mapped
             status = _http_status(details.get("httpStatusCode")) if isinstance(details, dict) else None
+            if variant == "responseTooManyFailedAttempts":
+                status_mapped = _response_attempts_classification(status)
+                if status_mapped is not None:
+                    error_type, error_code, retryable_by_type = status_mapped
             retryable = retryable_by_type
             if variant != "activeTurnNotSteerable":
                 retryable = retryable_by_type and _http_retryable(status)

@@ -269,7 +269,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
         body = (package_root / "runner_manifest_v0324.json").read_bytes()
         self.assertEqual(
             hashlib.sha256(body).hexdigest(),
-            "53b83af8e2564edd58af925ffd8990f862cc4bbb682c1bdfa24d47e7a73a0569",
+            "4979abe4f6b880ebea7584e84e0d1f41e71f5663c36d527b29554e70236e646f",
         )
         self.assertIn(
             'with_name("runner_manifest_v0324.json")',

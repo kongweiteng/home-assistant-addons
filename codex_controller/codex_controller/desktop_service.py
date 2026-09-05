@@ -69,6 +69,7 @@ class DesktopControllerService:
         self._broadcast_sequence = 0
         self._host_change_sequences: dict[str, int] = {}
         self._thread_change_sequences: dict[str, int] = {}
+        self._change_listeners: list[Callable[[], None]] = []
         self._command_lock = threading.Lock()
         self._create_journal = _DesktopCreateJournal(store.database_path)
         self._images = DesktopImageStore(store.database_path)
@@ -84,6 +85,12 @@ class DesktopControllerService:
 
     def image(self, image_ref: str) -> dict[str, Any]:
         return self._images.get(image_ref, now=self._now())
+
+    def add_change_listener(self, listener: Callable[[], None]) -> None:
+        """Subscribe Controller-local projections without polling desktop state."""
+        with self._event_condition:
+            if listener not in self._change_listeners:
+                self._change_listeners.append(listener)
 
     def _image_capability(self, host_ref: str) -> None:
         host = next((item for item in self.hosts()["hosts"] if item["host_ref"] == host_ref), None)
@@ -279,8 +286,93 @@ class DesktopControllerService:
     def thread(self, thread_ref: str) -> dict[str, Any]:
         self._ref(thread_ref, "TH")
         detail = self.store.thread(thread_ref)
+        snapshot = dict(detail.get("snapshot") or {})
+        turns = snapshot.get("turns")
+        if isinstance(turns, list):
+            if len(turns) > 20:
+                snapshot["history_incomplete"] = True
+            snapshot["turns"] = turns[-20:]
+        detail["snapshot"] = snapshot
+        host = next(
+            (
+                item
+                for item in self.store.list_hosts()
+                if item.get("host_ref") == detail.get("host_ref")
+            ),
+            None,
+        )
+        capabilities = set((host or {}).get("capabilities") or [])
+        detail["history"] = {
+            "page_size": 20,
+            "paging_available": "history_paging_v1" in capabilities,
+            "search_available": "history_search_v1" in capabilities,
+        }
         detail["image_messages"] = self._create_journal.image_messages(thread_ref) + detail.get("image_messages", [])
         return detail
+
+    def history_query(
+        self,
+        thread_ref: str,
+        kind: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Publish a read-only query without taking the control mutex or journaling its text."""
+
+        self._ref(thread_ref, "TH")
+        normalized = self._normalize_history_query(kind, payload)
+        thread = self.store.thread(thread_ref)
+        runner_id = self._runner_id(thread_ref)
+        hosts = {host["host_ref"]: host for host in self.hosts()["hosts"]}
+        host = hosts.get(thread["host_ref"])
+        capability = "history_paging_v1" if kind == "page" else "history_search_v1"
+        if host is None or not host.get("online"):
+            raise StoreError("desktop_host_stale", "Desktop host 已离线，暂时无法读取历史", status=409)
+        if capability not in set(host.get("capabilities") or []):
+            raise StoreError(
+                "desktop_history_capability_unavailable",
+                "当前 Runner 版本不支持此历史功能，请先更新 Runner",
+                status=409,
+            )
+        if self.runner_authorizer is None or not self.runner_authorizer(runner_id):
+            raise StoreError(
+                "desktop_runner_not_authorized",
+                "Desktop Runner 未启用或缺少独立 Desktop capability",
+                status=403,
+            )
+        if self.publisher is None:
+            raise StoreError("desktop_relay_unavailable", "Desktop Relay 尚未配置", status=503)
+        action = "history_page" if kind == "page" else "history_search"
+        command = build_desktop_command(
+            runner_id=runner_id,
+            request_id=str(normalized["request_id"]),
+            host_ref=str(thread["host_ref"]),
+            project_ref=str(thread["project_ref"]),
+            thread_ref=thread_ref,
+            expected_thread_revision=int(thread["thread_revision"]),
+            expected_control_revision=None,
+            action=action,
+            cursor=normalized.get("cursor"),
+            limit=20,
+            query=normalized.get("query"),
+            now=self._now(),
+        )
+        try:
+            self.publisher.publish_desktop_command(runner_id, command)
+        except RelayPublishError as exc:
+            if exc.definitely_undelivered:
+                raise StoreError(exc.code, "Desktop Runner 当前离线，历史请求未发送", status=503) from exc
+            return {
+                "request_id": normalized["request_id"],
+                "state": "unknown",
+                "error_code": "relay_publish_indeterminate",
+            }
+        except Exception:
+            return {
+                "request_id": normalized["request_id"],
+                "state": "unknown",
+                "error_code": "relay_publish_indeterminate",
+            }
+        return {"request_id": normalized["request_id"], "state": "submitted"}
 
     def events(
         self,
@@ -866,6 +958,32 @@ class DesktopControllerService:
                 self._ref(item, "QS")
         return result
 
+    def _normalize_history_query(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if kind not in {"page", "search"} or not isinstance(payload, Mapping):
+            raise StoreError("desktop_history_query_invalid", "Desktop 历史请求无效", status=400)
+        required = {"request_id"} | ({"query"} if kind == "search" else set())
+        allowed = required | {"cursor"}
+        if required - set(payload) or set(payload) - allowed:
+            raise StoreError("desktop_fields_invalid", "Desktop 历史请求字段无效", status=400)
+        result = dict(payload)
+        request_id = result.get("request_id")
+        if not isinstance(request_id, str) or not REQUEST_RE.fullmatch(request_id):
+            raise StoreError("desktop_request_id_invalid", "Desktop request_id 无效", status=400)
+        cursor = result.get("cursor")
+        if cursor is not None:
+            prefix = "HC" if kind == "page" else "SC"
+            self._ref(cursor, prefix)
+        if kind == "search":
+            query = result.get("query")
+            if (
+                not isinstance(query, str)
+                or query != query.strip()
+                or not 1 <= len(query) <= 120
+                or any(ord(character) < 32 for character in query)
+            ):
+                raise StoreError("desktop_history_query_invalid", "搜索词需为 1–120 个可见字符", status=400)
+        return result
+
     def _normalize_create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, Mapping):
             raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
@@ -1130,6 +1248,13 @@ class DesktopControllerService:
                     self._thread_change_sequences.get(thread_ref, 0) + 1
                 )
             self._event_condition.notify_all()
+            listeners = tuple(self._change_listeners)
+        for listener in listeners:
+            try:
+                listener()
+            except Exception:
+                # A secondary UI projection must not block durable desktop state.
+                continue
 
     @staticmethod
     def _parse_time(value: Any) -> dt.datetime | None:

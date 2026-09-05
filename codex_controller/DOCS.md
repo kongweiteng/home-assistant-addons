@@ -1,9 +1,11 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.35`。
+当前版本：`0.5.37`。
 
 ## 瞬态 Turn 安全重试
 
+- `0.5.37` 在状态页增加最近错误摘要与独立错误中心。错误按组件与任务上下文区分，使用稳定错误码、短引用、上海时间和可重试标志；不显示微信用户、消息正文、URL、凭据或原始异常。错误流使用 SSE `error_revision`，变更后仅重取当前分页，不使用浏览器长轮询或全量错误加载。Controller 以既有 Gateway 内部 URL 和 Bearer 读取最小受保护失败目录，浏览器不访问 Gateway 管理 API。Runner `0.3.24`、Relay `0.2.23` 不变。
+- 同版本使用当前 Mac App 原生 cursor 分页读取较早 Turn 并搜索公开文本；页面每次最多合并 20 Turn，结果只从 Thread SSE 返回。原始 cursor 与搜索执行留在 Mac，Controller 不保存搜索词，也不会让只读历史请求阻塞发送、中断或其他控制。
 - `0.5.35` 将 Controller 总览、host 任务列表和 Thread 详情统一为 SSE 持久连接：变化即时增量推送，无变化只发送心跳；断线、网络恢复和页面回到前台会自动重连并从游标续传，裁剪或连续失败时执行有界 baseline 对账。首屏最近 40 个任务，后续滚动分页；手机/平板单栏和宽屏三栏都保留新建、发送、公开思考摘要、模型/推理强度、队列、停止与归档。配套 Runner `0.3.23` 使用持久会话池和有界并发，仍复用 Mac Codex App 登录且不要求 OpenAI API Key。
 - `0.5.32` 将 `/desktop` 改为聊天优先的实时工作台：默认只显示用户消息、Codex 回复和人类可读状态，运行细节折叠；输入框固定在底部，Enter 发送、Shift+Enter 换行，实时事件长轮询、8 秒列表同步、回到前台和网络恢复都会自动刷新。手机为列表到对话的单栏体验。后端写控制与无 API Key 路径不变。
 - `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
@@ -31,7 +33,7 @@
 ## 方案 1 与图文对话（0.5.36）
 
 - 默认根入口进入任务工作台；旧 `?view=tools|runners|overview` 和 hash 书签继续可用。Web 双栏，手机底部导航与全屏对话；设置中的 Controller 登录与 Mac Runner 已登录账号是两个独立域。
-- 图片入口支持文件选择、粘贴、预览和移除。PNG/JPEG/WebP 在浏览器压缩到每张 64 KiB、最多 4 张；预览的是实际发送版本，文字截图不清晰时应先裁剪，不能把压缩版本称为原图。新建表单目前输入文字，创建后可继续发图。
+- 图片入口支持文件选择、粘贴、预览和移除。PNG/JPEG/WebP 在浏览器压缩到每张 64 KiB、最多 4 张；预览的是实际发送版本，文字截图不清晰时应先裁剪，不能把压缩版本称为原图。相同能力覆盖新建表单，可用纯图或图文直接创建任务。
 - POST `api/desktop/v1/images` 提交 host_ref/request_id/mime_type/data_base64；返回 image_ref/mime_type/byte_size/expires_at。GET `api/desktop/v1/images/{image_ref}` 仅通过同一 Ingress 身份边界和 X-CSRF-Token 显式读取；24 小时后过期，无公开永久 URL。
 - 图文消息提交 image_refs，不接受任意 URL/路径；能力为 image_input_v1。上传并不是发给 Mac，发送结果以 Mac 确认为准；过期附件可保留当前页面的压缩副本重传，未知命令仅显式同 request_id 核对。页面刷新会丢失尚未发送的内存草稿。
 - create/continue/safe steer 后端允许图片，native steer/queue 明确拒绝。原始图片字节只在受限命令内经过 WSS，SSE 和命令日志只保留图片引用。历史图片按需加载，缓存有界，推送刷新不清除已加载缩略图。

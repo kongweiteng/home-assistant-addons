@@ -67,6 +67,8 @@ CONTROLLER_FAILURE_MESSAGES = {
     "context_window_exceeded": "这次对话内容过长，已停止处理。请新开一个对话或缩短问题后重试。",
     "session_budget_exceeded": "Codex 当前会话预算已用完，任务未完成。请新开一个对话后再试。",
     "usage_limit_exceeded": "Codex 当前使用额度受限，任务未完成。请稍后再试或检查账户额度。",
+    "rate_limit_exceeded": "上游请求过于频繁，任务暂未完成。请稍后再试。",
+    "model_unavailable": "当前配置的模型在上游端点不可用，任务未开始执行。",
     "codex_unauthorized": "Codex 登录已失效，任务未执行完成。请在 Controller 页面重新登录后再试。",
     "codex_bad_request": "本次请求不受支持，且未自动重试。请调整问题后再试。",
     "cyber_policy_rejected": "该请求未通过安全策略，未执行。",
@@ -80,18 +82,108 @@ CONTROLLER_FAILURE_MESSAGES = {
     "response_too_many_failed_attempts": "上游连续失败，自动重试后仍未完成。请稍后再试。",
     "upstream_internal_server_error": "上游服务发生内部错误，自动重试后仍未完成。请稍后再试。",
 }
+CONTROLLER_FAILURE_ACTIONS = {
+    "context_window_exceeded": "新建任务，或缩短输入和历史上下文后重试。",
+    "session_budget_exceeded": "新建任务后重试。",
+    "usage_limit_exceeded": "稍后重试，并在 Codex 中检查当前账户额度。",
+    "rate_limit_exceeded": "等待一分钟后重试；若持续出现，请检查上游服务限流状态。",
+    "model_unavailable": "检查 Controller 当前模型与自定义 Responses API 的模型映射。",
+    "codex_unauthorized": "在 Codex Controller 中恢复登录后重试。",
+    "codex_bad_request": "调整请求内容后重新发送。",
+    "cyber_policy_rejected": "检查请求是否超出当前安全策略允许范围。",
+    "sandbox_error": "检查任务运行环境和权限边界后重试。",
+    "thread_rollback_failed": "新建任务后重试，不要继续使用当前异常会话。",
+    "active_turn_not_steerable": "等待当前任务结束，或在 Codex 页面停止当前任务后重试。",
+    "app_server_overloaded": "等待服务恢复后重试。",
+    "upstream_http_connection_failed": "检查网络和 Runner 在线状态，恢复后重试。",
+    "response_stream_connection_failed": "检查网络和 Runner 在线状态，恢复后重试。",
+    "response_stream_disconnected": "检查网络和 Runner 在线状态，恢复后重试。",
+    "response_too_many_failed_attempts": "检查网络、Runner 和上游服务状态后重试。",
+    "upstream_internal_server_error": "等待上游服务恢复后重试。",
+}
+CONTROLLER_TRANSIENT_FAILURES = frozenset(
+    {
+        "app_server_overloaded",
+        "upstream_http_connection_failed",
+        "response_stream_connection_failed",
+        "response_stream_disconnected",
+        "response_too_many_failed_attempts",
+        "upstream_internal_server_error",
+        "rate_limit_exceeded",
+    }
+)
+PUBLIC_ERROR_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def controller_failure_details(state: str, error_code: Any) -> dict[str, Any]:
+    """Return a bounded public diagnosis without exposing raw upstream details."""
+
+    safe_code = error_code if isinstance(error_code, str) and PUBLIC_ERROR_CODE_RE.fullmatch(error_code) else None
+    if state == "recovery_required":
+        return {
+            "code": safe_code or "recovery_required",
+            "title": "任务状态需要人工核对",
+            "message": "任务执行状态不确定，系统没有自动重复执行。",
+            "recommended_action": "在 Codex Controller 中核对任务状态后再决定是否重试。",
+            "retryable": False,
+            "severity": "warning",
+        }
+    if state == "cancelled":
+        return {
+            "code": "cancelled",
+            "title": "任务已取消",
+            "message": "任务已取消，没有继续执行。",
+            "recommended_action": "如仍需处理，请重新发送请求。",
+            "retryable": True,
+            "severity": "info",
+        }
+    message = CONTROLLER_FAILURE_MESSAGES.get(
+        safe_code,
+        "任务未完成，系统保留了可用于定位问题的稳定错误码。",
+    )
+    return {
+        "code": safe_code or "controller_task_failed",
+        "title": "Codex 任务执行失败",
+        "message": message,
+        "recommended_action": CONTROLLER_FAILURE_ACTIONS.get(
+            safe_code,
+            "在 Codex Controller 错误中心按错误码检查 Runner、登录和上游服务状态。",
+        ),
+        "retryable": safe_code in CONTROLLER_TRANSIENT_FAILURES,
+        "severity": "error",
+    }
 
 
 def controller_failure_message(state: str, error_code: Any) -> str:
-    if state == "recovery_required":
-        return "任务状态需要人工核对，请在 Codex Controller 页面查看。"
-    if state == "cancelled":
-        return "任务已取消。"
-    if isinstance(error_code, str):
-        mapped = CONTROLLER_FAILURE_MESSAGES.get(error_code)
-        if mapped is not None:
-            return mapped
-    return "任务未完成，请在 Codex Controller 页面查看错误状态。"
+    details = controller_failure_details(state, error_code)
+    return (
+        f"{details['message']}\n"
+        f"错误码：{details['code']}\n"
+        f"建议：{details['recommended_action']}"
+    )
+
+
+def gateway_failure_details(error_code: Any) -> dict[str, Any]:
+    """Return a bounded diagnosis for failures in the Weixin delivery path."""
+
+    safe_code = error_code if isinstance(error_code, str) and PUBLIC_ERROR_CODE_RE.fullmatch(error_code) else None
+    actions = {
+        "session_expired": "在微信网关中重新登录对应机器人身份后重试。",
+        "identity_runtime_unavailable": "检查微信机器人身份状态，恢复运行后重试。",
+        "credential_missing": "在微信网关中补齐已登记的运行凭据。",
+        "controller_capability_incompatible": "升级 Codex Controller 后重试。",
+    }
+    return {
+        "code": safe_code or "gateway_delivery_failed",
+        "title": "微信消息链路失败",
+        "message": "微信网关未能完成消息接收、提交或回复。",
+        "recommended_action": actions.get(
+            safe_code,
+            "在 Codex Controller 错误中心检查微信网关身份、网络和 Controller 连接状态。",
+        ),
+        "retryable": safe_code not in {"credential_missing", "controller_capability_incompatible"},
+        "severity": "error",
+    }
 
 
 def validate_controller_url(value: str) -> str:
@@ -430,7 +522,19 @@ class GatewayService:
         self._qr_task: asyncio.Task[Any] | None = None
         self._member_qr_task: asyncio.Task[Any] | None = None
         self._tasks: list[asyncio.Task[Any]] = []
-        self._status_lock = threading.Lock()
+        # Browser status subscribers are notified by runtime/store mutation
+        # paths.  Heartbeats never rebuild the status document, so an idle
+        # management page does not turn into a periodic database reader.
+        self._status_condition = threading.Condition()
+        self._status_revision = 0
+        self._status_details_revision = 0
+        # The internal Controller attachment must be event driven: it waits on
+        # this condition instead of repeatedly reading the failure directory.
+        # The revision is intentionally process-local.  A reconnect sends a
+        # fresh snapshot, so an add-on restart cannot leave a subscriber stale.
+        self._failure_condition = threading.Condition()
+        self._failure_revision = 0
+        self._failure_fingerprint = ""
         self._stop = asyncio.Event()
         self._outbound_lock = asyncio.Lock()
         self._authorization_lock = asyncio.Lock()
@@ -446,6 +550,67 @@ class GatewayService:
 
     def bind_remote_work_runtime(self, runtime: GatewayRemoteWorkRuntime) -> None:
         self.remote_work_runtime = runtime
+        self.publish_status_change()
+
+    def publish_status_change(self, *, details: bool = False) -> None:
+        """Advance the process-local public status revision and wake browsers."""
+        with self._status_condition:
+            self._status_revision += 1
+            if details:
+                self._status_details_revision += 1
+            self._status_condition.notify_all()
+
+    def status_stream(
+        self,
+        *,
+        last_event_id: int | None = None,
+        heartbeat_seconds: float = 12.0,
+    ):
+        """Yield immediate bounded snapshots, then block until status changes.
+
+        ``last_event_id`` is accepted as a reconnect cursor.  A fresh snapshot
+        is still emitted immediately because revisions are process-local and
+        may restart after an add-on upgrade or reboot.
+        """
+        if (
+            isinstance(heartbeat_seconds, bool)
+            or not isinstance(heartbeat_seconds, (int, float))
+            or not 1 <= heartbeat_seconds <= 60
+        ):
+            raise ValueError("status heartbeat must be between 1 and 60 seconds")
+        if last_event_id is not None and (isinstance(last_event_id, bool) or last_event_id < 0):
+            raise ValueError("status last event id must be a non-negative integer")
+        observed_revision: int | None = None
+        first_frame = True
+        while True:
+            emit_snapshot = True
+            with self._status_condition:
+                if first_frame:
+                    observed_revision = self._status_revision
+                    first_frame = False
+                else:
+                    assert observed_revision is not None
+                    changed = self._status_condition.wait_for(
+                        lambda: self._status_revision != observed_revision,
+                        timeout=heartbeat_seconds,
+                    )
+                    if not changed:
+                        emit_snapshot = False
+                    else:
+                        observed_revision = self._status_revision
+            if not emit_snapshot:
+                yield None
+                continue
+            assert observed_revision is not None
+            revision = observed_revision
+            # Build outside the Condition so mutation paths never block on
+            # SQLite reads.  If a mutation races this snapshot, the advanced
+            # revision remains pending and causes the next frame immediately.
+            yield {
+                "version": 1,
+                "revision": revision,
+                "status": self.status(),
+            }
 
     async def start(self) -> None:
         await self.controller.start()
@@ -467,6 +632,7 @@ class GatewayService:
             )
             self.poller_enabled = True
             await self._start_pollers_unlocked()
+            self.publish_status_change()
             return {**response, "poller_state": self.poller_state}
 
     async def stop_poller(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -479,6 +645,7 @@ class GatewayService:
             )
             self.poller_enabled = False
             await self._stop_pollers_unlocked()
+            self.publish_status_change()
             return {**response, "poller_state": self.poller_state}
 
     async def pause_poller_maintenance(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -508,6 +675,7 @@ class GatewayService:
             )
             self._poller_maintenance_task = task
             self._tasks.append(task)
+            self.publish_status_change()
             return self._poller_maintenance_document()
 
     async def resume_poller_maintenance(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -523,6 +691,7 @@ class GatewayService:
             self._cancel_poller_maintenance_unlocked()
             if resume_enabled and self.poller_enabled:
                 await self._start_pollers_unlocked()
+            self.publish_status_change()
             return self._poller_maintenance_document()
 
     async def _poller_maintenance_timeout(self, request_id: str, duration_seconds: int) -> None:
@@ -534,6 +703,7 @@ class GatewayService:
             self._clear_poller_maintenance_unlocked()
             if resume_enabled and self.poller_enabled:
                 await self._start_pollers_unlocked()
+            self.publish_status_change()
 
     def _poller_maintenance_document(self, *, replayed: bool = False) -> dict[str, Any]:
         active = self._poller_maintenance_request_id is not None
@@ -609,6 +779,7 @@ class GatewayService:
             self._set_runtime_state(runtime, "stopped")
         self.token_lock = None
         self.poller_state = "stopped"
+        self.publish_status_change()
 
     async def stop(self) -> None:
         self._stop.set()
@@ -733,11 +904,13 @@ class GatewayService:
         except StoreError as exc:
             if exc.code != "identity_not_found":
                 raise
+        self.publish_status_change(details=True)
 
     def _touch_runtime_message(self, runtime: IdentityRuntime) -> None:
         runtime.last_message_at = utc_now()
         if self.identity is not None and runtime.identity_id == self.identity["identity_id"]:
             self.last_message_at = runtime.last_message_at
+        self.publish_status_change(details=True)
 
     @staticmethod
     def _ilink_response_code(response: dict[str, Any]) -> int:
@@ -974,6 +1147,7 @@ class GatewayService:
         await runtime.client.close()
         self._runtimes.pop(runtime.identity_id, None)
         self.identity_store.remove_identity(runtime.identity)
+        self.publish_status_change(details=True)
 
     async def _poll_loop(self, runtime: IdentityRuntime | None = None) -> None:
         current = runtime or self._runtime_for_identity(None)
@@ -1004,6 +1178,7 @@ class GatewayService:
                     current.last_error = "poll_failed"
                     if self.identity is not None and current.identity_id == self.identity["identity_id"]:
                         self.last_error = "poll_failed"
+                    self.publish_status_change()
                     await asyncio.sleep(30 if failures >= 3 else 2)
                     if failures >= 3:
                         failures = 0
@@ -1013,6 +1188,7 @@ class GatewayService:
                 if self.identity is not None and current.identity_id == self.identity["identity_id"]:
                     self.last_poll_at = current.last_poll_at
                 self.store.set_identity_runtime_state(current.identity_id, current.poller_state)
+                self.publish_status_change()
                 for raw_message in response.get("msgs") or []:
                     if isinstance(raw_message, dict):
                         await self._ingest(raw_message, current)
@@ -1029,12 +1205,14 @@ class GatewayService:
                 current.last_error = exc.code
                 if self.identity is not None and current.identity_id == self.identity["identity_id"]:
                     self.last_error = exc.code
+                self.publish_status_change()
                 await asyncio.sleep(30 if failures >= 3 else 2)
             except Exception:
                 failures += 1
                 current.last_error = "poll_failed"
                 if self.identity is not None and current.identity_id == self.identity["identity_id"]:
                     self.last_error = "poll_failed"
+                self.publish_status_change()
                 await asyncio.sleep(30 if failures >= 3 else 2)
 
     async def _ingest(self, raw_message: dict[str, Any], runtime: IdentityRuntime | None = None) -> None:
@@ -1574,7 +1752,7 @@ class GatewayService:
                                         message.get("user_hash"), stored_profile
                                     )
                                     if not authorization["allowed"]:
-                                        self.store.mark_finished(
+                                        self._mark_finished(
                                             message["message_id"],
                                             success=False,
                                             error_code=str(authorization["error_code"]),
@@ -1597,7 +1775,7 @@ class GatewayService:
                                         "当前 Codex Controller 尚未启用成员只读权限协商，本条消息未提交。",
                                         error_code="controller_capability_incompatible",
                                     )
-                                    self.store.mark_finished(
+                                    self._mark_finished(
                                         message["message_id"],
                                         success=False,
                                         error_code=suppression or "controller_capability_incompatible",
@@ -1606,14 +1784,17 @@ class GatewayService:
                                 assert job is not None
                             except StoreError as exc:
                                 self.last_error = exc.code
+                                self.publish_status_change()
                                 break
                             await self._start_typing(message)
                             self.store.mark_submitted(message["message_id"], job["job_id"])
+                            self.publish_status_change(details=True)
                         for message in self.store.submitted():
                             try:
                                 job = await self.controller.job(message["controller_job_id"])
                             except StoreError as exc:
                                 self.last_error = exc.code
+                                self.publish_status_change()
                                 break
                             if job["state"] == "completed":
                                 self.store.update_conversation_link(
@@ -1621,6 +1802,7 @@ class GatewayService:
                                     thread_short=job.get("thread_short"),
                                     job_id=message.get("controller_job_id"),
                                 )
+                                self.publish_status_change(details=True)
                                 outbound = dict(message)
                                 outbound["thread_short"] = job.get("thread_short")
                                 try:
@@ -1632,13 +1814,13 @@ class GatewayService:
                                 finally:
                                     await self._stop_typing_for_message(message)
                                 if suppression:
-                                    self.store.mark_finished(
+                                    self._mark_finished(
                                         message["message_id"],
                                         success=False,
                                         error_code=suppression,
                                     )
                                     continue
-                                self.store.mark_finished(message["message_id"], success=True)
+                                self._mark_finished(message["message_id"], success=True)
                             elif job["state"] in {"failed", "cancelled", "recovery_required"}:
                                 text = controller_failure_message(job["state"], job.get("error_code"))
                                 outbound = dict(message)
@@ -1652,21 +1834,31 @@ class GatewayService:
                                 finally:
                                     await self._stop_typing_for_message(message)
                                 if suppression:
-                                    self.store.mark_finished(
+                                    self._mark_finished(
                                         message["message_id"],
                                         success=False,
                                         error_code=suppression,
+                                        controller_state=job["state"],
+                                        controller_error_code=job.get("error_code"),
                                     )
                                     continue
-                                self.store.mark_finished(message["message_id"], success=False, error_code=job.get("error_code") or job["state"])
+                                self._mark_finished(
+                                    message["message_id"],
+                                    success=False,
+                                    error_code=job.get("error_code") or job["state"],
+                                    controller_state=job["state"],
+                                    controller_error_code=job.get("error_code"),
+                                )
                     await asyncio.sleep(2)
                 except asyncio.CancelledError:
                     raise
                 except (StoreError, ProtocolError) as exc:
                     self.last_error = exc.code
+                    self.publish_status_change()
                     await asyncio.sleep(30 if exc.code == "session_expired" else 5)
                 except Exception:
                     self.last_error = "delivery_failed"
+                    self.publish_status_change()
                     await asyncio.sleep(5)
         finally:
             for runtime in self._runtimes.values():
@@ -2117,13 +2309,16 @@ class GatewayService:
     async def _cleanup_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.store.cleanup_spool()
-                self.store.cleanup_outbound_artifacts()
-                self.store.expire_remote_work_tasks()
-                for identity_identifier in self.store.expire_onboarding_sessions():
+                cleaned_spool = self.store.cleanup_spool()
+                cleaned_artifacts = self.store.cleanup_outbound_artifacts()
+                expired_remote_work = self.store.expire_remote_work_tasks()
+                expired_identities = self.store.expire_onboarding_sessions()
+                for identity_identifier in expired_identities:
                     runtime = self._runtimes.get(identity_identifier)
                     if runtime is not None:
                         await self._discard_identity_runtime(runtime)
+                if cleaned_spool or cleaned_artifacts or expired_remote_work or expired_identities:
+                    self.publish_status_change(details=bool(expired_identities))
                 await asyncio.sleep(300)
             except asyncio.CancelledError:
                 return
@@ -2235,28 +2430,36 @@ class GatewayService:
                 elif status == "scaned":
                     state["verify_code"] = None
                     state["state"] = "scanned"
+                    self.publish_status_change()
                 elif status == "need_verifycode":
                     state["verify_code"] = None
                     state["state"] = "need_verifycode"
+                    self.publish_status_change()
                 elif status == "scaned_but_redirect":
                     redirect_host = str(response.get("redirect_host") or "").strip()
                     if redirect_host:
                         state["base_url"] = f"https://{redirect_host}"
                     state["state"] = "redirecting"
+                    self.publish_status_change()
                 elif status in {"expired", "verify_code_blocked"}:
                     if not await self._refresh_qr_after_terminal_status(client, state, self.qr_image_path):
                         state["state"] = status
+                        self.publish_status_change()
                         return
+                    self.publish_status_change()
                 elif status == "binded_redirect":
                     state["state"] = "already_connected"
+                    self.publish_status_change()
                     return
                 elif status == "confirmed":
                     await self._accept_owner_qr(response)
                     state["state"] = "credential_ready"
+                    self.publish_status_change()
                     return
                 await asyncio.sleep(1)
             if self.qr_state is not None:
                 self.qr_state["state"] = "expired"
+                self.publish_status_change()
         except asyncio.CancelledError:
             raise
         except (ProtocolError, StoreError) as exc:
@@ -2267,6 +2470,7 @@ class GatewayService:
             }:
                 self.qr_state["state"] = "failed"
                 self.qr_state["error_code"] = exc.code
+                self.publish_status_change()
         finally:
             await client.close()
 
@@ -2415,6 +2619,7 @@ class GatewayService:
                     state["verify_code"] = None
                     state["state"] = "scanned"
                     self.store.set_onboarding_qr_state(session_id=session_id, qr_state="scanned")
+                    self.publish_status_change()
                 elif status == "need_verifycode":
                     state["verify_code"] = None
                     state["state"] = "need_verifycode"
@@ -2423,12 +2628,14 @@ class GatewayService:
                         qr_state="need_verifycode",
                         error_code="verify_code_required",
                     )
+                    self.publish_status_change()
                 elif status == "scaned_but_redirect":
                     redirect_host = str(response.get("redirect_host") or "").strip()
                     if redirect_host:
                         state["base_url"] = f"https://{redirect_host}"
                     state["state"] = "redirecting"
                     self.store.set_onboarding_qr_state(session_id=session_id, qr_state="redirecting")
+                    self.publish_status_change()
                 elif status in {"expired", "verify_code_blocked"}:
                     self.store.set_onboarding_qr_state(
                         session_id=session_id,
@@ -2447,8 +2654,10 @@ class GatewayService:
                             error_code=status,
                             terminal_state="expired" if status == "expired" else "failed",
                         )
+                        self.publish_status_change()
                         return
                     self.store.set_onboarding_qr_state(session_id=session_id, qr_state="waiting")
+                    self.publish_status_change()
                 elif status == "binded_redirect":
                     state["state"] = "already_bound"
                     self.store.set_onboarding_qr_state(
@@ -2457,11 +2666,13 @@ class GatewayService:
                         error_code="identity_already_bound",
                         terminal_state="already_bound",
                     )
+                    self.publish_status_change()
                     return
                 elif status == "confirmed":
                     await self._accept_member_qr(response, state)
                     state["state"] = "pending_pairing"
                     state["has_image"] = False
+                    self.publish_status_change()
                     return
                 await asyncio.sleep(1)
             if self.member_qr_state is not None:
@@ -2472,6 +2683,7 @@ class GatewayService:
                     error_code="qr_timeout",
                     terminal_state="expired",
                 )
+                self.publish_status_change()
         except asyncio.CancelledError:
             raise
         except (ProtocolError, StoreError) as exc:
@@ -2490,6 +2702,7 @@ class GatewayService:
                     error_code=exc.code,
                     terminal_state="failed",
                 )
+                self.publish_status_change()
         finally:
             await client.close()
 
@@ -2645,6 +2858,114 @@ class GatewayService:
     def conversations(self) -> dict[str, Any]:
         return self.store.list_conversations()
 
+    def failures(self, limit: int = 20) -> dict[str, Any]:
+        failures = self.store.recent_failures(limit=limit)
+        items: list[dict[str, Any]] = []
+        for failure in failures:
+            controller_state = failure.get("controller_state")
+            controller_code = failure.get("controller_error_code")
+            delivery_code = failure.get("error_code")
+            if not isinstance(delivery_code, str) or not PUBLIC_ERROR_CODE_RE.fullmatch(delivery_code):
+                delivery_code = "gateway_delivery_failed"
+            source = "controller" if controller_state else "gateway"
+            details = (
+                controller_failure_details(
+                    str(controller_state),
+                    controller_code or failure.get("error_code"),
+                )
+                if source == "controller"
+                else gateway_failure_details(delivery_code)
+            )
+            items.append(
+                {
+                    "failure_short": failure["failure_short"],
+                    "job_short": failure.get("job_short"),
+                    "source": source,
+                    "state": controller_state or "failed",
+                    "occurred_at": failure["occurred_at"],
+                    "error": details,
+                    "delivery_error_code": (
+                        delivery_code
+                        if controller_code and delivery_code != controller_code
+                        else None
+                    ),
+                }
+            )
+        return {
+            "version": 1,
+            "limit": limit,
+            "count": len(items),
+            "items": items,
+        }
+
+    def failure_stream(self, *, heartbeat_seconds: float = 12.0):
+        """Yield bounded internal failure revisions, blocking between changes.
+
+        Frames deliberately contain only a count and a safe timestamp.  The
+        authenticated directory remains the sole detail-fetch endpoint.
+        """
+        if (
+            isinstance(heartbeat_seconds, bool)
+            or not isinstance(heartbeat_seconds, (int, float))
+            or not 1 <= heartbeat_seconds <= 60
+        ):
+            raise ValueError("failure heartbeat must be between 1 and 60 seconds")
+        last_revision: int | None = None
+        while True:
+            with self._failure_condition:
+                revision, summary = self._failure_snapshot_locked()
+                if revision != last_revision:
+                    last_revision = revision
+                    frame: dict[str, Any] | None = {
+                        "version": 1,
+                        "revision": revision,
+                        "summary": summary,
+                    }
+                else:
+                    observed_revision = revision
+                    changed = self._failure_condition.wait_for(
+                        lambda: self._failure_revision != observed_revision,
+                        timeout=heartbeat_seconds,
+                    )
+                    frame = None if not changed else {
+                        "version": 1,
+                        "revision": self._failure_revision,
+                        "summary": self._failure_summary_locked(),
+                    }
+                    if changed:
+                        last_revision = self._failure_revision
+            yield frame
+
+    def publish_failure_change(self) -> None:
+        """Wake internal subscribers after a durable message terminal update."""
+        with self._failure_condition:
+            self._failure_snapshot_locked()
+            self._failure_condition.notify_all()
+
+    def _failure_snapshot_locked(self) -> tuple[int, dict[str, Any]]:
+        document = self.failures()
+        # The fingerprint is never sent.  It permits a count-preserving
+        # replacement at the bounded-directory limit to advance the revision.
+        fingerprint = json.dumps(document, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        if not hmac.compare_digest(fingerprint, self._failure_fingerprint):
+            self._failure_fingerprint = fingerprint
+            self._failure_revision += 1
+        return self._failure_revision, self._failure_summary(document)
+
+    def _failure_summary_locked(self) -> dict[str, Any]:
+        return self._failure_summary(self.failures())
+
+    @staticmethod
+    def _failure_summary(document: dict[str, Any]) -> dict[str, Any]:
+        items = document.get("items")
+        latest = items[0].get("occurred_at") if isinstance(items, list) and items else None
+        return {"count": int(document.get("count", 0)), "latest_occurred_at": latest}
+
+    def _mark_finished(self, message_id: str, **kwargs: Any) -> None:
+        self.store.mark_finished(message_id, **kwargs)
+        self.publish_status_change()
+        self.publish_failure_change()
+
     def create_member_invitation(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self.store.create_member_invitation(
             expected_revision=payload.get("revision"),
@@ -2768,7 +3089,8 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.7",
+            "version": "0.4.9",
+            "details_revision": self._status_details_revision,
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

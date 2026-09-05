@@ -20,6 +20,7 @@ from .prepare_car import (
 )
 from .runner_service import RunnerManagerService
 from .desktop_service import DesktopControllerService
+from .error_center import ErrorCenter
 from .source_identity import runtime_source_identity
 from .store import ControllerStore, StoreError
 from .tool_proxy import ToolProxyError
@@ -371,6 +372,12 @@ class ControllerService:
         self._scheduler: threading.Thread | None = None
         self._pending_turn_events: dict[str, list[dict[str, Any]]] = {}
         self._event_lock = threading.Lock()
+        self.error_center = ErrorCenter(
+            desktop_controller=desktop_controller,
+            component_status=self._error_component_status,
+            gateway_base_url=str(getattr(tool_context, "gateway_base_url", "") or ""),
+            gateway_token=str(getattr(tool_context, "gateway_token", "") or ""),
+        )
         self.app_server.notification_handler = self.handle_notification
 
     def start(self) -> None:
@@ -391,11 +398,14 @@ class ControllerService:
             self._reconcile_initial_auth()
         self._scheduler = threading.Thread(target=self._scheduler_loop, name="codex-controller-scheduler", daemon=True)
         self._scheduler.start()
+        self.error_center.start()
+        self.error_center.notify_local_change()
         if self.runner_manager is not None:
             self.runner_manager.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self.error_center.stop()
         if self.runner_manager is not None:
             self.runner_manager.stop()
         self.app_server.stop()
@@ -419,12 +429,14 @@ class ControllerService:
         }
 
     def tool_status(self) -> dict[str, Any]:
+        from .tool_catalog_page import with_catalog_revision
+
         if (
             self.tool_context is not None
             and getattr(self.tool_context, "store", None) is not None
             and hasattr(self.tool_context, "tool_status")
         ):
-            return self.tool_context.tool_status()
+            return with_catalog_revision(self.tool_context.tool_status())
         configured = (
             self.tool_context.configured_tools()
             if self.tool_context is not None and hasattr(self.tool_context, "configured_tools")
@@ -435,7 +447,7 @@ class ControllerService:
             if self.tool_context is not None and hasattr(self.tool_context, "route_ready_tools")
             else configured
         )
-        return self.store.tool_control_document(configured, callable_names)
+        return with_catalog_revision(self.store.tool_control_document(configured, callable_names))
 
     def update_tool_policy(
         self,
@@ -506,7 +518,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.36",
+            "version": "0.5.37",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -570,6 +582,38 @@ class ControllerService:
                     "relay_configured": False,
                     "server_time": datetime.now(SHANGHAI).isoformat(),
                 }
+            ),
+        }
+
+    def errors(self, *, cursor: int = 0, limit: int = 12) -> dict[str, Any]:
+        """Public, paged diagnostics.  The error center never returns raw failures."""
+        return self.error_center.page(cursor=cursor, limit=limit)
+
+    def error_stream(self):
+        """SSE producer for error revisions; browser pages fetch only changed pages."""
+        return self.error_center.stream()
+
+    def _error_component_status(self) -> dict[str, Any]:
+        """Extract only stable error codes; raw app-server data is never forwarded."""
+        try:
+            app = self.app_server.status()
+        except Exception:
+            app = {}
+        runner_status = (
+            self.runner_manager.status() if self.runner_manager is not None else {}
+        )
+        return {
+            "controller_start_error": self.start_error,
+            "controller_auth_error": self.auth_error,
+            "app_server_error": (
+                app.get("protocol_error")
+                if isinstance(app, dict) and app.get("protocol_error")
+                else None
+            ),
+            "runner_error": (
+                runner_status.get("last_error")
+                if isinstance(runner_status, dict) and runner_status.get("last_error")
+                else None
             ),
         }
 
@@ -644,6 +688,7 @@ class ControllerService:
                         if pending:
                             if len(pending) < 32:
                                 pending.append(message)
+                            self.error_center.notify_local_change()
                             return
                 if self.tool_context is not None:
                     self.tool_context.end_turn(turn_id)
@@ -682,6 +727,7 @@ class ControllerService:
                 self.auth_error = "auth_mode_mismatch"
             else:
                 self.auth_error = None
+        self.error_center.notify_local_change()
 
     def _scheduler_loop(self) -> None:
         next_artifact_cleanup = 0.0

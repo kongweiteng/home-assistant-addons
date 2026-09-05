@@ -16,6 +16,9 @@ EVENTS_PATH_RE = re.compile(r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/even
 ACTION_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/(steer|interrupt|continue|archive|unarchive)$"
 )
+HISTORY_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/history/(page|search)$"
+)
 QUEUE_ADD_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/queue$"
 )
@@ -93,6 +96,9 @@ def post_desktop_api(
         return service.upload_image(payload)
     if path == "/api/desktop/v1/threads":
         return service.create(payload)
+    history = HISTORY_PATH_RE.fullmatch(path)
+    if history is not None:
+        return service.history_query(history.group(1), history.group(2), payload)
     queue_add = QUEUE_ADD_PATH_RE.fullmatch(path)
     if queue_add is not None:
         return service.submit(queue_add.group(1), "queue_add", payload)
@@ -178,6 +184,7 @@ def _number(
 __all__ = [
     "ACTION_PATH_RE",
     "EVENTS_PATH_RE",
+    "HISTORY_PATH_RE",
     "QUEUE_ADD_PATH_RE",
     "QUEUE_ITEM_PATH_RE",
     "QUEUE_REORDER_PATH_RE",

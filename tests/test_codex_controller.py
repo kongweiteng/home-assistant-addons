@@ -1363,7 +1363,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.36"
+        expected = "0.5.37"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -2761,6 +2761,22 @@ class ControllerTurnRetryTests(unittest.TestCase):
                 {"codexErrorInfo": {"httpConnectionFailed": {"httpStatusCode": None}}},
                 ("http_connection_failed", None, True),
             ),
+            (
+                {"codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 429}}},
+                ("rate_limit_exceeded", 429, True),
+            ),
+            (
+                {"codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 401}}},
+                ("unauthorized", 401, False),
+            ),
+            (
+                {"codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 400}}},
+                ("bad_request", 400, False),
+            ),
+            (
+                {"codexErrorInfo": {"responseTooManyFailedAttempts": {"httpStatusCode": 503}}},
+                ("server_overloaded", 503, True),
+            ),
         )
         for error, expected in cases:
             with self.subTest(error=error):
@@ -2769,6 +2785,33 @@ class ControllerTurnRetryTests(unittest.TestCase):
                     (classification.error_type, classification.upstream_http_status, classification.retryable),
                     expected,
                 )
+
+    def test_other_provider_errors_get_stable_public_codes_without_retaining_text(self) -> None:
+        cases = (
+            ("Model gpt-example is not supported by this endpoint", "model_unavailable", False),
+            ("Request failed: invalid API key", "codex_unauthorized", False),
+            ("Too many requests (429)", "rate_limit_exceeded", True),
+            ("Connection timed out while contacting provider", "upstream_http_connection_failed", True),
+            ("opaque provider failure SECRET-VALUE", "turn_failed", False),
+        )
+        for message, code, retryable in cases:
+            with self.subTest(message=message):
+                classification = classify_turn_error(
+                    {
+                        "message": message,
+                        "codexErrorInfo": "other",
+                        "additionalDetails": "PRIVATE-DETAILS",
+                    }
+                )
+                self.assertEqual(classification.error_code, code)
+                self.assertEqual(classification.retryable, retryable)
+                self.assertNotIn("SECRET", repr(classification))
+                self.assertNotIn("PRIVATE", repr(classification))
+
+        oversized = classify_turn_error(
+            {"message": "invalid API key " + "x" * 4096, "codexErrorInfo": "other"}
+        )
+        self.assertEqual(oversized.error_code, "turn_failed")
 
     def test_app_server_internal_retry_does_not_trigger_outer_requeue(self) -> None:
         created = self.running_turn("retry-internal-0001", "turn-retry-internal")

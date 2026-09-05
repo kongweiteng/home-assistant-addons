@@ -45,6 +45,8 @@ DESKTOP_THREAD_STREAM_RE = re.compile(
 )
 DESKTOP_STREAM_PATH = "/api/desktop/v1/stream"
 DESKTOP_THREADS_PATH = "/api/desktop/v1/threads"
+ERRORS_PATH = "/api/errors"
+ERRORS_STREAM_PATH = "/api/errors/stream"
 SSE_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 
 
@@ -169,6 +171,15 @@ def _desktop_threads(service: DesktopControllerService, query: str) -> dict[str,
     )
 
 
+def _errors(service: ControllerService, query: str) -> dict[str, Any]:
+    parameters = _strict_query(query)
+    _only_query(parameters, {"cursor", "limit"})
+    return service.errors(
+        cursor=_query_integer(parameters, "cursor", default=0, minimum=0, maximum=2**63 - 1),
+        limit=_query_integer(parameters, "limit", default=12, minimum=1, maximum=50),
+    )
+
+
 def _prepend(
     first: dict[str, Any], iterator: Iterator[dict[str, Any]]
 ) -> Iterator[dict[str, Any]]:
@@ -180,7 +191,7 @@ def _encode_sse(frame: dict[str, Any]) -> bytes:
     event = frame.get("event")
     cursor = frame.get("cursor")
     data = frame.get("data")
-    if event not in {"ready", "desktop", "heartbeat", "status"}:
+    if event not in {"ready", "desktop", "heartbeat", "status", "errors"}:
         raise ValueError("invalid SSE event")
     if isinstance(cursor, bool) or not isinstance(cursor, int) or not 0 <= cursor <= 2**63 - 1:
         raise ValueError("invalid SSE cursor")
@@ -243,7 +254,7 @@ def create_server(
             time.sleep(5)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.5.36"
+        server_version = "CodexController/0.5.37"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -303,8 +314,47 @@ def create_server(
             if path == "/api/status":
                 self._json(HTTPStatus.OK, {**service.status(), **csrf_document()})
                 return
+            if path == ERRORS_PATH:
+                self._call(lambda: _errors(service, parsed_path.query))
+                return
+            if path == ERRORS_STREAM_PATH:
+                if parsed_path.query:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": {"code": "error_stream_query_invalid"}},
+                    )
+                    return
+                try:
+                    iterator = service.error_stream()
+                    first = next(iterator)
+                except StoreError as exc:
+                    self._json(
+                        HTTPStatus(exc.status),
+                        {"error": {"code": exc.code, "message": str(exc)}},
+                    )
+                    return
+                except Exception:
+                    self._json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": {"code": "error_stream_unavailable"}},
+                    )
+                    return
+                self._sse(iterator, first)
+                return
             if path == "/api/tools":
-                self._json(HTTPStatus.OK, {"version": 1, "result": service.tool_status()})
+                # No query preserves the existing full-directory API for older clients.
+                from .tool_catalog_page import parse_page_query, tool_catalog_page
+
+                try:
+                    if parsed_path.query:
+                        parse_page_query(parsed_path.query)
+                        result = tool_catalog_page(service.tool_status(), parsed_path.query)
+                    else:
+                        result = service.tool_status()
+                except StoreError as exc:
+                    self._json(exc.status, {"error": {"code": exc.code, "message": str(exc)}})
+                    return
+                self._json(HTTPStatus.OK, {"version": 1, "result": result})
                 return
             stream_match = DESKTOP_THREAD_STREAM_RE.fullmatch(path)
             if path == DESKTOP_STREAM_PATH or stream_match is not None:

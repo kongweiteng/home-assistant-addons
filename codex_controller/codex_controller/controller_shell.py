@@ -4,7 +4,7 @@ import re
 from .ui_icons import icon
 
 
-_NAV = '''<a href="desktop/">任务</a><a data-view-link="tools" href="?view=tools#tools">工具</a><a class="new-task-link" href="desktop/?new=1" aria-label="新建任务">新建</a><a data-view-link="runners" href="?view=runners#runners">状态</a><a data-view-link="overview" href="?view=overview#overview">设置</a>'''
+_NAV = '''<a href="desktop/">任务</a><a data-view-link="tools" href="?view=tools#tools">工具</a><a class="new-task-link" href="desktop/?new=1" aria-label="新建任务">新建</a><a data-view-link="errors" href="?view=errors#errors">状态</a><a data-view-link="overview" href="?view=overview#overview">设置</a>'''
 for _label, _name in [('任务', 'ChatsCircle'), ('工具', 'Wrench'), ('新建', 'Plus'), ('状态', 'Gauge'), ('设置', 'GearSix')]:
     _NAV = _NAV.replace('>' + _label + '</a>', '>' + icon(_name) + _label + '</a>')
 
@@ -17,7 +17,7 @@ _STYLE = """
 
 def build_management_html(html: str) -> str:
     """Reshape the existing audited controls without duplicating their DOM IDs."""
-    html = html.replace("</style>", _STYLE + ".workspace-nav a{gap:6px}.tool-card summary:after{content:'详情';font-size:11px}.tool-card[open] summary:after{content:'收起';transform:none}.management-disclosure>summary:before{content:none}@media(max-width:700px){.mobile-nav a{flex-direction:column;gap:3px;font-size:11px}}" + "</style>", 1)
+    html = html.replace("</style>", _STYLE + ".workspace-nav a{gap:6px}.tool-card summary:after{content:'详情';font-size:11px}.tool-card[open] summary:after{content:'收起';transform:none}.management-disclosure>summary:before{content:none}.error-list{display:grid;gap:10px}.error-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:start;padding:14px;border:1px solid var(--line);border-radius:13px;background:#fff}.error-row h3{margin:0;font-size:15px}.error-row p{margin:4px 0 0;color:var(--muted);font-size:12px}.error-row .error-detail{color:var(--text);line-height:1.55}.error-row .error-action{color:var(--muted);line-height:1.55}.error-row .badges{justify-content:flex-end}.error-summary-list{display:grid;gap:8px}.error-summary-item{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}.error-summary-item:last-child{border-bottom:0}@media(max-width:700px){.mobile-nav a{flex-direction:column;gap:3px;font-size:11px}.error-row{grid-template-columns:1fr}.error-row .badges{justify-content:flex-start}.error-summary-item{align-items:flex-start;flex-direction:column;gap:4px}}" + "</style>", 1)
     html = re.sub(r'<aside class="side-rail">.*?</aside>',
                   '<header class="workspace-nav"><span class="workspace-brand">Codex</span><nav aria-label="应用导航">'
                   + _NAV + '</nav><span id="statusStreamState" role="status" class="stream-state warn">实时连接中</span></header>', html, count=1)
@@ -27,6 +27,8 @@ def build_management_html(html: str) -> str:
     html = html.replace('控制器总览</div><h1>Codex 控制器</h1><p>跨 Mac 任务、工具与运行节点的远程工作空间',
                         '偏好与账户</div><h1>设置</h1><p>管理 Controller 独立会话、认证与服务状态')
     html = html.replace('<h2>正式认证</h2>', '<h2>Controller 账户</h2>')
+    summary = '''<section class="section" id="errorSummary"><div class="section-head"><div><h2>最近问题</h2><p>错误会通过持续连接自动更新；不显示消息正文、身份或内部异常。</p></div><a data-view-link="errors" href="?view=errors#errors">查看全部</a></div><div class="card"><div id="errorSummaryList" class="error-summary-list" aria-live="polite"><p class="muted">正在同步错误状态…</p></div></div></section>'''
+    html = html.replace('</section></section>\n<section class="section app-view" id="tools"', '</section>' + summary + '</section>\n<section class="section app-view" id="tools"', 1)
     html = html.replace('<h1>Runner</h1><p>管理远程执行器、注册与恢复状态', '<h1>连接与设备</h1><p>查看在线设备，处理需要恢复的连接')
     html = html.replace('<div class="toolbar"><label>服务 ', '<div class="toolbar"><label class="tool-search">搜索工具<input id="toolSearch" type="search" placeholder="工具名称、用途或服务" autocomplete="off"></label><label>服务 ', 1)
     html = html.replace('<button id="reloadTools">刷新工具状态</button>', '<button id="reloadTools" class="secondary">重新同步</button>')
@@ -36,6 +38,8 @@ def build_management_html(html: str) -> str:
     html = html.replace('<div class="section-head"><div><h2>新增 Runner</h2>',
                         '<details id="runnerSetup" class="management-disclosure"><summary>添加运行设备</summary><div><div class="section-head"><div><h2>新增 Runner</h2>', 1)
     html = html.replace('<div id="runnerSecret"', '</div></details><div id="runnerSecret"', 1)
+    errors = '''<section class="app-view" id="errors" data-view="errors"><div class="view-heading"><div><div class="eyebrow">运行状态</div><h1>错误中心</h1><p>区分组件状态与具体任务；所有条目均为脱敏、可定位的稳定错误码。</p></div><span id="errorStreamState" class="stream-state warn">错误流连接中</span></div><div class="grid"><div class="card">待处理<span id="errorTotal" class="metric">-</span></div><div class="card">组件问题<span id="errorComponents" class="metric">-</span></div><div class="card">任务问题<span id="errorTasks" class="metric">-</span></div><div class="card">可重试<span id="errorRetryable" class="metric">-</span></div></div><section class="section"><div class="section-head"><div><h2>错误列表</h2><p id="errorListNote">新错误会自动回到最新页。</p></div><button id="reloadErrors" type="button" class="secondary">重新同步</button></div><div id="errorList" class="error-list" aria-live="polite" aria-busy="true"></div><div class="directory-footer"><button id="previousErrors" type="button" class="secondary" hidden>上一页</button><span id="errorPageInfo" class="tool-summary-count">正在加载错误</span><button id="nextErrors" type="button" class="secondary" hidden>下一页</button></div></section><section class="section"><div class="section-head"><div><h2>连接与设备</h2><p>Runner 注册、恢复和受控管理入口。</p></div><a data-view-link="runners" href="?view=runners#runners">打开 Runner</a></div></section></section>'''
+    html = html.replace('</section></main><nav class="mobile-nav"', '</section>' + errors + '</main><nav class="mobile-nav"', 1)
     # Keep protocol explanations available without displacing the working directory.
     html = re.sub(r'(<section class="section app-view" id="tools".*?</div>)(<div class="card notice">.*?</div>)',
                   r'\1<details class="management-disclosure"><summary>工具状态说明</summary><div>\2</div></details>', html, count=1)

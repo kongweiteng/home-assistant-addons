@@ -2,6 +2,7 @@
 set -euo pipefail
 
 OPTIONS_FILE="${CONTROLLER_OPTIONS_FILE:-/data/options.json}"
+CONTROLLER_VERSION="0.5.37"
 if [ ! -f "$OPTIONS_FILE" ]; then
     bashio::log.fatal "缺少 Add-on options 文件"
     exit 1
@@ -64,5 +65,5 @@ export CONTROLLER_CODEX_HOME=/data/codex-home
 export CONTROLLER_WORKSPACE=/data/workspace
 export CONTROLLER_MCP_SOCKET=/data/runtime/tool-proxy.sock
 
-bashio::log.info "启动 Codex Controller；auth_mode=${CONTROLLER_AUTH_MODE}，intake_enabled=${CONTROLLER_INTAKE_ENABLED}，runner_center_v2_enabled=${CONTROLLER_RUNNER_CENTER_V2_ENABLED}，relay_configured=$([ -n "$CONTROLLER_RUNNER_RELAY_BASE_URL" ] && printf true || printf false)"
+bashio::log.info "启动 Codex Controller ${CONTROLLER_VERSION}；auth_mode=${CONTROLLER_AUTH_MODE}，intake_enabled=${CONTROLLER_INTAKE_ENABLED}，runner_center_v2_enabled=${CONTROLLER_RUNNER_CENTER_V2_ENABLED}，relay_configured=$([ -n "$CONTROLLER_RUNNER_RELAY_BASE_URL" ] && printf true || printf false)"
 exec python3 -m codex_controller.main

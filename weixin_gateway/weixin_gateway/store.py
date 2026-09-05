@@ -16,6 +16,7 @@ import sqlite3
 import tempfile
 from typing import Any, BinaryIO
 import zipfile
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -75,6 +76,7 @@ RUNNER_MANAGER_V2_TASK_STATES = frozenset(
     }
 )
 RUNNER_MANAGER_V2_RETRY_MAX_SECONDS = 60
+SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _chinese_media_count(value: str) -> int | None:
@@ -941,6 +943,8 @@ class GatewayStore:
             self._ensure_column(connection, "inbound_messages", "identity_id", "TEXT")
             self._ensure_column(connection, "inbound_messages", "principal_id", "TEXT")
             self._ensure_column(connection, "inbound_messages", "upstream_message_id", "TEXT")
+            self._ensure_column(connection, "inbound_messages", "controller_state", "TEXT")
+            self._ensure_column(connection, "inbound_messages", "controller_error_code", "TEXT")
             self._ensure_column(
                 connection,
                 "inbound_messages",
@@ -3669,17 +3673,68 @@ class GatewayStore:
                 (job_id, utc_now(), message_id),
             )
 
-    def mark_finished(self, message_id: str, *, success: bool, error_code: str | None = None) -> None:
+    def mark_finished(
+        self,
+        message_id: str,
+        *,
+        success: bool,
+        error_code: str | None = None,
+        controller_state: str | None = None,
+        controller_error_code: str | None = None,
+    ) -> None:
+        if controller_state is not None and controller_state not in {
+            "failed",
+            "cancelled",
+            "recovery_required",
+        }:
+            raise StoreError("controller_state_invalid", "Controller 终态无效")
+        if controller_error_code is not None and not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", controller_error_code
+        ):
+            controller_error_code = "controller_task_failed"
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
-                "UPDATE inbound_messages SET state=?,updated_at=?,error_code=? WHERE message_id=?",
-                ("completed" if success else "failed", utc_now(), error_code, message_id),
+                "UPDATE inbound_messages SET state=?,updated_at=?,error_code=?,controller_state=?,controller_error_code=? "
+                "WHERE message_id=?",
+                (
+                    "completed" if success else "failed",
+                    utc_now(),
+                    error_code,
+                    None if success else controller_state,
+                    None if success else controller_error_code,
+                    message_id,
+                ),
             )
             connection.execute(
                 "UPDATE media_archive_requests SET state=?,updated_at=? WHERE bound_message_id=? AND state='bound'",
                 ("completed" if success else "failed", utc_now(), message_id),
             )
+
+    def recent_failures(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 50:
+            raise StoreError("failure_limit_invalid", "最近失败数量必须在 1 到 50 之间")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT message_id,controller_job_id,error_code,controller_state,controller_error_code,updated_at "
+                "FROM inbound_messages WHERE state='failed' ORDER BY updated_at DESC,rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "failure_short": self.short_id("ER", row["message_id"]),
+                    "job_short": (
+                        self.short_id("JB", row["controller_job_id"])
+                        if row["controller_job_id"]
+                        else None
+                    ),
+                    "error_code": row["error_code"],
+                    "controller_state": row["controller_state"],
+                    "controller_error_code": row["controller_error_code"],
+                    "occurred_at": parse_time(row["updated_at"]).astimezone(SHANGHAI).isoformat(),
+                }
+                for row in rows
+            ]
 
     def prepare_chunk(self, job_id: str, chunk_index: int) -> tuple[str, bool]:
         client_id = "codex-weixin-" + hashlib.sha256(f"{job_id}:{chunk_index}".encode("utf-8")).hexdigest()[:32]
@@ -3962,6 +4017,8 @@ class GatewayStore:
             "controller_job_id": row["controller_job_id"],
             "received_at": row["received_at"],
             "error_code": row["error_code"],
+            "controller_state": row["controller_state"],
+            "controller_error_code": row["controller_error_code"],
             "user_hash": row["user_hash"],
             "capability_profile": row["capability_profile"],
             "identity_id": row["identity_id"],

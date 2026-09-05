@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.36.
+Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.37.
 
 ## Comparison target and evidence
 
@@ -9,7 +9,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.36.
 - Viewports: desktop 1440 x 900; mobile 390 x 844; short-screen 390 x 500. Same light theme and task-list/active-conversation states. Reference retains a 34px prototype selector strip; synthetic task text and activity differ. Compare structure and controls, not demo chrome, exact message positions or synthetic latency.
 - Full-view combined evidence: `scheme1-compare-desktop.png`, `scheme1-compare-mobile-list.png`, `scheme1-compare-mobile-detail.png` place reference and implementation side by side at equal scale.
 - Focused combined evidence: `scheme1-compare-mobile-detail-header.png`, `scheme1-compare-mobile-detail-composer.png`. Controls remain readable without shrinking the full desktop comparison.
-- Additional states: `scheme1-mobile-short.png`, `scheme1-mobile-new.png`, `scheme1-mobile-image-draft.png`, `scheme1-mobile-image-lightbox.png`, `scheme1-mobile-tools.png`, `scheme1-mobile-settings.png`, `scheme1-mobile-runners.png`. Screenshots remain private, not shipped with the Add-on.
+- Additional states: `scheme1-mobile-short.png`, `scheme1-mobile-new.png`, `scheme1-mobile-image-draft.png`, `scheme1-mobile-image-lightbox.png`, `scheme1-mobile-tools.png`, `scheme1-mobile-settings.png`, `scheme1-mobile-runners.png`, and `qa-mobile-history-search-latest.png`. Screenshots remain private, not shipped with the Add-on.
 
 ## Findings and required fidelity surfaces
 
@@ -29,13 +29,17 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.36.
 - Corrected short-screen composer, project dialog placement and task-switch draft/receipt races.
 - Replaced create-result polling with bounded host SSE receipts and reconnect recovery.
 - Disambiguated execution-failure and recovery-required task filters.
+- Added new-task image selection/paste, preview, removal, pure-image creation and expired-upload retry.
+- Replaced the tools DOM slice with server-paged search/service/risk filters and previous/next navigation.
+- Added native older-turn paging and task search; the browser fixture submitted a real search POST and received one matching occurrence through the Thread SSE before rendering it.
+- Added the mobile/Web error center with a live connection state, component/task grouping, stable public codes, Shanghai time and task-context links.
 
 ## Interaction checks and boundaries
 
-- Local fixture exercised project scope, task selection, text task creation and exact mock receipt, tools search, management navigation, image upload/preview/remove, pure-image mock send and lazy history read.
+- Local fixture exercised project scope, task selection, text and pure-image task creation, exact mock receipt, paged tools navigation, four service filters, management navigation, image upload/preview/remove, pure-image mock send, lazy history read, task search POST-to-SSE, and the paged error center.
 - Automated gates cover unknown receipts, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling.
 - Physical HA companion app, Mac image interpretation, same-original-task delivery and off-LAN latency remain pending. Mock receipts and screenshots cannot prove these.
-- New-task form is text-only; images can be added after creation. A new-task image picker remains a functional follow-up, not a completed feature.
+- New-task form accepts up to four images and can create a pure-image task. The local same-origin fixture confirmed the uploaded preview and enabled create action without text; this does not prove Mac interpretation or phone delivery.
 
 ## Implementation checklist
 
@@ -43,6 +47,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.36.
 - [x] Inspect typography, spacing, colors, assets, copy and responsiveness.
 - [x] Exercise local navigation, creation and conversation-image interactions.
 - [x] Resolve compared visual P0/P1/P2 findings.
+- [x] Verify the 390 x 500 fixed composer, 390 x 844 history search result, and desktop task/error navigation in the Codex in-app browser.
 - [ ] Physical-phone keyboard, safe-area and zoom acceptance.
 - [ ] Production release/upgrade and actual off-LAN image/receipt/freshness acceptance.
 

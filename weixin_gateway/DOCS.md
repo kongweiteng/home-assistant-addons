@@ -1,8 +1,8 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.7`。
+当前版本：`0.4.9`。
 
-`0.4.7` 将 Controller 最终错误码映射为有界中文提示：context/预算/额度要求缩短内容、新开会话或检查额度；认证失效要求重新登录；bad request、cyber policy 与 sandbox 不自动重试；连接、响应流、连续失败和内部服务器错误只在 Controller 最多 3 次总尝试耗尽后提示稍后再试。Gateway 不读取或发送 app-server raw message、`additionalDetails`、URL、prompt 或 token。
+`0.4.9` 保留 `0.4.8` 的稳定错误码和脱敏失败目录，并把 Ingress 管理状态改为事件驱动 SSE。`GET /api/status/stream` 首帧立即返回当前有界状态；状态变化由服务内 Condition 唤醒，空闲时仅发送 12 秒注释心跳。浏览器使用 Last-Event-ID、指数退避、网络恢复和前台恢复重连；用户与会话详情只在详情修订变化时读取一次，不再周期轮询。
 
 ## 配置
 
@@ -108,7 +108,7 @@ Ingress 将此流程标记为“身份初始化”，而不是普通用户管理
 
 ### 管理 API 安全
 
-- 读接口：`GET /api/status`、`GET /api/users`、`GET /api/conversations`、Owner/成员二维码图片。
+- 读接口：`GET /api/status`（兼容单次读取）、`GET /api/status/stream`（管理页面实时 SSE）、`GET /api/users`、`GET /api/conversations`、Owner/成员二维码图片。SSE 只发送有界脱敏状态，不含原始微信 ID、消息正文或凭据；用户和会话详情仅在 `details_revision` 变化后各读取一次。
 - 写接口：Owner 二维码开始/验证码、Owner 首次绑定、成员 onboarding 开始/验证码/取消、修改别名、暂停/恢复/移除成员和 Owner 转移。
 - 所有写请求必须为 JSON，携带同源状态页取得的短期 `X-CSRF-Token`、当前 users revision 和高熵 `request_id`。
 - revision 不匹配返回 `revision_conflict`；相同 request_id 与相同正文不重复改变状态，不同正文返回 `idempotency_conflict`。
@@ -209,7 +209,7 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 
 从 `0.4.5` 回退到 `0.4.4` 不涉及数据库降级；旧版本会继续读取同一 Runner watch，但会重新把陈旧上下文 `-2 + unknown error` 当作普通限流并高频重试。回退前应确认 active 跟踪为 0，或先恢复当前用户的有效上下文，避免重新触发该缺陷。
 
-从 `0.4.7` 回退到 `0.4.6` 不涉及数据库降级；旧版本仍会接收 Controller 的有界 `error_code`，但会重新发送统一失败提示。回退不影响 Poller、身份、上下文、消息、artifact、Runner Manager 或通知台账。
+从 `0.4.9` 回退到 `0.4.8` 不需要数据库降级；页面会恢复 5 秒状态轮询，但失败目录、消息、身份、Poller、artifact、Runner Manager 和通知台账保持。继续回退到 `0.4.7` 时旧版本会忽略新增的 Controller 状态与错误码列，并不再提供失败目录。
 
 从 `0.4.6` 回退到 `0.4.5` 不涉及数据库降级；旧版本仍能读取现有 watch 和出站分块，但首次立即回复与后台 watch 会重新使用不同发送键。回退前应确认没有新启动的 active Runner task，避免重新出现 `dispatched` 并发重复通知。
 

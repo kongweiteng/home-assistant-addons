@@ -189,6 +189,31 @@ def event(runner_id: str, *, sequence: int = 1, revision: int = 7) -> dict:
     )
 
 
+def history_event(runner_id: str, *, sequence: int, revision: int, request_id: str) -> dict:
+    return digest(
+        {
+            "version": 1,
+            "message_type": "desktop_event",
+            "runner_id": runner_id,
+            "created_at": NOW.isoformat(),
+            "host_ref": HOST_REF,
+            "project_ref": PROJECT_REF,
+            "thread_ref": THREAD_REF,
+            "turn_ref": None,
+            "thread_revision": revision,
+            "event_sequence": sequence,
+            "event_kind": "history.search",
+            "source": "app",
+            "payload": {
+                "request_id": request_id,
+                "occurrences": [{"turn_ref": TURN_REF, "snippet": "公开文本结果"}],
+                "next_cursor": None,
+                "has_more": False,
+            },
+        }
+    )
+
+
 def receipt(
     runner_id: str,
     request_id: str,
@@ -244,6 +269,54 @@ def redeem_payload(runner_id: str, token: str) -> dict:
 
 
 class DesktopProtocolTests(unittest.TestCase):
+    def test_history_event_is_strict_ref_only_and_byte_bounded(self) -> None:
+        runner_id = "RN-" + "E" * 20
+        turn = {
+            "turn_ref": TURN_REF,
+            "status": "completed",
+            "started_at": NOW.isoformat(),
+            "completed_at": NOW.isoformat(),
+            "duration_ms": 10,
+            "items_incomplete": True,
+            "items": [{"type": "assistant.message", "text": "公开回复"}],
+        }
+        history = digest(
+            {
+                "version": 1,
+                "message_type": "desktop_event",
+                "runner_id": runner_id,
+                "created_at": NOW.isoformat(),
+                "host_ref": HOST_REF,
+                "project_ref": PROJECT_REF,
+                "thread_ref": THREAD_REF,
+                "turn_ref": None,
+                "thread_revision": 7,
+                "event_sequence": 1,
+                "event_kind": "history.page",
+                "source": "app",
+                "payload": {"request_id": "history-page-1", "turns": [turn], "next_cursor": "HC-" + "F" * 20, "has_more": True},
+            }
+        )
+        self.assertEqual(validate_desktop_document("desktop_event", history)["event_kind"], "history.page")
+        for mutation in (
+            {**turn, "turn_id": "raw-id"},
+            {**turn, "unknown": "value"},
+            {**turn, "turn_ref": "raw-id"},
+        ):
+            invalid = json.loads(json.dumps(history))
+            invalid["payload"]["turns"] = [mutation]
+            invalid["body_digest"] = body_digest(invalid)
+            with self.assertRaises(DesktopProtocolError):
+                validate_desktop_document("desktop_event", invalid)
+
+        oversized = json.loads(json.dumps(history))
+        large_turn = {**turn, "items": [{"type": "assistant.message", "text": "x" * 4000}]}
+        oversized["payload"] = {"request_id": "history-page-large", "turns": [large_turn] * 20, "next_cursor": None, "has_more": False}
+        oversized["body_digest"] = body_digest(oversized)
+        with self.assertRaises(DesktopProtocolError) as context:
+            validate_desktop_document("desktop_event", oversized)
+        self.assertEqual(context.exception.code, "desktop_payload_too_large")
+
     def test_ref_only_snapshot_event_and_receipt_validate(self) -> None:
         runner_id = "RN-" + "E" * 20
         self.assertEqual(
@@ -324,6 +397,70 @@ class DesktopStoreServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_history_query_is_unjournaled_capability_gated_and_streamed(self) -> None:
+        capabilities = list(snapshot(self.runner_id)["host"]["capabilities"]) + [
+            "history_paging_v1",
+            "history_search_v1",
+        ]
+        current = snapshot(self.runner_id, revision=8, status="idle", capabilities=capabilities)
+        current["snapshot"]["turns"] = [
+            {
+                "turn_ref": "TR-" + chr(65 + (index % 20)) * 20,
+                "status": "completed",
+                "started_at": NOW.isoformat(),
+                "completed_at": NOW.isoformat(),
+                "duration_ms": index,
+                "items_incomplete": False,
+                "items": [],
+            }
+            for index in range(25)
+        ]
+        current["snapshot"]["history_incomplete"] = True
+        current["body_digest"] = body_digest(current)
+        self.service.receive("desktop_snapshot", current)
+
+        detail = self.service.thread(THREAD_REF)
+        self.assertEqual(len(detail["snapshot"]["turns"]), 20)
+        self.assertTrue(detail["history"]["paging_available"])
+        query = "只存在于请求中的公开搜索词"
+        submitted = self.service.history_query(
+            THREAD_REF,
+            "search",
+            {"request_id": "history-search-controller-1", "query": query},
+        )
+        self.assertEqual(submitted["state"], "submitted")
+        command = self.publisher.desktop_commands[-1][1]
+        self.assertEqual(command["action"], "history_search")
+        self.assertEqual(command["project_ref"], PROJECT_REF)
+        self.assertIsNone(command["expected_control_revision"])
+        with self.store._connect() as connection:  # noqa: SLF001 - asserts plaintext is not journaled
+            dump = "\n".join(connection.iterdump())
+        self.assertNotIn(query, dump)
+        self.assertNotIn("history-search-controller-1", dump)
+
+        received = self.service.receive(
+            "desktop_event",
+            history_event(
+                self.runner_id,
+                sequence=1,
+                revision=8,
+                request_id="history-search-controller-1",
+            ),
+        )
+        replay = self.service.events(THREAD_REF, after_cursor=0, limit=10, wait_seconds=0)
+        self.assertEqual(received["status"], "stored")
+        self.assertEqual(replay["events"][-1]["event_kind"], "history.search")
+
+    def test_old_runner_history_fails_closed_without_publishing(self) -> None:
+        with self.assertRaises(StoreError) as context:
+            self.service.history_query(
+                THREAD_REF,
+                "page",
+                {"request_id": "history-page-old-runner"},
+            )
+        self.assertEqual(context.exception.code, "desktop_history_capability_unavailable")
+        self.assertEqual(self.publisher.desktop_commands, [])
 
     def test_hosts_projects_threads_and_monotonic_snapshot_are_ref_only(self) -> None:
         hosts = self.service.hosts()

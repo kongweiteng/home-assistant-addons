@@ -16,7 +16,7 @@ MAX_DOCUMENT_BYTES = 256 * 1024
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RUNNER_RE = re.compile(r"^RN-[A-Z2-7]{20,32}$")
 REQUEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-REF_RE = re.compile(r"^(HS|PJ|TH|TR|QS)-[A-Z2-7]{20,52}$")
+REF_RE = re.compile(r"^(HS|PJ|TH|TR|QS|HC|SC)-[A-Z2-7]{20,52}$")
 DIGEST_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 UUID_RE = re.compile(
@@ -72,6 +72,9 @@ EVENT_KINDS = frozenset(
         "awaiting.input",
         "recovery.required",
         "protocol.degraded",
+        "history.page",
+        "history.search",
+        "history.error",
     }
 )
 THREAD_STATUSES = frozenset(
@@ -103,6 +106,8 @@ ACTIONS = frozenset(
         "queue_delete",
         "queue_reorder",
         "queue_start",
+        "history_page",
+        "history_search",
     }
 )
 
@@ -159,6 +164,9 @@ def build_desktop_command(
     queue_ref: str | None = None,
     queue_refs: list[str] | None = None,
     project_ref: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
+    query: str | None = None,
     ttl_seconds: int = 120,
 ) -> dict[str, Any]:
     _runner(runner_id)
@@ -171,7 +179,9 @@ def build_desktop_command(
     else:
         _ref(thread_ref, "TH")
         _revision(expected_thread_revision)
-        if project_ref is not None:
+        if action.startswith("history_"):
+            _ref(project_ref, "PJ")
+        elif project_ref is not None:
             raise DesktopProtocolError("desktop_project_invalid", "既有 Desktop Thread 命令不得携带项目")
     _nullable_revision(expected_control_revision)
     if action not in ACTIONS:
@@ -194,6 +204,12 @@ def build_desktop_command(
     }
     if project_ref is not None:
         document["project_ref"] = project_ref
+    if cursor is not None:
+        document["cursor"] = cursor
+    if limit is not None:
+        document["limit"] = limit
+    if query is not None:
+        document["query"] = query
     if expected_turn_ref is not None:
         document["expected_turn_ref"] = expected_turn_ref
     if input_text is not None:
@@ -239,6 +255,9 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         "effort",
         "queue_ref",
         "queue_refs",
+        "cursor",
+        "limit",
+        "query",
     }
     document = _exact_mapping(value, required, optional)
     _base(document, "desktop_command")
@@ -260,8 +279,12 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
         _ref(document["thread_ref"], "TH")
         _revision(document["expected_thread_revision"])
         _nullable_revision(document["expected_control_revision"])
-        if project_ref is not None:
+        if action.startswith("history_"):
+            _ref(project_ref, "PJ")
+        elif project_ref is not None:
             raise DesktopProtocolError("desktop_project_invalid", "既有 Desktop Thread 命令不得携带项目")
+    if action.startswith("history_") and document["expected_control_revision"] is not None:
+        raise DesktopProtocolError("desktop_revision_invalid", "Desktop 历史读取不得携带控制 revision")
     created_at = _shanghai_time(document["created_at"], "created_at")
     expires_at = _shanghai_time(document["expires_at"], "expires_at")
     current = _aware(now, "now")
@@ -330,6 +353,32 @@ def validate_desktop_command(value: Mapping[str, Any], *, now: dt.datetime) -> d
             _ref(item, "QS")
     elif queue_refs is not None:
         raise DesktopProtocolError("desktop_ref_invalid", "该 Desktop 动作不允许 queue refs")
+    cursor = document.get("cursor")
+    if action == "history_page":
+        if cursor is not None:
+            _ref(cursor, "HC")
+    elif action == "history_search":
+        if cursor is not None:
+            _ref(cursor, "SC")
+    elif cursor is not None:
+        raise DesktopProtocolError("desktop_ref_invalid", "该 Desktop 动作不允许历史游标")
+    limit = document.get("limit")
+    if action.startswith("history_"):
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 20:
+            raise DesktopProtocolError("desktop_history_limit_invalid", "Desktop 历史分页大小无效")
+    elif limit is not None:
+        raise DesktopProtocolError("desktop_history_limit_invalid", "该 Desktop 动作不允许分页大小")
+    query = document.get("query")
+    if action == "history_search":
+        if (
+            not isinstance(query, str)
+            or query != query.strip()
+            or not 1 <= len(query) <= 120
+            or any(ord(character) < 32 for character in query)
+        ):
+            raise DesktopProtocolError("desktop_history_query_invalid", "Desktop 历史搜索词无效")
+    elif query is not None:
+        raise DesktopProtocolError("desktop_history_query_invalid", "该 Desktop 动作不允许搜索词")
     _digest(document)
     return document
 
@@ -493,10 +542,84 @@ def _validate_event(value: Mapping[str, Any]) -> dict[str, Any]:
         raise DesktopProtocolError("desktop_event_invalid", "Desktop event 类型或来源无效")
     if not isinstance(document["payload"], Mapping):
         raise DesktopProtocolError("desktop_event_invalid", "Desktop event payload 无效")
+    if str(document["event_kind"]).startswith("history."):
+        _validate_history_event_payload(
+            str(document["event_kind"]),
+            document["payload"],
+        )
+        if len(canonical_json(document).encode("utf-8")) > 64 * 1024:
+            raise DesktopProtocolError("desktop_payload_too_large", "Desktop 历史页超过 64KiB")
     _shanghai_time(document["created_at"], "created_at")
     _public(document["payload"])
     _digest(document)
     return document
+
+
+def _validate_history_event_payload(event_kind: str, value: Mapping[str, Any]) -> None:
+    if event_kind == "history.error":
+        payload = _exact_mapping(value, {"request_id", "action", "error_code"})
+        _request(payload["request_id"])
+        _request(payload["error_code"])
+        if payload["action"] not in {"history_page", "history_search"}:
+            raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史错误动作无效")
+        return
+    required = {"request_id", "next_cursor", "has_more"}
+    content_key = "turns" if event_kind == "history.page" else "occurrences"
+    payload = _exact_mapping(value, required | {content_key})
+    _request(payload["request_id"])
+    if not isinstance(payload["has_more"], bool):
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史分页状态无效")
+    cursor = payload["next_cursor"]
+    if cursor is not None:
+        _ref(cursor, "HC" if event_kind == "history.page" else "SC")
+    if payload["has_more"] is not (cursor is not None):
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史游标与分页状态不一致")
+    items = payload[content_key]
+    if not isinstance(items, list) or len(items) > 20:
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史页条目数无效")
+    if event_kind == "history.page":
+        for turn in items:
+            _validate_history_turn(turn)
+    else:
+        for occurrence in items:
+            if set(occurrence) != {"turn_ref", "snippet"}:
+                raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史搜索结果无效")
+            _ref(occurrence.get("turn_ref"), "TR")
+            snippet = occurrence.get("snippet")
+            if not isinstance(snippet, str) or len(snippet.encode("utf-8")) > 2000:
+                raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史搜索摘要无效")
+
+
+def _validate_history_turn(value: Any) -> None:
+    turn = _exact_mapping(
+        value,
+        {
+            "turn_ref",
+            "status",
+            "started_at",
+            "completed_at",
+            "duration_ms",
+            "items_incomplete",
+            "items",
+        },
+    )
+    _ref(turn["turn_ref"], "TR")
+    if turn["status"] not in {"completed", "interrupted", "failed", "inProgress"}:
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史 Turn 状态无效")
+    for field in ("started_at", "completed_at"):
+        if turn[field] is not None:
+            _shanghai_time(turn[field], f"history.{field}")
+    duration = turn["duration_ms"]
+    if duration is not None and (
+        not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or not 0 <= duration <= 86_400_000
+    ):
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史 Turn 时长无效")
+    if not isinstance(turn["items_incomplete"], bool):
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史 Turn 完整性无效")
+    if not isinstance(turn["items"], list) or len(turn["items"]) > 500:
+        raise DesktopProtocolError("desktop_event_invalid", "Desktop 历史 Turn 条目无效")
 
 
 def _validate_receipt(value: Mapping[str, Any]) -> dict[str, Any]:

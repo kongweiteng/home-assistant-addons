@@ -65,7 +65,7 @@ const q = id => document.getElementById(id);
 const API = '../api/desktop/v1';
 const STATUS_API = '../api/status';
 const SHANGHAI_TIME = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
-const state = {csrf: '', hosts: [], projects: [], threads: [], threadsCursor: 0, threadsHasMore: false, threadsLoading: false, selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', selectedEffort: '', detail: null, events: [], eventCursor: 0, eventSource: null, eventReconnectTimer: 0, eventReconnectAttempt: 0, overviewCursor: 0, overviewSource: null, overviewReconnectTimer: 0, overviewReconnectAttempt: 0, overviewStreamState: 'connecting', detailStreamState: 'idle', refreshGeneration: 0, mode: 'safe', loading: false, drafts: {}, pendingCreate: null, createBusy: false, queueBusy: false, queueOpen: false, queueEditing: '', queueDrafts: {}, following: true, serverTimeMs: 0, serverTimeObservedAt: 0, lastOverviewFrameAt: 0, lastDetailFrameAt: 0, lastDataEventAt: '', overviewError: '', streamFailures: new Set(), detailReloadTimer: 0, overviewReconcileTimer: 0, newTaskReturnFocus: null, connectionReturnFocus: null};
+const state = {csrf: '', hosts: [], projects: [], threads: [], threadsCursor: 0, threadsHasMore: false, threadsLoading: false, selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', selectedEffort: '', detail: null, events: [], eventCursor: 0, eventSource: null, eventReconnectTimer: 0, eventReconnectAttempt: 0, overviewCursor: 0, overviewSource: null, overviewReconnectTimer: 0, overviewReconnectAttempt: 0, overviewStreamState: 'connecting', detailStreamState: 'idle', refreshGeneration: 0, mode: 'safe', loading: false, drafts: {}, pendingCreate: null, createBusy: false, queueBusy: false, queueOpen: false, queueEditing: '', queueDrafts: {}, following: true, serverTimeMs: 0, serverTimeObservedAt: 0, lastOverviewFrameAt: 0, lastDetailFrameAt: 0, lastDataEventAt: '', overviewError: '', streamFailures: new Set(), detailReloadTimer: 0, overviewReconcileTimer: 0, newTaskReturnFocus: null, connectionReturnFocus: null, historyTurns: [], historyCursor: null, historyHasMore: false, historyLoading: false, historyRequestId: '', historyInitialized: false, historyError: '', searchQuery: '', searchResults: [], searchCursor: null, searchHasMore: false, searchLoading: false, searchRequestId: '', searchAppend: false, searchError: ''};
 
 function requestId() {
   const bytes = new Uint8Array(16);
@@ -158,8 +158,8 @@ function freshness() {
   const dataSeconds = Number.isFinite(dataAt) ? Math.max(0, Math.floor((estimatedServerNow() - dataAt) / 1000)) : null;
   if (dataSeconds === null) return {label: '任务数据时间未知', kind: 'bad', seconds, dataSeconds};
   if (dataSeconds > 30) return {label: `任务数据延迟 ${dataSeconds} 秒`, kind: 'bad', seconds, dataSeconds};
-  if (seconds <= 10 && dataSeconds <= 15) return {label: '实时已连接', kind: 'good', seconds, dataSeconds};
-  if (dataSeconds > 15) return {label: `任务数据 ${dataSeconds} 秒前`, kind: 'warn', seconds, dataSeconds};
+  if (seconds <= 10 && dataSeconds <= 10) return {label: '实时已连接', kind: 'good', seconds, dataSeconds};
+  if (dataSeconds > 10) return {label: `任务数据 ${dataSeconds} 秒前`, kind: 'warn', seconds, dataSeconds};
   if (seconds <= 30) return {label: `Mac 心跳 ${seconds} 秒前`, kind: 'warn', seconds};
   return {label: `Mac 链路延迟 ${seconds} 秒`, kind: 'bad', seconds};
 }
@@ -265,6 +265,7 @@ function populateEffortOptions(select, modelId, {detail = null, value = ''} = {}
 }
 
 function renderNewTaskState() {
+  syncCreateDraftHost();
   const projectSelect = q('newTaskProject');
   const previousProject = projectSelect.value;
   const previousModel = q('newTaskModel').value;
@@ -281,7 +282,8 @@ function renderNewTaskState() {
   populateModelOptions(q('newTaskModel'));
   if (Array.from(q('newTaskModel').options).some(option => option.value === previousModel)) q('newTaskModel').value = previousModel;
   populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value, {value: previousEffort});
-  const pending = state.pendingCreate;
+  const pending = state.pendingCreate?.body.host_ref === state.selectedHost ? state.pendingCreate : null;
+  const otherPending = state.pendingCreate && !pending;
   if (pending) {
     projectSelect.value = pending.body.project_ref;
     q('newTaskModel').value = pending.body.model || '';
@@ -289,7 +291,7 @@ function renderNewTaskState() {
     q('newTaskInput').value = pending.body.input;
   }
   const allowed = hostCanCreate() && state.projects.length > 0;
-  q('createTaskButton').disabled = state.createBusy || (pending ? !navigator.onLine : !allowed);
+  q('createTaskButton').disabled = state.createBusy || Boolean(otherPending) || (pending ? !navigator.onLine : !allowed);
   q('createTaskButton').textContent = state.createBusy ? '正在创建…' : pending ? '继续检查' : '创建并打开';
   q('newTaskProject').disabled = Boolean(pending) || state.projects.length === 0;
   q('newTaskModel').disabled = Boolean(pending) || !hasCapability('model_override_v1');
@@ -302,6 +304,8 @@ function renderNewTaskState() {
   else if (!currentHost()?.online || !currentHost()?.write_available) q('newTaskFeedback').textContent = 'Runner 离线：提交已禁用，草稿只保留在当前页面内存中。';
   else if (!hasCapability('create_thread_v1')) q('newTaskFeedback').textContent = '当前 Runner 尚未提供 create_thread_v1，不能远程新建任务。';
   else q('newTaskFeedback').textContent = '当前主机没有可选项目，不能创建任务。';
+  if (otherPending) q('newTaskFeedback').textContent = '另一台 Mac 的新建结果待确认，请切回原主机查看；当前草稿已保留。';
+  renderCreateAttachments();
 }
 
 function syncDialogBackground() {
@@ -315,6 +319,7 @@ function restoreFocus(element) {
 }
 
 function setNewTaskOpen(open) {
+  if (!open) saveCreateDraftFields();
   const wasOpen = !q('newTaskSheet').classList.contains('hidden');
   if (open && !wasOpen) state.newTaskReturnFocus = document.activeElement;
   q('newTaskSheet').classList.toggle('hidden', !open);
@@ -508,11 +513,12 @@ function renderDetail() {
   const sync = badge('正在同步', 'sync-badge');
   sync.id = 'detailSyncState';
   meta.append(sync);
-  if (snapshot.history_incomplete) meta.append(badge('部分较早消息未显示', 'warn'));
+  if (snapshot.history_incomplete || state.historyHasMore) meta.append(badge('可继续加载较早消息', 'warn'));
   renderNotice(detail);
   renderDeliveryStatus(detail);
   renderActionState(detail);
-  renderConversation(snapshot.turns || []);
+  renderHistoryControls();
+  renderConversation(mergedConversationTurns());
   renderComposer(detail);
   renderQueue(detail);
   renderFreshness();
@@ -585,6 +591,189 @@ function renderActionState(detail) {
   q('archiveButton').disabled = blocked || !hasCapability('archive_control_v1');
   q('unarchiveButton').classList.toggle('hidden', detail.status !== 'archived');
   q('unarchiveButton').disabled = !writeAvailable() || !hasCapability('archive_control_v1');
+}
+
+function resetHistoryState() {
+  state.historyTurns = [];
+  state.historyCursor = null;
+  state.historyHasMore = false;
+  state.historyLoading = false;
+  state.historyRequestId = '';
+  state.historyInitialized = false;
+  state.historyError = '';
+  state.searchQuery = '';
+  state.searchResults = [];
+  state.searchCursor = null;
+  state.searchHasMore = false;
+  state.searchLoading = false;
+  state.searchRequestId = '';
+  state.searchAppend = false;
+  state.searchError = '';
+  if (q('historySearchInput')) q('historySearchInput').value = '';
+}
+
+function dedupeTurns(turns) {
+  const values = [];
+  const positions = new Map();
+  for (const turn of turns || []) {
+    const ref = turn?.turn_ref;
+    if (!ref) continue;
+    if (positions.has(ref)) values[positions.get(ref)] = turn;
+    else { positions.set(ref, values.length); values.push(turn); }
+  }
+  return values;
+}
+
+function mergedConversationTurns() {
+  return dedupeTurns([...(state.historyTurns || []), ...(state.detail?.snapshot?.turns || [])]);
+}
+
+function historyErrorText(code) {
+  const labels = {
+    history_capability_unavailable: '当前 Runner 版本仅支持最近消息',
+    history_search_capability_unavailable: '当前 Runner 版本不支持任务内搜索',
+    history_cursor_invalid: '历史游标已失效，请重新打开任务后再试',
+    history_cursor_thread_mismatch: '历史游标不属于当前任务，已停止加载',
+    history_page_too_large: '这页消息过大，Runner 已安全停止加载',
+    request_expired: '历史请求已过期，请手动重试',
+    runner_internal_error: 'Runner 读取历史时出现内部错误，请稍后手动重试',
+  };
+  return labels[code] || '较早消息暂时无法读取，请稍后手动重试';
+}
+
+function renderHistoryControls() {
+  if (!q('historyPanel')) return;
+  const paging = state.detail?.history?.paging_available === true;
+  const searching = state.detail?.history?.search_available === true;
+  q('loadEarlierMessages').disabled = !paging || state.historyLoading || (state.historyInitialized && !state.historyHasMore);
+  q('loadEarlierMessages').textContent = state.historyLoading ? '正在加载…' : state.historyHasMore ? '加载较早消息' : '已显示全部消息';
+  q('historySearchInput').disabled = !searching || state.searchLoading;
+  q('historySearchButton').disabled = !searching || state.searchLoading;
+  q('historySearchButton').textContent = state.searchLoading ? '搜索中…' : '搜索';
+  const status = q('historyStatus');
+  status.className = `history-status ${(state.historyError || state.searchError) ? 'error' : ''}`.trim();
+  if (!paging && !searching) status.textContent = '当前 Runner 版本仅支持最近消息';
+  else if (state.searchLoading) status.textContent = '正在搜索当前任务的公开文本…';
+  else if (state.historyLoading) status.textContent = '较早消息会通过实时连接持续返回…';
+  else if (state.searchError) status.textContent = state.searchError;
+  else if (state.historyError) status.textContent = state.historyError;
+  else if (state.searchQuery) status.textContent = state.searchResults.length ? `找到 ${state.searchResults.length} 条匹配结果` : '没有找到匹配的公开文本';
+  else if (state.historyHasMore) status.textContent = '当前先显示最近消息，可按需向前加载';
+  else status.textContent = '已显示可读取的全部消息';
+  const results = q('historySearchResults');
+  results.replaceChildren();
+  for (const occurrence of state.searchResults) {
+    const item = document.createElement('article');
+    item.className = 'history-result';
+    const ref = document.createElement('strong');
+    ref.textContent = occurrence.turn_ref || '匹配消息';
+    const snippet = document.createElement('span');
+    snippet.textContent = occurrence.snippet || '';
+    item.append(ref, snippet);
+    results.append(item);
+  }
+  results.classList.toggle('hidden', !state.searchQuery || !state.searchResults.length);
+  q('loadMoreSearchResults').classList.toggle('hidden', !state.searchQuery || !state.searchResults.length || !state.searchHasMore);
+  q('loadMoreSearchResults').disabled = state.searchLoading || !searching;
+}
+
+async function requestHistoryPage({initial = false} = {}) {
+  if (!state.detail || state.historyLoading || (!initial && !state.historyHasMore)) return;
+  const threadRef = state.detail.thread_ref;
+  const request = requestId();
+  const cursor = initial ? null : state.historyCursor;
+  state.historyRequestId = request;
+  state.historyLoading = true;
+  state.historyError = '';
+  renderHistoryControls();
+  const body = {request_id: request, ...(cursor ? {cursor} : {})};
+  try {
+    await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/history/page`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+  } catch (error) {
+    if (threadRef !== state.selectedThread || request !== state.historyRequestId) return;
+    state.historyLoading = false;
+    state.historyError = error.message || '较早消息请求失败';
+    renderHistoryControls();
+  }
+}
+
+async function requestHistorySearch({append = false} = {}) {
+  if (!state.detail || state.searchLoading || state.detail.history?.search_available !== true) return;
+  const query = append ? state.searchQuery : q('historySearchInput').value.trim();
+  if (!query || query.length > 120 || Array.from(query).some(character => character.charCodeAt(0) < 32)) {
+    state.searchError = '请输入 1–120 个可见字符';
+    renderHistoryControls();
+    return;
+  }
+  if (append && !state.searchHasMore) return;
+  const threadRef = state.detail.thread_ref;
+  const request = requestId();
+  const cursor = append ? state.searchCursor : null;
+  if (!append) {
+    state.searchQuery = query;
+    state.searchResults = [];
+    state.searchCursor = null;
+    state.searchHasMore = false;
+  }
+  state.searchRequestId = request;
+  state.searchAppend = append;
+  state.searchLoading = true;
+  state.searchError = '';
+  renderHistoryControls();
+  const body = {request_id: request, query, ...(cursor ? {cursor} : {})};
+  try {
+    await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/history/search`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+  } catch (error) {
+    if (threadRef !== state.selectedThread || request !== state.searchRequestId) return;
+    state.searchLoading = false;
+    state.searchError = error.message || '任务内搜索失败';
+    renderHistoryControls();
+  }
+}
+
+function applyHistoryEvent(event) {
+  const payload = event?.payload || {};
+  if (event?.event_kind === 'history.error') {
+    if (payload.action === 'history_page' && payload.request_id === state.historyRequestId) {
+      state.historyLoading = false;
+      state.historyError = historyErrorText(payload.error_code);
+    }
+    if (payload.action === 'history_search' && payload.request_id === state.searchRequestId) {
+      state.searchLoading = false;
+      state.searchError = historyErrorText(payload.error_code);
+    }
+    renderHistoryControls();
+    return;
+  }
+  if (event?.event_kind === 'history.page' && payload.request_id === state.historyRequestId) {
+    const viewport = q('conversationView');
+    const preserveAnchor = state.historyTurns.length > 0;
+    const anchor = preserveAnchor ? {height: viewport.scrollHeight, top: viewport.scrollTop} : null;
+    state.historyTurns = dedupeTurns([...(payload.turns || []), ...state.historyTurns]);
+    state.historyCursor = payload.next_cursor || null;
+    state.historyHasMore = payload.has_more === true;
+    state.historyLoading = false;
+    state.historyError = '';
+    renderHistoryControls();
+    renderConversation(mergedConversationTurns(), {anchor});
+    return;
+  }
+  if (event?.event_kind === 'history.search' && payload.request_id === state.searchRequestId) {
+    const incoming = Array.isArray(payload.occurrences) ? payload.occurrences : [];
+    const combined = state.searchAppend ? [...state.searchResults, ...incoming] : incoming;
+    const seen = new Set();
+    state.searchResults = combined.filter(item => {
+      const key = `${item?.turn_ref || ''}\n${item?.snippet || ''}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    state.searchCursor = payload.next_cursor || null;
+    state.searchHasMore = payload.has_more === true;
+    state.searchLoading = false;
+    state.searchError = '';
+    renderHistoryControls();
+  }
 }
 
 function isNearConversationBottom() {
@@ -698,10 +887,10 @@ function liveAssistantText() {
   return value;
 }
 
-function renderConversation(turns) {
+function renderConversation(turns, {anchor = null} = {}) {
   const viewport = q('conversationView');
   const root = q('conversationInner');
-  const shouldFollow = state.following || isNearConversationBottom();
+  const shouldFollow = !anchor && (state.following || isNearConversationBottom());
   root.replaceChildren();
   const shown = new Set();
   const imageMessages = state.detail?.image_messages || [];
@@ -733,7 +922,11 @@ function renderConversation(turns) {
   renderImageHistory(root, imageMessages.filter(message => !placedImages.has(message.request_id)));
   if (state.detail?.status === 'active') root.append(messageNode('assistant', live, {streaming: true}));
   if (!root.children.length) root.append(messageNode('system', '还没有消息。你可以在下方开始对话。'));
-  if (shouldFollow) {
+  if (anchor) {
+    state.following = false;
+    q('newReplyButton').classList.remove('hidden');
+    requestAnimationFrame(() => { viewport.scrollTop = anchor.top + Math.max(0, viewport.scrollHeight - anchor.height); });
+  } else if (shouldFollow) {
     state.following = true;
     q('newReplyButton').classList.add('hidden');
     requestAnimationFrame(() => { viewport.scrollTop = viewport.scrollHeight; });
@@ -1076,6 +1269,7 @@ async function selectThread(threadRef) {
   state.events = [];
   state.eventCursor = 0;
   state.following = true;
+  resetHistoryState();
   renderThreads();
   const loaded = await loadThread(threadRef, {restartStream: true});
   if (selection !== state.selectionGeneration || threadRef !== state.selectedThread || !loaded) return;
@@ -1090,7 +1284,12 @@ async function loadThread(threadRef, {restartStream = false, throwOnError = fals
     const detail = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}`);
     if (selection !== state.selectionGeneration || threadRef !== state.selectedThread) return false;
     if (state.detail?.thread_ref === threadRef && number(state.detail.thread_revision) > number(detail.thread_revision)) return true;
+    const initializeHistory = !state.historyInitialized;
     state.detail = detail;
+    if (initializeHistory) {
+      state.historyInitialized = true;
+      state.historyHasMore = detail.history?.paging_available === true || detail.snapshot?.history_incomplete === true;
+    }
     renderDetail();
     if (restartStream) startEventStream();
     return true;
@@ -1294,9 +1493,12 @@ function startEventStream() {
       scheduleDetailReload(threadRef);
     }
     if (event.type === 'desktop' && document.events?.length) {
-      state.events.push(...document.events);
+      const historyEvents = document.events.filter(value => String(value?.event_kind || '').startsWith('history.'));
+      const liveEvents = document.events.filter(value => !String(value?.event_kind || '').startsWith('history.'));
+      for (const historyEvent of historyEvents) applyHistoryEvent(historyEvent);
+      state.events.push(...liveEvents);
       state.events = state.events.slice(-500);
-      scheduleDetailReload(threadRef);
+      if (liveEvents.length) scheduleDetailReload(threadRef);
     }
     if (event.type === 'desktop' && document.changed && !document.events?.length) scheduleDetailReload(threadRef);
     renderFreshness();
@@ -1304,7 +1506,22 @@ function startEventStream() {
   source.addEventListener('ready', receive);
   source.addEventListener('heartbeat', receive);
   source.addEventListener('desktop', receive);
-  source.onopen = () => { state.detailStreamState = 'open'; state.streamFailures.delete('detail'); renderFreshness(); };
+  source.onopen = () => {
+    state.detailStreamState = 'open';
+    state.streamFailures.delete('detail');
+    renderFreshness();
+    // The Controller tails the current event cursor when a stream first opens.
+    // Submit the initial history request only after that cursor is established,
+    // otherwise a very fast Runner reply can land before the SSE subscriber and
+    // be mistaken for an already-seen event.
+    if (
+      state.detail?.history?.paging_available === true
+      && state.historyInitialized
+      && state.historyHasMore
+      && !state.historyLoading
+      && !state.historyRequestId
+    ) void requestHistoryPage({initial: true});
+  };
   source.onerror = () => { if (source === state.eventSource) scheduleEventReconnect(); };
 }
 
@@ -1383,6 +1600,8 @@ async function createThread(event) {
   if (state.createBusy) return;
   const host = currentHost();
   const existing = state.pendingCreate;
+  if (existing && existing.body.host_ref !== state.selectedHost) { q('newTaskFeedback').textContent = '请切回正在确认新任务的 Mac，当前草稿已保留'; return; }
+  const attachments = currentCreateAttachments();
   const input = existing?.body.input || q('newTaskInput').value.trim();
   const projectRef = existing?.body.project_ref || q('newTaskProject').value;
   const model = existing?.body.model || q('newTaskModel').value;
@@ -1392,12 +1611,15 @@ async function createThread(event) {
     q('newTaskFeedback').textContent = 'Runner 当前不可创建任务；草稿仍保留，未发送。';
     return;
   }
-  if (!existing && (!input || !state.projects.some(project => project.project_ref === projectRef))) {
+  if (!existing && ((!input && !attachments.length) || !state.projects.some(project => project.project_ref === projectRef))) {
     q('newTaskFeedback').className = 'feedback warning';
-    q('newTaskFeedback').textContent = '请选择项目并填写任务要求。';
+    q('newTaskFeedback').textContent = '请选择项目，并填写任务要求或添加图片。';
     return;
   }
-  const body = existing?.body || {request_id: requestId(), host_ref: host.host_ref, project_ref: projectRef, input, ...(model ? {model} : {}), ...(effort ? {effort} : {})};
+  if (!existing && !createImagesReady()) { renderCreateAttachments(); q('newTaskFeedback').textContent = '图片尚未就绪或已过期，请完成上传后创建'; return; }
+  if (!existing) saveCreateDraftFields();
+  const images = attachments.length ? {image_refs: attachments.map(item => item.image_ref)} : {};
+  const body = existing?.body || {request_id: requestId(), host_ref: host.host_ref, project_ref: projectRef, input, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {})};
   state.pendingCreate = existing || {body, controllerAccepted: false};
   state.createBusy = true;
   renderNewTaskState();
@@ -1424,6 +1646,8 @@ async function createThread(event) {
     state.createBusy = false;
     q('createTaskButton').disabled = state.pendingCreate ? !navigator.onLine : !(hostCanCreate() && state.projects.length > 0);
     q('createTaskButton').textContent = state.pendingCreate ? '继续检查' : '创建并打开';
+    if (state.pendingCreate && state.pendingCreate.body.host_ref !== state.selectedHost) q('createTaskButton').disabled = true;
+    renderCreateAttachments();
   }
 }
 
@@ -1441,8 +1665,10 @@ async function handleCreateResult(result) {
     q('newTaskFeedback').textContent = `创建未完成（${result.state || 'unknown'}）；草稿保留，请核对结果`;
     return;
   }
+  syncCreateDraftHost();
   state.pendingCreate = null;
-  q('newTaskInput').value = '';
+  clearConfirmedCreateDraft(pending.body);
+  renderNewTaskState();
   q('newTaskFeedback').textContent = 'Mac 已确认创建，正在打开同一个任务';
   await addUnknownThread(result.thread_ref);
   // Closing the sheet is a deliberate navigation; late receipts must not steal another task.
@@ -1464,7 +1690,7 @@ function resizeComposer() {
   input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
 }
 
-q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.selectedEffort = ''; state.detail = null; state.overviewCursor = 0; state.eventCursor = 0; stopEventStream(); stopOverviewStream(); await refreshOverview({preserveDetail: false}); };
+q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.selectedEffort = ''; state.detail = null; state.overviewCursor = 0; state.eventCursor = 0; resetHistoryState(); stopEventStream(); stopOverviewStream(); await refreshOverview({preserveDetail: false}); };
 q('statusFilter').onchange = () => void loadThreadPage({reset: true});
 q('threadSearch').oninput = renderThreads;
 q('loadMoreThreads').onclick = () => void loadThreadPage();
@@ -1508,10 +1734,17 @@ q('safeMode').onclick = () => setMode('safe');
 q('nativeMode').onclick = () => setMode('native');
 q('modelSelect').onchange = () => { state.selectedModel = q('modelSelect').value; state.selectedEffort = ''; if (state.detail) renderComposer(state.detail); };
 q('effortSelect').onchange = () => { state.selectedEffort = q('effortSelect').value; };
-q('newTaskModel').onchange = () => { populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value); };
+q('newTaskModel').onchange = () => { populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value); saveCreateDraftFields(); };
+q('newTaskEffort').onchange = saveCreateDraftFields;
+q('newTaskProject').onchange = saveCreateDraftFields;
+q('newTaskInput').oninput = saveCreateDraftFields;
 q('interruptButton').onclick = () => { q('taskMenu').open = false; if (state.detail) void submitAction('interrupt', {expected_turn_ref: state.detail.active_turn_ref}); };
 q('archiveButton').onclick = () => { q('taskMenu').open = false; if (state.detail && confirm(`归档“${state.detail.title}”？任务不会被删除。`)) void submitAction('archive'); };
 q('unarchiveButton').onclick = () => { q('taskMenu').open = false; if (state.detail) void submitAction('unarchive'); };
+q('loadEarlierMessages').onclick = () => void requestHistoryPage();
+q('historySearchForm').onsubmit = event => { event.preventDefault(); void requestHistorySearch(); };
+q('loadMoreSearchResults').onclick = () => void requestHistorySearch({append: true});
+q('historySearchInput').oninput = () => { state.searchError = ''; renderHistoryControls(); };
 q('composer').onsubmit = event => {
   event.preventDefault();
   const detail = state.detail;
@@ -1545,7 +1778,11 @@ if (window.visualViewport) {
 
 initImageUi();
 updateViewportHeight();
-void refreshOverview({preserveDetail: false}).then(() => { if (new URLSearchParams(location.search).get('new') === '1') setNewTaskOpen(true); });
+void refreshOverview({preserveDetail: false}).then(() => {
+  const requested = new URLSearchParams(location.search).get('thread_ref');
+  if (requested && /^TH-[A-Z2-7]{20,52}$/.test(requested)) void selectThread(requested);
+  else if (new URLSearchParams(location.search).get('new') === '1') setNewTaskOpen(true);
+});
 setInterval(renderFreshness, 1000);
 setInterval(() => {
   if (!navigator.onLine) return;

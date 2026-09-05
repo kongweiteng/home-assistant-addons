@@ -17,12 +17,21 @@ LAYOUT_CSS += r"""
 @media(max-width:759px){.mobile-nav a,.mobile-nav button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px}.mobile-nav a,.mobile-nav button{font-size:11px}.attachment-add{flex-direction:column;font-size:10px;gap:1px}}
 """
 
+LAYOUT_CSS += r"""
+.history-panel{display:grid;gap:8px;margin:0 auto 18px;max-width:760px;padding:10px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.78)}
+.history-toolbar{display:grid;grid-template-columns:auto minmax(260px,1fr);gap:8px;align-items:start}.history-search{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:7px;min-width:0}
+.history-search input,.history-search button,.history-panel>button{min-height:44px}.history-status{min-height:18px;margin:0;color:var(--muted);font-size:11px}.history-status.error{color:var(--red)}
+.history-results{display:grid;gap:6px;min-width:0}.history-result{min-width:0;border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--surface-3)}
+.history-result strong{display:block;margin-bottom:3px;color:var(--muted);font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-result span{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.history-more{justify-self:start}
+@media(max-width:759px){.history-panel{margin-bottom:15px;padding:9px}.history-toolbar{grid-template-columns:1fr}.history-search{grid-template-columns:minmax(0,1fr) auto}.history-search input{min-width:0;font-size:16px}.history-search button{padding-inline:12px}.history-panel>button{width:100%}}
+"""
+
 
 def task_first_html(html: str) -> str:
     html = html.replace('<option value="failed">需要处理</option>', '<option value="failed">执行失败</option>')
     html = html.replace('<option value="recovery_required">需要处理</option>', '<option value="recovery_required">需要恢复</option>')
     html = html.replace("max-width:920px", "max-width:759px").replace("max-width:820px", "max-width:759px")
-    html = html.replace("</style>", LAYOUT_CSS + "</style>", 1)
+    html = html.replace("</style>", LAYOUT_CSS + '.create-image-controls{display:grid;gap:7px;min-width:0}.create-image-controls>.attachment-add{justify-self:start;min-height:44px;flex-direction:row;font-size:13px;gap:7px}.create-image-controls .attachments{min-width:0;max-width:100%;padding-right:10px}.create-image-controls .image-help{padding:0}.new-task-sheet{max-height:calc(var(--app-height,100dvh) - 24px)}' + "</style>", 1)
     html = html.replace('<div class="top-actions">', '<nav class="app-nav" aria-label="应用导航"><a href="./" aria-current="page">任务</a><a href="../?view=tools">工具</a><a href="../?view=runners">状态</a><a href="../?view=overview">设置</a></nav><div class="top-actions">', 1)
     html = html.replace('<a href="../" class="settings-link">设置</a>', "")
     html = html.replace('<p id="connectionNote"', '<a href="../?view=runners" class="button-link">管理运行设备</a><p id="connectionNote"', 1)
@@ -32,6 +41,9 @@ def task_first_html(html: str) -> str:
     html = html[:start] + '<nav class="mobile-nav" aria-label="移动端导航"><a href="./" aria-current="page">任务</a><a href="../?view=tools">工具</a><button id="mobileNewTask" class="primary-nav" type="button">新建</button><button id="mobileConnection" type="button">状态</button><a href="../?view=overview">设置</a></nav>' + html[end:]
     html = html.replace('<details id="advancedControls"', '<div id="attachmentTray" class="attachments hidden"></div><input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden><div id="imageHelp" class="image-help">图片能力正在检查</div><details id="advancedControls"', 1)
     html = html.replace('<div class="composer-bar">', '<div class="composer-bar"><button id="addImage" class="attachment-add" type="button" aria-label="添加图片" disabled>图片</button>', 1)
+    html = html.replace('<div id="conversationInner" class="conversation-inner"></div>', '<section id="historyPanel" class="history-panel" aria-label="较早消息与任务内搜索"><div class="history-toolbar"><button id="loadEarlierMessages" type="button">加载较早消息</button><form id="historySearchForm" class="history-search" role="search"><label class="sr-only" for="historySearchInput">搜索当前任务的公开文本</label><input id="historySearchInput" maxlength="120" placeholder="搜索当前任务"><button id="historySearchButton" type="submit">搜索</button></form></div><p id="historyStatus" class="history-status" role="status">正在检查较早消息</p><div id="historySearchResults" class="history-results hidden"></div><button id="loadMoreSearchResults" class="history-more hidden" type="button">加载更多搜索结果</button></section><div id="conversationInner" class="conversation-inner"></div>', 1)
+    html = html.replace('<textarea id="newTaskInput" maxlength="12000" required', '<textarea id="newTaskInput" maxlength="12000"', 1)
+    html = html.replace('<div class="field"><label for="newTaskModel">模型</label>', '<div class="create-image-controls"><button id="addCreateImage" class="attachment-add" type="button" aria-label="为新任务添加图片" disabled>' + icon('ImageSquare') + '添加图片</button><div id="createImageHelp" class="image-help">可以添加图片创建任务</div><div id="createAttachmentTray" class="attachments hidden"></div><input id="createImageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></div><div class="field"><label for="newTaskModel">模型</label>', 1)
     html = html.replace('<script src="desktop.js">', '<section id="imageDialog" class="image-dialog hidden" role="dialog" aria-modal="true" aria-label="图片预览"><button id="closeImage" type="button">关闭图片</button><img id="fullImage" alt="对话图片"><p id="fullImageCaption"></p></section><script src="desktop.js">', 1)
     for label, name in [('任务', 'ChatsCircle'), ('工具', 'Wrench'), ('状态', 'Gauge'), ('设置', 'GearSix')]:
         html = html.replace('>' + label + '</a>', '>' + icon(name) + label + '</a>')

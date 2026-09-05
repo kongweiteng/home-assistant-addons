@@ -14,10 +14,24 @@ let statusReconnectTimer = null;
 let statusReconnectDelay = 1000;
 let statusLastMessageAt = 0;
 let csrfRefreshTimer = null;
-let toolVisibleCount = 12;
+const toolPageSize = 12;
+let toolOffset = 0;
+let toolGeneration = 0;
+let toolRequest = null;
+let toolSearchTimer = null;
+let toolStatusRevision = null;
+let toolsDirty = true;
+let errorSummary = null;
+let errorPage = null;
+let errorOffset = 0;
+let errorRevision = null;
+let errorRequest = null;
+let errorStream = null;
+let errorReconnectTimer = null;
+let errorReconnectDelay = 1000;
 let toolRenderKey = '';
 const expandedTools = new Set();
-const viewNames = new Set(['overview', 'tools', 'runners']);
+const viewNames = new Set(['overview', 'tools', 'runners', 'errors']);
 const requestedView = window.location.hash.replace(/^#/, '') || new URLSearchParams(window.location.search).get('view');
 const enteringTaskWorkspace = !viewNames.has(requestedView);
 if (enteringTaskWorkspace) window.location.replace('desktop/');
@@ -39,6 +53,14 @@ function activateView({scroll = true} = {}) {
     else link.removeAttribute('aria-current');
   }
   if (scroll) window.scrollTo(0, 0);
+  if (view === 'tools' && statusDoc) void refreshTools();
+  if (view === 'errors') void refreshErrorPage();
+  else if (view !== 'tools' && toolRequest) {
+    toolGeneration += 1;
+    toolRequest.controller.abort();
+    toolRequest = null;
+    toolsDirty = true;
+  }
 }
 
 function requestId() {
@@ -112,29 +134,172 @@ function badge(text, kind = '') {
   return span;
 }
 
+function errorKind(error) {
+  return error?.severity === 'bad' ? 'bad' : error?.severity === 'warn' ? 'warn' : '';
+}
+
+function errorScopeText(value) {
+  return value === 'task' ? '任务上下文' : '组件状态';
+}
+
+function formatErrorTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${date.toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false})}（+08:00）`;
+}
+
+function renderErrorMetrics(payload) {
+  if (!payload?.summary) return;
+  const summary = payload.summary;
+  q('errorTotal').textContent = summary.total ?? 0;
+  q('errorComponents').textContent = summary.components ?? 0;
+  q('errorTasks').textContent = summary.tasks ?? 0;
+  q('errorRetryable').textContent = summary.retryable ?? 0;
+}
+
+function renderErrorSummary(payload) {
+  const root = q('errorSummaryList');
+  if (!root || !payload) return;
+  root.replaceChildren();
+  const items = payload.items || [];
+  if (!items.length) {
+    const empty = globalThis.document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = '目前没有需要处理的问题。';
+    root.append(empty);
+    return;
+  }
+  for (const item of items.slice(0, 3)) {
+    const row = globalThis.document.createElement('div');
+    row.className = 'error-summary-item';
+    const label = globalThis.document.createElement('span');
+    label.textContent = `${item.title} · ${item.error?.label || '需要处理'}`;
+    const meta = globalThis.document.createElement('span');
+    meta.className = 'badges';
+    meta.append(badge(errorScopeText(item.scope), ''), badge(item.error?.code || 'unknown', errorKind(item.error)));
+    row.append(label, meta);
+    root.append(row);
+  }
+}
+
+function renderErrorPage() {
+  const root = q('errorList');
+  if (!root || !errorPage) return;
+  const items = errorPage.items || [];
+  root.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'card muted';
+    empty.textContent = '没有需要处理的错误。';
+    root.append(empty);
+  }
+  for (const item of items) {
+    const row = document.createElement('article');
+    row.className = 'error-row';
+    const content = document.createElement('div');
+    const taskHref = typeof item.task_href === 'string' && /^desktop\/\?thread_ref=TH-[A-Z2-7]{20,52}$/.test(item.task_href) ? item.task_href : null;
+    const title = document.createElement(taskHref ? 'a' : 'h3');
+    if (taskHref) title.href = taskHref;
+    title.textContent = item.title || '需要处理的问题';
+    const text = document.createElement('p');
+    const occurredAt = formatErrorTime(item.occurred_at);
+    const at = occurredAt ? ` · ${occurredAt}` : '';
+    text.textContent = `${errorScopeText(item.scope)} · ${item.reference || '无标识'}${at}`;
+    content.append(title, text);
+    if (item.message) {
+      const detail = document.createElement('p');
+      detail.className = 'error-detail';
+      detail.textContent = item.message;
+      content.append(detail);
+    }
+    if (item.recommended_action) {
+      const action = document.createElement('p');
+      action.className = 'error-action';
+      action.textContent = `建议：${item.recommended_action}`;
+      content.append(action);
+    }
+    const badges = document.createElement('div');
+    badges.className = 'badges';
+    badges.append(
+      badge(item.error?.label || '需要处理', errorKind(item.error)),
+      badge(item.error?.code || 'unknown', errorKind(item.error)),
+      badge(item.error?.retryable ? '可重试' : '需要检查', item.error?.retryable ? 'warn' : ''),
+    );
+    row.append(content, badges);
+    root.append(row);
+  }
+  const page = errorPage.page || {};
+  q('previousErrors').hidden = !page.cursor;
+  q('nextErrors').hidden = !page.has_more;
+  const first = items.length ? Number(page.cursor || 0) + 1 : 0;
+  q('errorPageInfo').textContent = `第 ${first}–${Number(page.cursor || 0) + items.length} 项 / ${errorPage.summary?.total || 0} 项`;
+  root.setAttribute('aria-busy', 'false');
+}
+
+async function refreshErrorSummary() {
+  try {
+    const result = await jsonFetch('api/errors?limit=3');
+    errorSummary = result.result;
+    errorRevision = errorSummary.error_revision;
+    renderErrorSummary(errorSummary);
+    renderErrorMetrics(errorSummary);
+  } catch (error) {
+    const root = q('errorSummaryList');
+    root.replaceChildren();
+    const message = globalThis.document.createElement('p');
+    message.className = 'error';
+    message.textContent = `错误状态暂不可读取：${error.message}`;
+    root.append(message);
+  }
+}
+
+async function refreshErrorPage({cursor = errorOffset, force = false} = {}) {
+  if (selectedView() !== 'errors' && !force) return;
+  if (errorRequest) errorRequest.abort();
+  const request = new AbortController();
+  errorRequest = request;
+  q('errorList').setAttribute('aria-busy', 'true');
+  try {
+    const result = await jsonFetch(`api/errors?limit=12&cursor=${encodeURIComponent(cursor)}`, {signal: request.signal});
+    if (request !== errorRequest) return;
+    errorPage = result.result;
+    errorOffset = errorPage.page?.cursor || 0;
+    errorRevision = errorPage.error_revision;
+    renderErrorMetrics(errorPage);
+    renderErrorPage();
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    q('errorList').replaceChildren();
+    const message = document.createElement('div');
+    message.className = 'card error';
+    message.textContent = `错误列表暂不可读取：${error.message}`;
+    q('errorList').append(message);
+  } finally {
+    if (request === errorRequest) errorRequest = null;
+  }
+}
+
 function riskText(value) {
   return value === 'read_only' ? '只读' : value === 'write' ? '写入' : '受控操作';
 }
 
 function serviceText(value) {
-  return value === 'renovation_hub' ? 'Renovation Hub' : 'Operations Broker';
+  const labels = {renovation_hub: 'Renovation Hub', ha_operations_broker: 'Operations Broker',
+    family_memo: '家庭备忘录', home_assistant_prepare_car: '用车准备'};
+  return labels[value] || '未知服务';
 }
 
 function renderTools() {
   const body = q('toolRows');
   if (!catalog) return;
-  const serviceFilter = q('serviceFilter').value;
-  const riskFilter = q('riskFilter').value;
-  const search = (q('toolSearch')?.value || '').trim().toLocaleLowerCase();
-  const filtered = catalog.tools.filter(tool =>
-    (serviceFilter === 'all' || tool.service === serviceFilter)
-    && (riskFilter === 'all' || tool.risk_type === riskFilter)
-    && (!search || [tool.display_name, tool.name, serviceText(tool.service), ...(tool.intent_examples || [])].join(' ').toLocaleLowerCase().includes(search))
-  ).sort((left, right) => left.service.localeCompare(right.service) || left.display_name.localeCompare(right.display_name, 'zh-CN'));
-  const visible = filtered.slice(0, toolVisibleCount);
-  const key = JSON.stringify([visible, catalog.policy_error, search, serviceFilter, riskFilter, toolVisibleCount]);
-  q('toolCount').textContent = `显示 ${visible.length} / ${filtered.length} 项工具 · ${catalog.tools.filter(tool => tool.callable).length} 项可用`;
-  q('loadMoreTools').hidden = visible.length >= filtered.length;
+  const visible = catalog.tools;
+  const page = catalog.page;
+  const key = JSON.stringify([visible, catalog.policy_error, page]);
+  const start = visible.length ? page.offset + 1 : 0;
+  q('toolCount').textContent = `第 ${start}–${page.offset + visible.length} 项 / ${page.total} 项工具 · 筛选内 ${page.callable} 项可用`;
+  q('loadMoreTools').hidden = page.next_offset === null;
+  q('previousTools').hidden = page.previous_offset === null;
   if (key === toolRenderKey) return;
   toolRenderKey = key;
   const focusedTool = document.activeElement?.closest('[data-tool-name]')?.dataset.toolName;
@@ -219,20 +384,95 @@ async function setTool(tool, enabled, button) {
       `${tool.display_name}已${enabled ? '开启' : '关闭'}，目录 revision ${document.result.revision}`,
       'success',
     );
-    await refreshTools();
+    await refreshTools({force: true});
   } catch (error) {
     setFeedback(q('toolFeedback'), error.message, 'error');
-    await refreshTools();
+    await refreshTools({force: true});
   } finally {
     button.disabled = false;
   }
 }
 
-async function refreshTools() {
-  const document = await jsonFetch('api/tools');
-  catalog = document.result;
-  q('published').textContent = `${catalog.summary.published}/${catalog.summary.known}`;
-  renderTools();
+function toolsVisible() {
+  return selectedView() === 'tools' && document.visibilityState !== 'hidden';
+}
+
+function observeToolRevision(status) {
+  const revision = status.tools?.catalog_revision ?? null;
+  if (revision !== toolStatusRevision) {
+    toolStatusRevision = revision;
+    toolsDirty = true;
+    // A response started before this notification must not replace the newer page.
+    if (toolRequest) {
+      toolGeneration += 1;
+      toolRequest.controller.abort();
+      toolRequest = null;
+    }
+  }
+}
+
+async function refreshTools({force = false, offset = toolOffset} = {}) {
+  if (force || offset !== toolOffset) toolsDirty = true;
+  toolOffset = offset;
+  if (!toolsVisible() || !toolsDirty) return;
+  const params = new URLSearchParams({limit: String(toolPageSize), offset: String(toolOffset),
+    service: q('serviceFilter').value, risk: q('riskFilter').value});
+  const search = q('toolSearch').value.trim();
+  if (search) params.set('search', search);
+  const key = `${params.toString()}|${toolStatusRevision}`;
+  if (toolRequest?.key === key && !force) return toolRequest.promise;
+  if (toolRequest) toolRequest.controller.abort();
+  const generation = ++toolGeneration;
+  const controller = new AbortController();
+  // A failed request waits for a new revision, reconnect or explicit retry;
+  // repeated status frames must not become a directory polling loop.
+  toolsDirty = false;
+  q('toolRows').setAttribute('aria-busy', 'true');
+  q('loadMoreTools').disabled = true;
+  q('previousTools').disabled = true;
+  setFeedback(q('toolFeedback'), '正在加载当前页…');
+  const promise = (async () => {
+    try {
+      const response = await jsonFetch(`api/tools?${params}`, {signal: controller.signal});
+      if (generation !== toolGeneration || !toolsVisible()) return;
+      catalog = response.result;
+      toolOffset = catalog.page.offset;
+      toolsDirty = false;
+      q('published').textContent = `${catalog.summary.published}/${catalog.summary.known}`;
+      renderTools();
+      setFeedback(q('toolFeedback'), catalog.policy_error ? '策略状态异常，暂不可修改。' : '目录已更新', catalog.policy_error ? 'error' : 'muted');
+    } catch (error) {
+      if (generation !== toolGeneration || error.name === 'AbortError') return;
+      setFeedback(q('toolFeedback'), `目录未更新：${error.message}，可重试当前页。`, 'error');
+    } finally {
+      if (generation === toolGeneration) {
+        toolRequest = null;
+        q('toolRows').setAttribute('aria-busy', 'false');
+        q('loadMoreTools').disabled = false;
+        q('previousTools').disabled = false;
+      }
+    }
+  })();
+  toolRequest = {key, controller, promise};
+  return promise;
+}
+
+function resetToolFilter({debounce = false} = {}) {
+  window.clearTimeout(toolSearchTimer);
+  toolGeneration += 1;
+  if (toolRequest) toolRequest.controller.abort();
+  toolRequest = null;
+  toolsDirty = true;
+  toolOffset = 0;
+  // Do not leave previous-query actions on screen while the new search is pending.
+  catalog = null;
+  toolRenderKey = '';
+  q('toolRows').replaceChildren();
+  q('toolCount').textContent = '正在查找工具…';
+  q('previousTools').hidden = true;
+  q('loadMoreTools').hidden = true;
+  if (debounce) toolSearchTimer = window.setTimeout(() => void refreshTools(), 250);
+  else void refreshTools();
 }
 
 function runnerStateKind(value) {
@@ -680,6 +920,65 @@ function syncRunnerConfigurationState() {
   }
 }
 
+function setErrorStreamState(kind, message) {
+  const element = q('errorStreamState');
+  if (!element) return;
+  element.className = `stream-state ${kind}`;
+  element.textContent = message;
+}
+
+function stopErrorStream() {
+  if (errorStream) errorStream.close();
+  errorStream = null;
+  window.clearTimeout(errorReconnectTimer);
+  errorReconnectTimer = null;
+}
+
+function scheduleErrorReconnect(immediate = false) {
+  stopErrorStream();
+  if (!navigator.onLine) {
+    setErrorStreamState('bad', '网络已断开');
+    return;
+  }
+  const delay = immediate ? 0 : errorReconnectDelay;
+  if (!immediate) errorReconnectDelay = Math.min(15000, Math.round(errorReconnectDelay * 1.8));
+  setErrorStreamState('warn', delay ? `错误流重连中 · ${Math.ceil(delay / 1000)}秒` : '错误流连接中');
+  errorReconnectTimer = window.setTimeout(connectErrorStream, delay);
+}
+
+function connectErrorStream() {
+  if (!navigator.onLine || document.visibilityState === 'hidden') return;
+  stopErrorStream();
+  const source = new EventSource('api/errors/stream');
+  errorStream = source;
+  source.onopen = () => {
+    if (source !== errorStream) return;
+    errorReconnectDelay = 1000;
+    setErrorStreamState('good', '错误流已连接');
+  };
+  const onFrame = event => {
+    if (source !== errorStream) return;
+    let data;
+    try { data = JSON.parse(event.data); } catch (_) { scheduleErrorReconnect(); return; }
+    if (data?.version !== 1 || typeof data.error_revision !== 'string') { scheduleErrorReconnect(); return; }
+    setErrorStreamState('good', '错误流已连接');
+    const changed = data.error_revision !== errorRevision;
+    if (changed || event.type === 'ready') {
+      errorRevision = data.error_revision;
+      void refreshErrorSummary();
+      if (selectedView() === 'errors') {
+        errorOffset = 0;
+        q('errorListNote').textContent = changed ? '发现新错误状态，已回到最新页。' : '错误状态会自动更新。';
+        void refreshErrorPage({cursor: 0, force: true});
+      }
+    }
+  };
+  source.addEventListener('ready', onFrame);
+  source.addEventListener('errors', onFrame);
+  source.addEventListener('heartbeat', onFrame);
+  source.onerror = () => { if (source === errorStream) scheduleErrorReconnect(); };
+}
+
 function setStatusStreamState(kind, message) {
   const element = q('statusStreamState');
   element.className = `stream-state ${kind}`;
@@ -695,6 +994,7 @@ async function refresh(providedStatus = null) {
   try {
     const status = providedStatus || await jsonFetch('api/status');
     statusDoc = status;
+    observeToolRevision(status);
     if (!providedStatus) {
       csrf = status.csrf_token;
       scheduleCsrfRefresh();
@@ -721,7 +1021,8 @@ async function refresh(providedStatus = null) {
     q('runnerDisabled').classList.toggle('hidden', runnerEnabled);
     q('details').textContent = `Controller ${status.version} · Codex ${status.codex_version} · intake ${status.intake_enabled ? '已启用' : '关闭'} · Runner Center ${runnerEnabled ? '已启用' : '关闭'} · Thread ${status.queue.threads} · 已知工具 ${status.tools.known} · 已配置 ${status.tools.configured} · 策略开启 ${status.tools.enabled} · MCP 心跳 ${status.tools.mcp.observed_at || '未观测'} · 策略错误 ${status.tools.policy_error || '无'} · app-server ${status.app_server.running ? '运行' : '停止'}`;
     syncRunnerConfigurationState();
-    await refreshTools();
+    q('published').textContent = `${status.tools.published}/${status.tools.known}`;
+    if (toolsVisible() && toolsDirty) await refreshTools();
     if (runnerEnabled) await refreshRunners();
   } catch (error) {
     q('details').textContent = error.message;
@@ -759,6 +1060,7 @@ function connectStatusStream() {
     statusReconnectDelay = 1000;
     statusLastMessageAt = Date.now();
     setStatusStreamState('warn', '已连接 · 等待数据');
+    toolsDirty = true;
   };
   const onFrame = event => {
     if (source !== statusStream) return;
@@ -863,12 +1165,43 @@ q('closeRunnerCredential').onclick = closeCredentialRotation;
 q('runnerStateFilter').onchange = renderRunners;
 q('runnerPlatformFilter').onchange = renderRunners;
 q('reloadRunners').onclick = refreshRunners;
-function resetToolFilter() { toolVisibleCount = 12; renderTools(); }
-q('serviceFilter').onchange = resetToolFilter;
-q('riskFilter').onchange = resetToolFilter;
-q('toolSearch').oninput = resetToolFilter;
-q('loadMoreTools').onclick = () => { toolVisibleCount += 12; renderTools(); };
-q('reloadTools').onclick = refresh;
+for (const value of ['family_memo', 'home_assistant_prepare_car']) {
+  const option = document.createElement('option');
+  option.value = value;
+  option.textContent = serviceText(value);
+  q('serviceFilter').append(option);
+}
+const previousTools = document.createElement('button');
+previousTools.id = 'previousTools';
+previousTools.className = q('loadMoreTools').className;
+previousTools.textContent = '上一页';
+previousTools.hidden = true;
+q('loadMoreTools').before(previousTools);
+q('toolCount').setAttribute('aria-live', 'polite');
+q('toolSearch').maxLength = 200;
+q('toolSearch').placeholder = '搜索全部工具';
+q('loadMoreTools').textContent = '下一页';
+q('loadMoreTools').hidden = true;
+q('serviceFilter').onchange = () => resetToolFilter();
+q('riskFilter').onchange = () => resetToolFilter();
+q('toolSearch').oninput = () => resetToolFilter({debounce: true});
+previousTools.onclick = () => {
+  if (catalog && catalog.page.previous_offset !== null) void refreshTools({offset: catalog.page.previous_offset});
+};
+q('loadMoreTools').onclick = () => {
+  if (catalog && catalog.page.next_offset !== null) void refreshTools({offset: catalog.page.next_offset});
+};
+q('reloadTools').onclick = () => refreshTools({force: true});
+q('reloadErrors').onclick = () => {
+  void refreshErrorSummary();
+  void refreshErrorPage({cursor: errorOffset, force: true});
+};
+q('previousErrors').onclick = () => {
+  if (errorPage?.page?.cursor) void refreshErrorPage({cursor: Math.max(0, errorPage.page.cursor - 12), force: true});
+};
+q('nextErrors').onclick = () => {
+  if (errorPage?.page?.next_cursor !== null && errorPage?.page?.next_cursor !== undefined) void refreshErrorPage({cursor: errorPage.page.next_cursor, force: true});
+};
 q('login').onclick = async () => {
   try { await call('api/auth/device/start'); await refresh(); } catch (error) { alert(error.message); }
 };
@@ -884,7 +1217,11 @@ q('logout').onclick = async () => {
 };
 
 activateView({scroll: false});
-if (!enteringTaskWorkspace) refresh().finally(() => scheduleStatusReconnect(true));
+if (!enteringTaskWorkspace) refresh().finally(() => {
+  void refreshErrorSummary();
+  scheduleStatusReconnect(true);
+  scheduleErrorReconnect(true);
+});
 window.addEventListener('hashchange', () => activateView());
 for (const link of document.querySelectorAll('[data-view-link]')) {
   link.addEventListener('click', event => {
@@ -907,18 +1244,28 @@ window.setInterval(() => {
     setStatusStreamState('good', age < 2 ? '实时已连接 · 刚刚收到' : `实时已连接 · ${age}秒前收到`);
   }
 }, 2000);
-window.addEventListener('offline', () => scheduleStatusReconnect());
+window.addEventListener('offline', () => { scheduleStatusReconnect(); scheduleErrorReconnect(); });
 window.addEventListener('online', () => {
   refresh();
   scheduleStatusReconnect(true);
+  scheduleErrorReconnect(true);
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    if (toolRequest) {
+      toolGeneration += 1;
+      toolRequest.controller.abort();
+      toolRequest = null;
+      toolsDirty = true;
+    }
     stopStatusStream();
+    stopErrorStream();
     setStatusStreamState('warn', '页面在后台');
+    setErrorStreamState('warn', '页面在后台');
   } else {
     refresh();
     scheduleStatusReconnect(true);
+    scheduleErrorReconnect(true);
   }
 });
 """

@@ -8,7 +8,9 @@ import http.client
 import json
 from pathlib import Path
 import secrets
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -35,6 +37,7 @@ from weixin_gateway.api import DASHBOARD_HTML, DASHBOARD_JS, create_server
 from weixin_gateway.service import (
     ControllerClient,
     GatewayService,
+    controller_failure_details,
     controller_failure_message,
     split_text,
     validate_controller_ingress_base_url,
@@ -120,6 +123,15 @@ class LegacySubmittingController(StubController):
 
     async def job(self, _job_id: str) -> dict:
         return {"state": "queued"}
+
+
+class FailedSubmittingController(LegacySubmittingController):
+    async def job(self, _job_id: str) -> dict:
+        return {
+            "state": "failed",
+            "error_code": "response_stream_disconnected",
+            "thread_short": "TH-ABCDEFGHIJ",
+        }
 
 
 class CompletingController(LegacySubmittingController):
@@ -231,7 +243,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.7"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.9"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -402,6 +414,41 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("function renderIdentities(statusDocument)", DASHBOARD_JS)
         self.assertNotIn("function renderIdentities(document)", DASHBOARD_JS)
         self.assertNotIn("innerHTML", DASHBOARD_JS)
+        self.assertIn("new EventSource", DASHBOARD_JS)
+        self.assertIn("last_event_id", DASHBOARD_JS)
+        self.assertIn("visibilitychange", DASHBOARD_JS)
+        self.assertIn("Asia/Shanghai", DASHBOARD_JS)
+        self.assertNotIn("setInterval", DASHBOARD_JS)
+        self.assertNotIn("readJson('api/status')", DASHBOARD_JS)
+        self.assertIn('id="realtimeState"', DASHBOARD_HTML)
+        self.assertIn("overflow-x:hidden", DASHBOARD_HTML)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is required for dashboard JavaScript execution")
+    def test_dashboard_javascript_executes_event_stream_and_revisioned_details(self) -> None:
+        harness = r"""
+const assert=require('node:assert/strict');
+class Element{constructor(){this.textContent='';this.className='';this.hidden=false;this.disabled=false;this.value='';this.children=[];this.style={};}append(...items){this.children.push(...items)}replaceChildren(...items){this.children=[...items]}set src(value){this._src=value}}
+const nodes=new Map();
+const document={visibilityState:'visible',getElementById(id){if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id)},createElement(){return new Element()},addEventListener(type,handler){listeners[type]=handler}};
+const listeners={};globalThis.document=document;globalThis.location={href:'http://127.0.0.1/addons/gateway/'};Object.defineProperty(globalThis,'navigator',{value:{onLine:true},configurable:true});globalThis.addEventListener=(type,handler)=>{listeners[type]=handler};globalThis.confirm=()=>true;globalThis.prompt=()=>null;
+const fetches=[];globalThis.fetch=async path=>{fetches.push(String(path));const result=String(path).includes('conversations')?{revision:7,conversations:[]}:{revision:7,users:[]};return{ok:true,json:async()=>({result})}};
+const timers=[];globalThis.setTimeout=(handler,delay)=>{timers.push({handler,delay});return timers.length};globalThis.clearTimeout=()=>{};
+const sources=[];class FakeEventSource{constructor(url){this.url=url;this.listeners={};sources.push(this)}addEventListener(type,handler){this.listeners[type]=handler}close(){this.closed=true}}globalThis.EventSource=FakeEventSource;
+""" + DASHBOARD_JS + r"""
+const status={csrf_token:'csrf',details_revision:7,poller_enabled:false,poller_default_enabled:false,poller_override:null,poller_revision:2,poller_state:'stopped',poller_maintenance:{active:false},identity:null,identities:{identities:[],limits:{max_active_identities:5}},owner_pairing:{state:'unavailable'},controller_configured:true,controller_capability_state:'compatible',users:{revision:7,total:0,active:0,members:0},last_error:null,qr:{state:'idle',has_image:false},onboarding:{qr:{state:'idle',has_image:false}},queue:{messages:{pending_controller:0,controller_submitted:0},spool_bytes:0},remote_work:{enabled:false,pending_outbox:0}};
+assert.equal(sources.length,1);assert.match(sources[0].url,/api\/status\/stream/);assert.deepEqual(fetches,[]);
+sources[0].listeners.status({data:JSON.stringify({version:1,revision:4,status}),lastEventId:'4'});
+setImmediate(()=>setImmediate(()=>{assert.deepEqual(fetches,['api/users','api/conversations']);assert.equal(nodes.get('poller').textContent,'stopped');assert.match(nodes.get('realtimeState').textContent,/已连接/);sources[0].listeners.status({data:JSON.stringify({version:1,revision:5,status}),lastEventId:'5'});setImmediate(()=>{assert.deepEqual(fetches,['api/users','api/conversations']);sources[0].onerror();assert.equal(timers[0].delay,1000);assert.match(nodes.get('realtimeState').textContent,/重连中/);})}));
+"""
+        completed = subprocess.run(
+            [shutil.which("node") or "node", "-"],
+            input=harness,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
 
 class StoreTests(unittest.TestCase):
@@ -2133,7 +2180,7 @@ class ServiceTests(unittest.TestCase):
         submitted = reopened.submitted()
         self.assertEqual(submitted[0]["controller_job_id"], "fixture-controller-job")
 
-    def test_controller_failure_mapping_is_specific_and_does_not_echo_internal_code(self) -> None:
+    def test_controller_failure_mapping_is_specific_and_exposes_only_stable_public_code(self) -> None:
         self.assertIn(
             "对话内容过长",
             controller_failure_message("failed", "context_window_exceeded"),
@@ -2142,7 +2189,14 @@ class ServiceTests(unittest.TestCase):
             "自动重试后仍未完成",
             controller_failure_message("failed", "response_stream_disconnected"),
         )
-        self.assertEqual(controller_failure_message("cancelled", "ignored"), "任务已取消。")
+        self.assertIn(
+            "错误码：response_stream_disconnected",
+            controller_failure_message("failed", "response_stream_disconnected"),
+        )
+        self.assertIn("错误码：cancelled", controller_failure_message("cancelled", "ignored"))
+        invalid = controller_failure_details("failed", "secret=https://example.invalid/token")
+        self.assertEqual(invalid["code"], "controller_task_failed")
+        self.assertNotIn("secret", json.dumps(invalid, ensure_ascii=False))
 
         message = self.store.store_message(
             message_id="fixture-controller-transient-failure",
@@ -2165,11 +2219,109 @@ class ServiceTests(unittest.TestCase):
         self.run_async(exercise())
         sent_text = service.client.sent[0]["text"]  # type: ignore[union-attr]
         self.assertIn("自动重试后仍未完成", sent_text)
-        self.assertNotIn("response_stream_disconnected", sent_text)
+        self.assertIn("错误码：response_stream_disconnected", sent_text)
         self.assertEqual(
             self.store.get_message(message["message_id"])["error_code"],
             "response_stream_disconnected",
         )
+
+    def test_simulated_weixin_inbound_persists_and_returns_structured_failure(self) -> None:
+        service = self.service()
+        controller = FailedSubmittingController()
+        service.controller = controller  # type: ignore[assignment]
+        raw = fixture_update()["msgs"][0]
+
+        async def exercise() -> None:
+            await service._ingest(raw)
+
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+
+        self.assertEqual(len(controller.submissions), 1)
+        self.assertEqual(controller.submissions[0]["text"], "查询装修支出")
+        self.assertEqual(controller.submissions[0]["message_id"], raw["message_id"])
+        client = service.client
+        assert isinstance(client, StubIlinkClient)
+        self.assertEqual(len(client.sent), 1)
+        self.assertIn("错误码：response_stream_disconnected", client.sent[0]["text"])
+
+        stored = self.store.get_message(raw["message_id"])
+        self.assertEqual(stored["state"], "failed")
+        self.assertEqual(stored["controller_state"], "failed")
+        self.assertEqual(stored["controller_error_code"], "response_stream_disconnected")
+        failures = service.failures()
+        self.assertEqual(failures["count"], 1)
+        failure = failures["items"][0]
+        self.assertEqual(failure["source"], "controller")
+        self.assertEqual(failure["error"]["code"], "response_stream_disconnected")
+        self.assertTrue(failure["error"]["retryable"])
+        self.assertRegex(failure["failure_short"], r"^ER-[A-Z2-7]{10}$")
+        self.assertRegex(failure["job_short"], r"^JB-[A-Z2-7]{10}$")
+        self.assertRegex(failure["occurred_at"], r"\+08:00$")
+        encoded = json.dumps(failures, ensure_ascii=False)
+        self.assertNotIn("fixture-owner", encoded)
+        self.assertNotIn("查询装修支出", encoded)
+        self.assertNotIn("fixture-ilink-token", encoded)
+
+    def test_simulated_weixin_inbound_completes_and_replies_normally(self) -> None:
+        service = self.service()
+        controller = CompletingController()
+        service.controller = controller  # type: ignore[assignment]
+        raw = fixture_update()["msgs"][0]
+
+        async def exercise() -> None:
+            await service._ingest(raw)
+
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+
+        self.assertEqual(len(controller.submissions), 1)
+        self.assertEqual(controller.submissions[0]["text"], "查询装修支出")
+        self.assertEqual(controller.submissions[0]["message_id"], raw["message_id"])
+        client = service.client
+        assert isinstance(client, StubIlinkClient)
+        self.assertEqual(len(client.sent), 1)
+        self.assertIn("完成", client.sent[0]["text"])
+        self.assertIn("TH-ABCDEFGHIJ", client.sent[0]["text"])
+
+        stored = self.store.get_message(raw["message_id"])
+        self.assertEqual(stored["state"], "completed")
+        # Successful controller state is intentionally not persisted in the
+        # failure-only diagnostic columns.
+        self.assertIsNone(stored["controller_state"])
+        self.assertIsNone(stored["error_code"])
+        self.assertEqual(service.failures()["count"], 0)
+
+    def test_gateway_failure_is_not_misclassified_as_controller_failure(self) -> None:
+        message = self.store.store_message(
+            message_id="fixture-gateway-only-failure",
+            sender_id="fixture-owner",
+            conversation_key="sha256:fixture-conversation",
+            text="不会进入错误中心正文",
+            media=[],
+        )
+        self.store.mark_finished(
+            message["message_id"],
+            success=False,
+            error_code="credential_missing",
+        )
+
+        failure = self.service().failures()["items"][0]
+        self.assertEqual(failure["source"], "gateway")
+        self.assertIsNone(failure["job_short"])
+        self.assertEqual(failure["error"]["code"], "credential_missing")
+        self.assertEqual(failure["error"]["title"], "微信消息链路失败")
+        self.assertFalse(failure["error"]["retryable"])
 
     def test_session_expired_keeps_completed_result_pending_without_weixin_retry(self) -> None:
         message = self.store.store_message(
@@ -3207,6 +3359,222 @@ class ServiceTests(unittest.TestCase):
 
 
 class AdminApiTests(unittest.TestCase):
+    def test_public_status_stream_is_immediate_condition_woken_and_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_store = IdentityStore(root / "data")
+            identity_store.save_identity(fixture_identity())
+            store = GatewayStore(root / "data" / "gateway.sqlite3", data_dir=root / "data")
+            service = GatewayService(
+                identity_store=identity_store,
+                store=store,
+                controller=StubController(),  # type: ignore[arg-type]
+                bootstrap_identity={},
+                poller_enabled=False,
+                owner_pairing_enabled=False,
+                activation_confirmation="",
+                max_media_bytes=1024,
+            )
+
+            with mock.patch.object(service, "status", wraps=service.status) as status_call:
+                stream = service.status_stream(last_event_id=99, heartbeat_seconds=1)
+                initial = next(stream)
+                assert initial is not None
+                self.assertEqual(initial["revision"], 0)
+                self.assertEqual(initial["status"]["details_revision"], 0)
+                self.assertEqual(status_call.call_count, 1)
+                encoded = json.dumps(initial, ensure_ascii=False)
+                self.assertLess(len(encoded.encode("utf-8")), 128 * 1024)
+                self.assertNotIn("fixture-ilink-token", encoded)
+                self.assertNotIn("fixture-owner", encoded)
+                delivered: list[dict | None] = []
+                ready = threading.Event()
+
+                def wait_for_change() -> None:
+                    ready.set()
+                    delivered.append(next(stream))
+
+                waiter = threading.Thread(target=wait_for_change, daemon=True)
+                waiter.start()
+                self.assertTrue(ready.wait(timeout=1))
+                service.publish_status_change(details=True)
+                waiter.join(timeout=0.5)
+                self.assertFalse(waiter.is_alive(), "status stream must wake on its Condition")
+                assert delivered[0] is not None
+                self.assertEqual(delivered[0]["revision"], 1)
+                self.assertEqual(delivered[0]["status"]["details_revision"], 1)
+                self.assertEqual(status_call.call_count, 2)
+                self.assertIsNone(next(stream), "idle status streams emit only a heartbeat")
+                self.assertEqual(status_call.call_count, 2, "heartbeats must not rebuild status")
+                stream.close()
+
+            loop = asyncio.new_event_loop()
+            loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+            loop_thread.start()
+            server = create_server(
+                "127.0.0.1",
+                0,
+                service=service,
+                loop=loop,
+                attachment_api_token="a" * 32,
+            )
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                connection.request(
+                    "GET",
+                    "/api/status/stream",
+                    headers={"Last-Event-ID": "99"},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+                self.assertEqual(response.getheader("X-Accel-Buffering"), "no")
+                fields: dict[str, str] = {}
+                while True:
+                    line = response.fp.readline().decode("utf-8")  # type: ignore[union-attr]
+                    if line in {"\n", "\r\n"}:
+                        break
+                    key, _separator, value = line.rstrip("\r\n").partition(":")
+                    fields[key] = value.strip()
+                frame = json.loads(fields["data"])
+                self.assertEqual(fields["event"], "status")
+                self.assertEqual(fields["id"], str(frame["revision"]))
+                self.assertEqual(frame["status"]["version"], "0.4.9")
+                self.assertIn("csrf_token", frame["status"])
+                self.assertNotIn("fixture-owner", json.dumps(frame, ensure_ascii=False))
+            finally:
+                connection.close()
+                service.publish_status_change()
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join(timeout=5)
+                loop.close()
+
+    def test_internal_failure_stream_is_authorized_private_and_condition_woken(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_store = IdentityStore(root / "data")
+            identity_store.save_identity(fixture_identity())
+            store = GatewayStore(root / "data" / "gateway.sqlite3", data_dir=root / "data")
+            service = GatewayService(
+                identity_store=identity_store,
+                store=store,
+                controller=StubController(),  # type: ignore[arg-type]
+                bootstrap_identity={},
+                poller_enabled=False,
+                owner_pairing_enabled=False,
+                activation_confirmation="",
+                max_media_bytes=1024,
+            )
+            failed = store.store_message(
+                message_id="private-stream-message",
+                sender_id="private-stream-sender",
+                conversation_key="sha256:private-stream-conversation",
+                text="private-stream-message-body",
+                media=[],
+            )
+            store.mark_submitted(failed["message_id"], "private-stream-controller-job")
+
+            stream = service.failure_stream(heartbeat_seconds=1)
+            initial = next(stream)
+            self.assertEqual(initial["summary"], {"count": 0, "latest_occurred_at": None})
+            delivered: list[dict | None] = []
+            ready = threading.Event()
+
+            def wait_for_change() -> None:
+                ready.set()
+                delivered.append(next(stream))
+
+            waiter = threading.Thread(target=wait_for_change, daemon=True)
+            waiter.start()
+            self.assertTrue(ready.wait(timeout=1))
+            service._mark_finished(  # type: ignore[attr-defined]
+                failed["message_id"],
+                success=False,
+                error_code="codex_unauthorized",
+                controller_state="failed",
+                controller_error_code="codex_unauthorized",
+            )
+            waiter.join(timeout=0.5)
+            self.assertFalse(waiter.is_alive(), "failure stream must wake on its Condition")
+            changed = delivered[0]
+            assert changed is not None
+            self.assertGreater(changed["revision"], initial["revision"])
+            self.assertEqual(changed["summary"]["count"], 1)
+            self.assertNotIn("items", changed)
+            self.assertNotIn("private-stream", json.dumps(changed, ensure_ascii=False))
+            stream.close()
+            heartbeat_stream = service.failure_stream(heartbeat_seconds=1)
+            self.assertIsNotNone(next(heartbeat_stream))
+            self.assertIsNone(next(heartbeat_stream), "idle streams send only a heartbeat")
+            heartbeat_stream.close()
+
+            loop = asyncio.new_event_loop()
+            loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+            loop_thread.start()
+            server = create_server(
+                "127.0.0.1",
+                0,
+                service=service,
+                loop=loop,
+                attachment_api_token="a" * 32,
+            )
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                connection.request("GET", "/internal/v1/failures/stream")
+                denied = connection.getresponse()
+                denied.read()
+                self.assertEqual(denied.status, 401)
+
+                connection.request(
+                    "GET",
+                    "/internal/v1/failures/stream",
+                    headers={"Authorization": "Bearer " + "a" * 32},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.getheader("Content-Type"), "text/event-stream; charset=utf-8")
+                fields: dict[str, str] = {}
+                while True:
+                    line = response.fp.readline().decode("utf-8")  # type: ignore[union-attr]
+                    if line in {"\n", "\r\n"}:
+                        break
+                    key, _separator, value = line.rstrip("\r\n").partition(":")
+                    fields[key] = value.strip()
+                frame = json.loads(fields["data"])
+                self.assertEqual(fields["event"], "failures")
+                self.assertEqual(set(frame), {"version", "revision", "summary"})
+                self.assertEqual(set(frame["summary"]), {"count", "latest_occurred_at"})
+                encoded = json.dumps(frame, ensure_ascii=False)
+                self.assertNotIn("private-stream-sender", encoded)
+                self.assertNotIn("private-stream-message-body", encoded)
+            finally:
+                connection.close()
+                # Wake the handler immediately so it observes the closed
+                # client rather than waiting for its 12-second heartbeat.
+                wake = store.store_message(
+                    message_id="private-stream-cleanup",
+                    sender_id="private-stream-cleanup-sender",
+                    conversation_key="sha256:private-stream-cleanup-conversation",
+                    text="private-stream-cleanup-body",
+                    media=[],
+                )
+                service._mark_finished(  # type: ignore[attr-defined]
+                    wake["message_id"], success=False, error_code="gateway_delivery_failed"
+                )
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+                loop.call_soon_threadsafe(loop.stop)
+                loop_thread.join(timeout=5)
+                loop.close()
+
     def test_json_csrf_revision_idempotency_and_privacy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3222,6 +3590,21 @@ class AdminApiTests(unittest.TestCase):
                 owner_pairing_enabled=False,
                 activation_confirmation="",
                 max_media_bytes=1024,
+            )
+            failed_message = store.store_message(
+                message_id="api-private-failure-message",
+                sender_id="api-private-sender",
+                conversation_key="sha256:api-private-conversation",
+                text="api-private-request-text",
+                media=[],
+            )
+            store.mark_submitted(failed_message["message_id"], "api-private-controller-job")
+            store.mark_finished(
+                failed_message["message_id"],
+                success=False,
+                error_code="codex_unauthorized",
+                controller_state="failed",
+                controller_error_code="codex_unauthorized",
             )
             async def fake_start_pollers() -> None:
                 service.poller_state = "polling"
@@ -3305,6 +3688,29 @@ class AdminApiTests(unittest.TestCase):
                 self.assertNotIn("fixture-owner", encoded)
                 self.assertNotIn("conversation_key", encoded)
                 self.assertRegex(users_document["result"]["users"][0]["wx_short"], r"^WX-[A-Z2-7]{10}$")
+
+                connection.request("GET", "/internal/v1/failures")
+                unauthorized_response = connection.getresponse()
+                unauthorized_response.read()
+                self.assertEqual(unauthorized_response.status, 401)
+
+                connection.request(
+                    "GET",
+                    "/internal/v1/failures",
+                    headers={"Authorization": "Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                )
+                failures_response = connection.getresponse()
+                failures_document = json.loads(failures_response.read())
+                self.assertEqual(failures_response.status, 200)
+                self.assertEqual(failures_document["result"]["count"], 1)
+                self.assertEqual(
+                    failures_document["result"]["items"][0]["error"]["code"],
+                    "codex_unauthorized",
+                )
+                encoded_failures = json.dumps(failures_document, ensure_ascii=False)
+                self.assertNotIn("api-private-sender", encoded_failures)
+                self.assertNotIn("api-private-request-text", encoded_failures)
+                self.assertNotIn("api-private-conversation", encoded_failures)
             finally:
                 connection.close()
                 server.shutdown()

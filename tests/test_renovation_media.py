@@ -295,7 +295,15 @@ class MediaStreamingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.attachment_ref = message["attachments"][0]["attachment_ref"]
         self.gateway_token = "g" * 32
-        service = type("GatewayService", (), {"store": self.gateway_store, "poller_state": "disabled"})()
+        service = type(
+            "GatewayService",
+            (),
+            {
+                "store": self.gateway_store,
+                "poller_state": "disabled",
+                "publish_status_change": lambda _self, **_kwargs: None,
+            },
+        )()
         self.gateway = create_gateway_server("127.0.0.1", 0, service=service, loop=None, attachment_api_token=self.gateway_token)  # type: ignore[arg-type]
         self.gateway_thread = threading.Thread(target=self.gateway.serve_forever, daemon=True)
         self.gateway_thread.start()

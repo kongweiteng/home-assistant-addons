@@ -1,8 +1,70 @@
 """Bounded, memory-only image drafts and lazy authenticated conversation images."""
 
 IMAGE_UI_JS = r"""
-const imageState = {drafts: Object.create(null), pending: Object.create(null), busy: Object.create(null), cache: new Map(), returnFocus: null};
+const imageState = {drafts: Object.create(null), createDrafts: Object.create(null), createFields: Object.create(null), createHost: '', pending: Object.create(null), busy: Object.create(null), cache: new Map(), returnFocus: null};
 function currentAttachments(ref = state.selectedThread) { return imageState.drafts[ref] || []; }
+function currentCreateAttachments(host = state.selectedHost) { return imageState.createDrafts[host] || []; }
+function createAttachmentsLocked(host = state.selectedHost) { return state.pendingCreate?.body.host_ref === host; }
+function saveCreateDraftFields() {
+  const host = imageState.createHost || state.selectedHost;
+  if (!host || createAttachmentsLocked(host)) return;
+  imageState.createFields[host] = {input: q('newTaskInput').value, project: q('newTaskProject').value, model: q('newTaskModel').value, effort: q('newTaskEffort').value};
+}
+function syncCreateDraftHost() {
+  if (imageState.createHost === state.selectedHost) return;
+  if (imageState.createHost) saveCreateDraftFields();
+  imageState.createHost = state.selectedHost;
+  const fields = imageState.createFields[state.selectedHost] || {};
+  q('newTaskInput').value = fields.input || '';
+  q('newTaskProject').value = fields.project || '';
+  q('newTaskModel').value = fields.model || '';
+  q('newTaskEffort').value = fields.effort || '';
+}
+function createImagesReady(host = state.selectedHost) {
+  const items = currentCreateAttachments(host);
+  return !items.length || (hasCapability('image_input_v1') && items.every(item => item.image_ref && !item.error && !item.uploading && Date.parse(item.expires_at) > Date.now()));
+}
+function clearConfirmedCreateDraft(body) {
+  const host = body.host_ref;
+  const fields = imageState.createFields[host];
+  if (fields && fields.input.trim() === body.input) fields.input = '';
+  const sent = new Set(body.image_refs || []);
+  for (const item of currentCreateAttachments(host)) if (sent.has(item.image_ref) && item.url) URL.revokeObjectURL(item.url);
+  imageState.createDrafts[host] = currentCreateAttachments(host).filter(item => !sent.has(item.image_ref));
+  if (imageState.createHost === host && state.selectedHost === host && q('newTaskInput').value.trim() === body.input) q('newTaskInput').value = '';
+}
+function renderCreateAttachments() {
+  const host = state.selectedHost;
+  const items = currentCreateAttachments(host);
+  const locked = createAttachmentsLocked(host);
+  const supported = hasCapability('image_input_v1');
+  q('addCreateImage').disabled = !hostCanCreate() || !supported || locked || items.length >= 4;
+  q('createImageHelp').textContent = !supported ? '当前 Mac 尚不支持图片，可继续创建文字任务' : '最多 4 张 · 每张 64 KiB · 可以只添加图片创建任务';
+  const tray = q('createAttachmentTray'); tray.replaceChildren(); tray.classList.toggle('hidden', !items.length);
+  for (const item of items) {
+    if (item.image_ref && Date.parse(item.expires_at) <= Date.now()) item.error = '图片已过期，请重试上传';
+    const card = document.createElement('div'); card.className = 'attachment';
+    const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'preview'; preview.setAttribute('aria-label', `预览 ${item.name}`);
+    if (item.url) { const img = document.createElement('img'); img.src = item.url; img.alt = item.name; preview.append(img); preview.onclick = () => setImageOpen(item.url, `${item.name} · 实际发送版本`); }
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'remove'; remove.textContent = '移除'; remove.setAttribute('aria-label', `移除 ${item.name}`); remove.disabled = locked;
+    remove.onclick = () => { if (createAttachmentsLocked(host)) return; imageState.createDrafts[host] = currentCreateAttachments(host).filter(value => value !== item); item.removed = true; if (item.url) URL.revokeObjectURL(item.url); if (state.selectedHost === host) renderNewTaskState(); };
+    const status = document.createElement('span'); status.className = 'attachment-status'; status.textContent = item.error || (item.uploading ? '正在上传…' : item.image_ref ? '图片已上传 · 待创建' : '准备并上传中…'); status.title = status.textContent;
+    card.append(preview, remove, status);
+    if (item.error && item.blob) { const retry = document.createElement('button'); retry.type = 'button'; retry.textContent = '重试上传'; retry.disabled = locked || Boolean(item.uploading); retry.onclick = () => void uploadAttachment(item); card.append(retry); }
+    tray.append(card);
+  }
+  if (!state.pendingCreate && !createImagesReady(host)) q('createTaskButton').disabled = true;
+}
+async function addCreateImages(files) {
+  if (q('addCreateImage').disabled || createAttachmentsLocked()) return;
+  const host = state.selectedHost;
+  const items = imageState.createDrafts[host] ||= [];
+  const selected = Array.from(files);
+  if (selected.length + items.length > 4) { q('newTaskFeedback').textContent = '每个新任务最多 4 张图片，请减少选择'; return; }
+  const added = selected.map(file => ({file, name: file.name || '粘贴图片', request: requestId(), host, scope: 'create', removed: false}));
+  items.push(...added); renderNewTaskState();
+  for (const item of added) await uploadAttachment(item);
+}
 function setImageOpen(url = '', caption = '') {
   const open = Boolean(url);
   if (open) imageState.returnFocus = document.activeElement;
@@ -65,7 +127,10 @@ async function compressImage(file) {
   } finally { URL.revokeObjectURL(url); }
 }
 async function uploadAttachment(item) {
-  item.error = ''; if (state.selectedThread === item.thread) renderAttachments();
+  if (item.uploading || (item.scope === 'create' && createAttachmentsLocked(item.host))) return;
+  item.uploading = true; item.error = '';
+  if (item.scope === 'create') { if (state.selectedHost === item.host) renderCreateAttachments(); }
+  else if (state.selectedThread === item.thread) renderAttachments();
   try {
     if (!item.blob) { item.blob = await compressImage(item.file); item.file = null; if (!item.removed) item.url = URL.createObjectURL(item.blob); }
     if (item.removed) return;
@@ -75,7 +140,11 @@ async function uploadAttachment(item) {
     if (!/^IM-[a-f0-9]{32}$/.test(result.image_ref)) throw new Error('图片上传响应无效');
     item.image_ref = result.image_ref; item.expires_at = result.expires_at; item.error = '';
   } catch (error) { item.error = error.message; }
-  finally { if (state.selectedThread === item.thread && state.detail) renderComposer(state.detail); }
+  finally {
+    item.uploading = false;
+    if (item.scope === 'create') { if (state.selectedHost === item.host) renderNewTaskState(); }
+    else if (state.selectedThread === item.thread && state.detail) renderComposer(state.detail);
+  }
 }
 async function addImages(files) {
   if (q('addImage').disabled) return;
@@ -127,7 +196,11 @@ function initImageUi() {
   q('addImage').onclick = () => q('imageInput').click();
   q('imageInput').onchange = () => { const files = Array.from(q('imageInput').files); q('imageInput').value = ''; void addImages(files); };
   q('composerInput').addEventListener('paste', event => { const files = Array.from(event.clipboardData?.files || []); if (files.length && !q('addImage').disabled) { event.preventDefault(); void addImages(files); } });
+  q('addCreateImage').onclick = () => q('createImageInput').click();
+  q('createImageInput').onchange = () => { const files = Array.from(q('createImageInput').files); q('createImageInput').value = ''; void addCreateImages(files); };
+  q('newTaskInput').addEventListener('paste', event => { const files = Array.from(event.clipboardData?.files || []); if (files.length && !q('addCreateImage').disabled) { event.preventDefault(); void addCreateImages(files); } });
   q('closeImage').onclick = () => setImageOpen();
-  window.addEventListener('beforeunload', () => { for (const items of Object.values(imageState.drafts)) for (const item of items) if (item.url) URL.revokeObjectURL(item.url); imageState.cache.clear(); });
+  q('imageDialog').addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setImageOpen(); } });
+  window.addEventListener('beforeunload', () => { for (const items of [...Object.values(imageState.drafts), ...Object.values(imageState.createDrafts)]) for (const item of items) if (item.url) URL.revokeObjectURL(item.url); imageState.cache.clear(); });
 }
 """

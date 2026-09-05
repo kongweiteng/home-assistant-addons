@@ -10,12 +10,13 @@ import re
 import secrets
 import threading
 import time
-from typing import Any
-from urllib.parse import urlsplit
+from typing import Any, Iterator
+from urllib.parse import parse_qs, urlsplit
 
 from .app_server import AppServerError
 from .desktop_api import get_desktop_api, post_desktop_api
 from .desktop_dashboard import DESKTOP_DASHBOARD_HTML, DESKTOP_DASHBOARD_JS
+from .desktop_service import DesktopControllerService
 from .runner_api import (
     RUNNER_ACTION_RE,
     RUNNER_PATH_RE,
@@ -38,6 +39,160 @@ RUNNER_RELAY_EVENT_RE = re.compile(
     r"^/internal/v2/runner-relay/events/"
     r"(heartbeat|status|result|desktop_snapshot|desktop_event|desktop_receipt)$"
 )
+DESKTOP_THREAD_STREAM_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/stream$"
+)
+DESKTOP_STREAM_PATH = "/api/desktop/v1/stream"
+DESKTOP_THREADS_PATH = "/api/desktop/v1/threads"
+SSE_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
+
+
+def _strict_query(value: str) -> dict[str, list[str]]:
+    if value == "":
+        return {}
+    try:
+        parameters = parse_qs(value, keep_blank_values=True, strict_parsing=True)
+    except ValueError as exc:
+        raise StoreError("desktop_query_invalid", "Desktop API query 无效", status=400) from exc
+    if any(len(items) != 1 or items[0] == "" for items in parameters.values()):
+        raise StoreError(
+            "desktop_query_invalid",
+            "Desktop API query 字段重复或为空",
+            status=400,
+        )
+    return parameters
+
+
+def _only_query(parameters: dict[str, list[str]], allowed: set[str]) -> None:
+    if set(parameters) - allowed:
+        raise StoreError(
+            "desktop_query_invalid",
+            "Desktop API query 包含未知字段",
+            status=400,
+        )
+
+
+def _one_query(parameters: dict[str, list[str]], name: str) -> str | None:
+    values = parameters.get(name)
+    return None if values is None else values[0]
+
+
+def _cursor_value(value: str, *, source: str) -> int:
+    if re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+        raise StoreError("desktop_cursor_invalid", f"Desktop SSE {source} 无效", status=400)
+    parsed = int(value)
+    if parsed > 2**63 - 1:
+        raise StoreError("desktop_cursor_invalid", f"Desktop SSE {source} 无效", status=400)
+    return parsed
+
+
+def _optional_cursor(parameters: dict[str, list[str]], name: str) -> int | None:
+    value = _one_query(parameters, name)
+    return None if value is None else _cursor_value(value, source=name)
+
+
+def _query_integer(
+    parameters: dict[str, list[str]],
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = _one_query(parameters, name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise StoreError(
+            "desktop_query_invalid",
+            f"Desktop API {name} 无效",
+            status=400,
+        ) from exc
+    if str(parsed) != value or not minimum <= parsed <= maximum:
+        raise StoreError("desktop_query_invalid", f"Desktop API {name} 无效", status=400)
+    return parsed
+
+
+def _last_event_id(values: list[str]) -> int | None:
+    if not values:
+        return None
+    if len(values) != 1:
+        raise StoreError(
+            "desktop_cursor_invalid",
+            "Desktop SSE Last-Event-ID 重复",
+            status=400,
+        )
+    return _cursor_value(values[0], source="Last-Event-ID")
+
+
+def _resume_cursor(query_cursor: int | None, header_cursor: int | None) -> int | None:
+    if query_cursor is not None and header_cursor is not None and query_cursor != header_cursor:
+        raise StoreError(
+            "desktop_cursor_conflict",
+            "Desktop SSE cursor 与 Last-Event-ID 冲突",
+            status=409,
+        )
+    return query_cursor if query_cursor is not None else header_cursor
+
+
+def _desktop_threads(service: DesktopControllerService, query: str) -> dict[str, Any]:
+    parameters = _strict_query(query)
+    _only_query(parameters, {"host_ref", "project_ref", "status", "cursor", "limit", "order"})
+    order = _one_query(parameters, "order")
+    if order not in {None, "recent"}:
+        raise StoreError("desktop_query_invalid", "Desktop Thread order 无效", status=400)
+    default_limit = 40 if order == "recent" else 100
+    cursor = _query_integer(
+        parameters,
+        "cursor",
+        default=0,
+        minimum=0,
+        maximum=2**63 - 1,
+    )
+    limit = _query_integer(
+        parameters,
+        "limit",
+        default=default_limit,
+        minimum=1,
+        maximum=200,
+    )
+    return service.threads(
+        host_ref=_one_query(parameters, "host_ref"),
+        project_ref=_one_query(parameters, "project_ref"),
+        status=_one_query(parameters, "status"),
+        after_cursor=cursor,
+        limit=limit,
+        order=order,
+    )
+
+
+def _prepend(
+    first: dict[str, Any], iterator: Iterator[dict[str, Any]]
+) -> Iterator[dict[str, Any]]:
+    yield first
+    yield from iterator
+
+
+def _encode_sse(frame: dict[str, Any]) -> bytes:
+    event = frame.get("event")
+    cursor = frame.get("cursor")
+    data = frame.get("data")
+    if event not in {"ready", "desktop", "heartbeat", "status"}:
+        raise ValueError("invalid SSE event")
+    if isinstance(cursor, bool) or not isinstance(cursor, int) or not 0 <= cursor <= 2**63 - 1:
+        raise ValueError("invalid SSE cursor")
+    if not isinstance(data, dict) or data.get("cursor") != cursor:
+        raise ValueError("invalid SSE data")
+    encoded = json.dumps(
+        data,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return f"id: {cursor}\nevent: {event}\ndata: {encoded}\n\n".encode("utf-8")
 
 
 def create_server(
@@ -63,8 +218,31 @@ def create_server(
                 "csrf_expires_in_seconds": max(1, int(csrf_state["expires_at"] - now)),
             }
 
+    def status_stream() -> Iterator[dict[str, Any]]:
+        cursor = 0
+        previous = ""
+        while True:
+            status = service.status()
+            encoded = json.dumps(
+                status,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            if encoded != previous:
+                cursor += 1
+                previous = encoded
+                event = "status"
+                data = {"version": 1, "cursor": cursor, "status": status}
+            else:
+                event = "heartbeat"
+                data = {"version": 1, "cursor": cursor}
+            yield {"event": event, "cursor": cursor, "data": data}
+            time.sleep(5)
+
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.5.34"
+        server_version = "CodexController/0.5.35"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None
@@ -103,11 +281,88 @@ def create_server(
             if path == "/app.js":
                 self._asset(HTTPStatus.OK, "text/javascript; charset=utf-8", DASHBOARD_JS.encode("utf-8"))
                 return
+            if path == "/api/stream":
+                if parsed_path.query:
+                    self._json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": {"code": "status_stream_query_invalid"}},
+                    )
+                    return
+                iterator = status_stream()
+                try:
+                    first = next(iterator)
+                except Exception:
+                    self._json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": {"code": "status_stream_unavailable"}},
+                    )
+                    return
+                self._sse(iterator, first)
+                return
             if path == "/api/status":
                 self._json(HTTPStatus.OK, {**service.status(), **csrf_document()})
                 return
             if path == "/api/tools":
                 self._json(HTTPStatus.OK, {"version": 1, "result": service.tool_status()})
+                return
+            stream_match = DESKTOP_THREAD_STREAM_RE.fullmatch(path)
+            if path == DESKTOP_STREAM_PATH or stream_match is not None:
+                if service.desktop_controller is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                    return
+                try:
+                    parameters = _strict_query(parsed_path.query)
+                    header_cursor = _last_event_id(self.headers.get_all("Last-Event-ID") or [])
+                    if stream_match is None:
+                        _only_query(parameters, {"host_ref", "after_cursor"})
+                        host_ref = _one_query(parameters, "host_ref")
+                        if host_ref is None:
+                            raise StoreError(
+                                "desktop_query_invalid",
+                                "Desktop SSE host_ref 不能为空",
+                                status=400,
+                            )
+                        query_cursor = _optional_cursor(parameters, "after_cursor")
+                        after_cursor = _resume_cursor(query_cursor, header_cursor)
+                        iterator = service.desktop_controller.host_stream(
+                            host_ref,
+                            after_cursor=after_cursor,
+                        )
+                    else:
+                        _only_query(parameters, {"after_cursor"})
+                        query_cursor = _optional_cursor(parameters, "after_cursor")
+                        after_cursor = _resume_cursor(query_cursor, header_cursor)
+                        iterator = service.desktop_controller.thread_stream(
+                            stream_match.group(1),
+                            after_cursor=after_cursor,
+                        )
+                    first = next(iterator)
+                except StoreError as exc:
+                    self._json(
+                        HTTPStatus(exc.status),
+                        {"error": {"code": exc.code, "message": str(exc)}},
+                    )
+                    return
+                except Exception:
+                    self._json(
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {
+                            "error": {
+                                "code": "internal_error",
+                                "message": "Controller 操作失败，未返回私有详情。",
+                            }
+                        },
+                    )
+                    return
+                self._sse(iterator, first)
+                return
+            if path == DESKTOP_THREADS_PATH:
+                if service.desktop_controller is None:
+                    self._json(HTTPStatus.NOT_FOUND, {"error": {"code": "not_found"}})
+                    return
+                self._call(
+                    lambda: _desktop_threads(service.desktop_controller, parsed_path.query)
+                )
                 return
             if path.startswith("/api/desktop/v1/"):
                 if service.desktop_controller is None:
@@ -439,6 +694,38 @@ def create_server(
             self.end_headers()
             self.wfile.write(body)
 
+        def _sse(
+            self,
+            iterator: Iterator[dict[str, Any]],
+            first: dict[str, Any],
+        ) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store, no-transform")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                for frame in _prepend(first, iterator):
+                    body = _encode_sse(frame)
+                    self.wfile.write(body)
+                    self.wfile.flush()
+            except SSE_DISCONNECT_ERRORS:
+                self.close_connection = True
+            except OSError:
+                self.close_connection = True
+            except Exception:
+                # Headers are already committed; fail closed by ending the stream
+                # without exposing internal state in an in-band error event.
+                self.close_connection = True
+            finally:
+                close = getattr(iterator, "close", None)
+                if callable(close):
+                    close()
+
         def _redirect(self, location: str) -> None:
             self.send_response(HTTPStatus.PERMANENT_REDIRECT)
             self.send_header("Location", location)
@@ -479,17 +766,19 @@ def create_server(
 DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Codex 控制器</title><style>
-:root{color-scheme:light;--bg:#f7f7f5;--surface:#fff;--surface-2:#efefec;--surface-3:#fafaf8;--line:rgba(30,32,36,.11);--line-strong:rgba(30,32,36,.18);--text:#202124;--muted:#73767b;--blue:#3768e5;--green:#1a8b67;--green-soft:#e8f4ef;--amber:#a96e16;--amber-soft:#f8efdf;--red:#bd384d;--red-soft:#f9eaed;--shadow:0 1px 3px rgba(20,23,27,.045),0 14px 36px rgba(20,23,27,.05)}*{box-sizing:border-box}html{background:var(--bg);scroll-behavior:smooth}body{margin:0;min-width:320px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}.app-shell{min-height:100dvh}.side-rail{position:fixed;inset:0 auto 0 0;width:224px;padding:22px 14px;display:flex;flex-direction:column;gap:6px;border-right:1px solid var(--line);background:var(--surface-2)}.rail-brand{display:flex;align-items:center;gap:10px;padding:0 9px 20px;font-size:19px;font-weight:740}.brand-mark{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:#222326;color:#fff}.side-rail a{min-height:46px;padding:0 12px;border-radius:11px;display:flex;align-items:center;color:var(--muted);text-decoration:none}.side-rail a:hover,.side-rail a.active{background:var(--surface);color:var(--text)}.side-rail .rail-task{margin-top:12px;justify-content:center;background:#222326;color:#fff}.rail-foot{margin-top:auto;padding:10px 9px;color:var(--muted);font-size:12px}.page{max-width:1450px;margin-left:224px;padding:22px 34px 90px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:74px}.eyebrow{color:var(--muted);font-size:11px;font-weight:620}.topbar h1{margin:2px 0;font-size:29px;line-height:1.2;letter-spacing:-.035em}.topbar p{margin:0;color:var(--muted);font-size:13px}.top-actions{display:flex;gap:8px}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:10px 0 22px}.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:var(--shadow)}.metric{font-size:23px;font-weight:720;display:block;margin-top:7px}.muted{color:var(--muted)}code{color:#47705f;overflow-wrap:anywhere}button,select,input{min-height:44px;border:1px solid var(--line-strong);border-radius:10px;padding:9px 12px;background:var(--surface);color:var(--text);font:inherit}input{min-width:160px}button{cursor:pointer;background:#222326;border-color:#222326;color:#fff}button:hover:not(:disabled){filter:brightness(1.08)}button.secondary,.button-link.secondary{background:var(--surface);border-color:var(--line-strong);color:var(--text)}button.danger{background:var(--red-soft);border-color:#efd0d7;color:var(--red)}button.toggle{min-width:76px;background:var(--surface-2);border-color:var(--line);color:var(--muted)}button.toggle.on{background:var(--green-soft);border-color:transparent;color:var(--green)}button:disabled{opacity:.48;cursor:not-allowed}a{color:var(--blue)}.button-link{display:inline-flex;min-height:44px;align-items:center;border:1px solid #222326;border-radius:11px;padding:8px 14px;background:#222326;color:#fff;text-decoration:none}.section{scroll-margin-top:18px;margin-top:22px}.section-head{display:flex;align-items:end;justify-content:space-between;gap:12px;margin-bottom:10px}.section-head h2{margin:0;font-size:19px;letter-spacing:-.02em}.section-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.auth-actions,.toolbar{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin:12px 0}.notice{border-left:3px solid var(--blue);border-radius:6px 12px 12px 6px;background:#eef2fc;padding:12px 14px;box-shadow:none}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface)}table{width:100%;border-collapse:collapse;min-width:980px;background:var(--surface)}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#6b6f75;background:var(--surface-3);position:sticky;top:0;font-size:12px}tbody tr:last-child td{border-bottom:0}.tool-name{font-weight:700}.technical{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);margin-top:4px}.badges,.runner-actions,.installation-actions,.installation-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.runner-actions button{min-height:38px;font-size:12px;padding:6px 9px}.badge{font-size:11px;border:0;border-radius:999px;padding:4px 8px;background:var(--surface-2);color:#666a70}.badge.good{background:var(--green-soft);color:var(--green)}.badge.warn{background:var(--amber-soft);color:var(--amber)}.badge.bad{background:var(--red-soft);color:var(--red)}.intent{max-width:310px;white-space:normal}.error{color:var(--red)}.success{color:var(--green)}.hidden{display:none!important}.secret-box{border-color:#ead8b9;background:#fffaf0}.secret-box.expired{border-color:#efd0d7}.install-command{margin:14px 0;padding:14px;border:1px solid var(--line);border-radius:10px;background:#f1f2ef;color:#33423b;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.installation-meta{color:var(--muted);margin-top:10px}.installation-meta strong{color:var(--text)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}.form-grid label{display:grid;gap:5px;color:var(--muted)}.mobile-nav{display:none}
+:root{color-scheme:light;--bg:#f7f7f5;--surface:#fff;--surface-2:#efefec;--surface-3:#fafaf8;--line:rgba(30,32,36,.11);--line-strong:rgba(30,32,36,.18);--text:#202124;--muted:#73767b;--blue:#3768e5;--green:#1a8b67;--green-soft:#e8f4ef;--amber:#a96e16;--amber-soft:#f8efdf;--red:#bd384d;--red-soft:#f9eaed;--shadow:0 1px 3px rgba(20,23,27,.045),0 14px 36px rgba(20,23,27,.05)}*{box-sizing:border-box}html{background:var(--bg);scroll-behavior:smooth}body{margin:0;min-width:320px;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}.app-shell{min-height:100dvh}.side-rail{position:fixed;inset:0 auto 0 0;width:224px;padding:22px 14px;display:flex;flex-direction:column;gap:6px;border-right:1px solid var(--line);background:var(--surface-2)}.rail-brand{display:flex;align-items:center;gap:10px;padding:0 9px 20px;font-size:19px;font-weight:740}.brand-mark{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:#222326;color:#fff}.side-rail a{min-height:46px;padding:0 12px;border-radius:11px;display:flex;align-items:center;color:var(--muted);text-decoration:none}.side-rail a:hover,.side-rail a.active{background:var(--surface);color:var(--text)}.side-rail .rail-task{margin-top:12px;justify-content:center;background:#222326;color:#fff}.rail-foot{margin-top:auto;padding:10px 9px;color:var(--muted);font-size:12px}.page{max-width:1450px;margin-left:224px;padding:22px 34px 90px}.app-view{display:none}.app-view.active-view{display:block}.view-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;min-height:74px;margin-bottom:12px}.view-heading h1{margin:2px 0;font-size:29px;line-height:1.2;letter-spacing:-.035em}.view-heading p{margin:0;color:var(--muted);font-size:13px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:18px;min-height:74px}.eyebrow{color:var(--muted);font-size:11px;font-weight:620}.topbar h1{margin:2px 0;font-size:29px;line-height:1.2;letter-spacing:-.035em}.topbar p{margin:0;color:var(--muted);font-size:13px}.top-actions{display:flex;align-items:center;gap:8px}.stream-state{min-height:32px;display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:5px 10px;background:var(--surface);color:var(--muted);font-size:12px;white-space:nowrap}.stream-state.good{border-color:#cde5da;background:var(--green-soft);color:var(--green)}.stream-state.warn{border-color:#ecd8b5;background:var(--amber-soft);color:var(--amber)}.stream-state.bad{border-color:#efd0d7;background:var(--red-soft);color:var(--red)}.grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:10px 0 22px}.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:16px;box-shadow:var(--shadow)}.metric{font-size:23px;font-weight:720;display:block;margin-top:7px}.muted{color:var(--muted)}code{color:#47705f;overflow-wrap:anywhere}button,select,input{min-height:44px;border:1px solid var(--line-strong);border-radius:10px;padding:9px 12px;background:var(--surface);color:var(--text);font:inherit}input{min-width:160px}button{cursor:pointer;background:#222326;border-color:#222326;color:#fff}button:hover:not(:disabled){filter:brightness(1.08)}button.secondary,.button-link.secondary{background:var(--surface);border-color:var(--line-strong);color:var(--text)}button.danger{background:var(--red-soft);border-color:#efd0d7;color:var(--red)}button.toggle{min-width:76px;background:var(--surface-2);border-color:var(--line);color:var(--muted)}button.toggle.on{background:var(--green-soft);border-color:transparent;color:var(--green)}button:disabled{opacity:.48;cursor:not-allowed}a{color:var(--blue)}.button-link{display:inline-flex;min-height:44px;align-items:center;border:1px solid #222326;border-radius:11px;padding:8px 14px;background:#222326;color:#fff;text-decoration:none}.section{scroll-margin-top:18px;margin-top:22px}.section-head{display:flex;align-items:end;justify-content:space-between;gap:12px;margin-bottom:10px}.section-head h2{margin:0;font-size:19px;letter-spacing:-.02em}.section-head p{margin:3px 0 0;color:var(--muted);font-size:12px}.auth-actions,.toolbar{display:flex;flex-wrap:wrap;gap:9px;align-items:center;margin:12px 0}.notice{border-left:3px solid var(--blue);border-radius:6px 12px 12px 6px;background:#eef2fc;padding:12px 14px;box-shadow:none}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface)}table{width:100%;border-collapse:collapse;min-width:980px;background:var(--surface)}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:#6b6f75;background:var(--surface-3);position:sticky;top:0;font-size:12px}tbody tr:last-child td{border-bottom:0}.tool-name{font-weight:700}.technical{font:12px ui-monospace,SFMono-Regular,monospace;color:var(--muted);margin-top:4px}.badges,.runner-actions,.installation-actions,.installation-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.runner-actions button{min-height:38px;font-size:12px;padding:6px 9px}.badge{font-size:11px;border:0;border-radius:999px;padding:4px 8px;background:var(--surface-2);color:#666a70}.badge.good{background:var(--green-soft);color:var(--green)}.badge.warn{background:var(--amber-soft);color:var(--amber)}.badge.bad{background:var(--red-soft);color:var(--red)}.intent{max-width:310px;white-space:normal}.error{color:var(--red)}.success{color:var(--green)}.hidden{display:none!important}.secret-box{border-color:#ead8b9;background:#fffaf0}.secret-box.expired{border-color:#efd0d7}.install-command{margin:14px 0;padding:14px;border:1px solid var(--line);border-radius:10px;background:#f1f2ef;color:#33423b;white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:13px ui-monospace,SFMono-Regular,Menlo,monospace}.installation-meta{color:var(--muted);margin-top:10px}.installation-meta strong{color:var(--text)}.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end}.form-grid label{display:grid;gap:5px;color:var(--muted)}.mobile-nav{display:none}
 @media(max-width:980px){.side-rail{display:none}.page{margin-left:0;padding:14px 18px 92px}.grid{grid-template-columns:repeat(3,minmax(0,1fr))}.mobile-nav{position:fixed;z-index:50;left:12px;right:12px;bottom:10px;height:calc(66px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,1fr);padding:4px 7px env(safe-area-inset-bottom);border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.95);box-shadow:0 8px 28px rgba(25,28,32,.11);backdrop-filter:blur(18px)}.mobile-nav a{min-height:56px;display:flex;align-items:center;justify-content:center;border-radius:12px;color:var(--muted);font-size:12px;text-decoration:none}.mobile-nav .primary{margin-top:-16px;height:58px;align-self:start;background:#222326;color:#fff;box-shadow:0 6px 16px rgba(0,0,0,.18)}}
-@media(max-width:700px){.page{padding:0 10px 96px}.topbar{min-height:86px;padding-top:env(safe-area-inset-top)}.topbar h1{font-size:25px}.topbar p{display:none}.top-actions .secondary{display:none}.grid{display:flex;overflow:auto;margin:4px -10px 18px;padding:0 10px 2px;scrollbar-width:none}.grid .card{flex:0 0 116px;padding:12px}.metric{font-size:19px}.section{margin-top:18px}.section-head{align-items:center}.section-head p{display:none}.card{padding:13px}.auth-actions{display:grid;grid-template-columns:1fr 1fr}.auth-actions button{width:100%}.toolbar{display:grid;grid-template-columns:1fr 1fr}.toolbar label{display:grid;gap:4px;color:var(--muted);font-size:12px}.toolbar>button{grid-column:1/-1}.toolbar>span{grid-column:1/-1}.form-grid{grid-template-columns:1fr}.table-wrap{overflow:visible;border:0;background:transparent}table{min-width:0;background:transparent}thead{display:none}tbody{display:grid;gap:9px}tr{display:grid;padding:12px;border:1px solid var(--line);border-radius:13px;background:var(--surface);box-shadow:0 1px 2px rgba(20,23,27,.035)}td{display:block;padding:5px 2px;border:0}.runner-actions{min-width:0}.runner-actions button,.installation-actions button{flex:1 1 auto}.install-command{font-size:12px}.notice{font-size:13px}}
-</style></head><body><div class="app-shell"><aside class="side-rail"><div class="rail-brand"><span class="brand-mark">C</span>Codex</div><a class="active" href="#overview">总览</a><a href="desktop/">任务</a><a href="#tools">工具</a><a href="#runners">Runner</a><a class="rail-task" href="desktop/">打开任务工作台</a><div class="rail-foot">远程控制状态以 Runner 收据为准</div></aside><main class="page">
-<header class="topbar" id="overview"><div><div class="eyebrow">控制器总览</div><h1>Codex 控制器</h1><p>认证、工具与 Runner 管理集中在一个清晰的工作区</p></div><div class="top-actions"><a class="button-link" href="desktop/">任务工作台</a><a class="button-link secondary" href="">刷新</a></div></header>
+@media(max-width:700px){.page{padding:0 10px 96px}.topbar,.view-heading{min-height:86px;padding-top:env(safe-area-inset-top)}.topbar h1,.view-heading h1{font-size:25px}.topbar p,.view-heading p{display:none}.top-actions{gap:6px}.top-actions .secondary{display:none}.stream-state{min-height:36px;padding:6px 9px}.grid{display:flex;overflow:auto;margin:4px -10px 18px;padding:0 10px 2px;scrollbar-width:none}.grid .card{flex:0 0 116px;padding:12px}.metric{font-size:19px}.section{margin-top:18px}.section-head{align-items:center}.section-head p{display:none}.card{padding:13px}.auth-actions{display:grid;grid-template-columns:1fr 1fr}.auth-actions button{width:100%}.toolbar{display:grid;grid-template-columns:1fr 1fr}.toolbar label{display:grid;gap:4px;color:var(--muted);font-size:12px}.toolbar>button{grid-column:1/-1}.toolbar>span{grid-column:1/-1}.form-grid{grid-template-columns:1fr}.table-wrap{overflow:visible;border:0;background:transparent}table{min-width:0;background:transparent}thead{display:none}tbody{display:grid;gap:9px}tr{display:grid;padding:12px;border:1px solid var(--line);border-radius:13px;background:var(--surface);box-shadow:0 1px 2px rgba(20,23,27,.035)}td{display:block;padding:5px 2px;border:0}.runner-actions{min-width:0}.runner-actions button,.installation-actions button{flex:1 1 auto}.install-command{font-size:12px}.notice{font-size:13px}}
+@media(max-width:430px){.topbar{align-items:flex-start}.top-actions{flex-wrap:wrap;justify-content:flex-end}.top-actions .button-link{min-height:38px;padding:6px 10px}.stream-state{order:2}}
+</style></head><body><div class="app-shell"><aside class="side-rail"><div class="rail-brand"><span class="brand-mark">C</span>Codex</div><a class="active" data-view-link="overview" href="#overview">总览</a><a href="desktop/">任务</a><a data-view-link="tools" href="#tools">工具</a><a data-view-link="runners" href="#runners">Runner</a><a class="rail-task" href="desktop/">打开任务工作台</a><div class="rail-foot">实时状态以页面推送、Mac 心跳和任务数据年龄共同判定</div></aside><main class="page">
+<section class="app-view active-view" data-view="overview"><header class="topbar" id="overview"><div><div class="eyebrow">控制器总览</div><h1>Codex 控制器</h1><p>跨 Mac 任务、工具与运行节点的远程工作空间</p></div><div class="top-actions"><span id="statusStreamState" class="stream-state warn">实时连接中</span><a class="button-link" href="desktop/">任务工作台</a></div></header>
 <div class="grid"><div class="card">服务<span class="metric" id="ready">加载中</span></div><div class="card">认证<span class="metric" id="auth">加载中</span></div><div class="card">排队<span class="metric" id="queued">-</span></div><div class="card">已发布工具<span class="metric" id="published">-</span></div><div class="card">当前任务<span class="metric" id="threadShort">无活动</span></div></div>
 <section class="section" id="authSection"><div class="section-head"><div><h2>正式认证</h2><p id="authHelp">认证模式由 Add-on options 显式选择，禁止自动降级或混用。</p></div></div><div class="auth-actions"><button id="login">开始设备码登录</button><button id="cancel" class="secondary">取消登录</button><button id="retryApiKey">重试 API Key 登录</button><button class="danger" id="logout">退出登录</button></div><div class="card"><div id="loginInfo" class="muted">正在读取认证配置。</div></div></section>
-<section class="section" id="tools"><div class="section-head"><div><h2>MCP 工具</h2><p>查看发布状态、服务门禁与调用能力</p></div></div><div class="card notice">这里显示 Controller 已知工具、内部服务配置、管理员策略、MCP 进程真实 <code>tools/list</code> 心跳和当前可调用状态。意图示例不是固定关键词，Codex 会根据完整语义决定是否调用工具。</div>
+<section class="section"><div class="section-head"><div><h2>安全状态</h2><p>用于诊断的脱敏运行摘要</p></div></div><div class="card"><p id="details" class="muted">加载中</p></div></section></section>
+<section class="section app-view" id="tools" data-view="tools"><div class="view-heading"><div><div class="eyebrow">能力管理</div><h1>MCP 工具</h1><p>查看发布状态、服务门禁与调用能力</p></div><span class="stream-state good">状态自动更新</span></div><div class="card notice">这里显示 Controller 已知工具、内部服务配置、管理员策略、MCP 进程真实 <code>tools/list</code> 心跳和当前可调用状态。意图示例不是固定关键词，Codex 会根据完整语义决定是否调用工具。</div>
 <div class="toolbar"><label>服务 <select id="serviceFilter"><option value="all">全部</option><option value="renovation_hub">Renovation Hub</option><option value="ha_operations_broker">Operations Broker</option></select></label><label>类型 <select id="riskFilter"><option value="all">全部</option><option value="read_only">只读</option><option value="write">写入</option><option value="controlled">受控操作</option></select></label><button id="reloadTools">刷新工具状态</button><span id="toolFeedback" class="muted"></span></div>
 <div class="table-wrap"><table><thead><tr><th>工具</th><th>服务 / 风险</th><th>状态</th><th>意图示例</th><th>最近调用</th><th>开关</th></tr></thead><tbody id="toolRows"></tbody></table></div></section>
-<section id="runnerCenter" class="section hidden"><div class="section-head" id="runners"><div><h2>Runner Center</h2><p>管理远程执行器、注册与恢复状态</p></div></div><div class="card notice">Runner Center 只管理已注册的 Mac/Linux 执行器和确定性任务 lease，不提供网页终端、任意 Shell、SSH、路径、源码、diff、日志或秘密回显。</div>
+<section class="app-view" id="runners" data-view="runners"><div class="view-heading"><div><div class="eyebrow">运行节点</div><h1>Runner</h1><p>管理远程执行器、注册与恢复状态</p></div><span class="stream-state good">状态自动更新</span></div><section id="runnerCenter" class="section hidden"><div class="card notice">Runner Center 只管理已注册的 Mac/Linux 执行器和确定性任务 lease，不提供网页终端、任意 Shell、SSH、路径、源码、diff、日志或秘密回显。</div>
 <div id="runnerRelayMissing" class="card notice"><strong>管理功能已启用，任务执行 Relay 尚未接入</strong><p class="muted">当前可以新增、启用、排空、停用、轮换和删除 Runner；在独立 Relay 配置完成前不会向真实 Runner 发布任务。</p></div>
 <div id="runnerInstallerMissing" class="card notice"><strong>安装制品尚未就绪</strong><p id="runnerInstallerHelp" class="muted">必须先配置完整、摘要匹配的公开 installer manifest 和 WSS Relay URL；否则不会创建无法使用的一次性 enrollment。</p></div>
 <div class="grid"><div class="card">Runner<span class="metric" id="runnerTotal">0</span></div><div class="card">已启用<span class="metric" id="runnerEnabled">0</span></div><div class="card">在线<span class="metric" id="runnerOnline">0</span></div><div class="card">忙碌<span class="metric" id="runnerBusy">0</span></div><div class="card">需恢复<span class="metric" id="runnerRecovery">0</span></div></div>
@@ -499,8 +788,7 @@ DASHBOARD_HTML = """<!doctype html>
 <div class="toolbar"><label>管理状态 <select id="runnerStateFilter"><option value="all">全部</option><option value="pending">待启用</option><option value="enabled">已启用</option><option value="draining">排空中</option><option value="disabled">已停用</option></select></label><label>平台 <select id="runnerPlatformFilter"><option value="all">全部</option><option value="linux">Linux</option><option value="macos">macOS</option></select></label><button id="reloadRunners">刷新 Runner</button><span id="runnerFeedback" class="muted"></span></div>
 <div class="table-wrap"><table><thead><tr><th>Runner</th><th>平台</th><th>状态</th><th>项目 / 标签</th><th>当前任务 / 心跳</th><th>操作</th></tr></thead><tbody id="runnerRows"></tbody></table></div>
 <div id="runnerDetail" class="card hidden"><strong id="runnerDetailTitle">Runner 详情</strong><p id="runnerDetailBody" class="muted"></p></div></section>
-<div id="runnerDisabled" class="card notice hidden"><strong>Runner Center v2 已由 Add-on 配置关闭</strong><p class="muted">普通 Codex 对话、MCP、Remote Work v1、微信 Poller、通知和装修业务链路继续保持原行为。</p></div>
-<section class="section"><div class="section-head"><div><h2>安全状态</h2><p>用于诊断的脱敏运行摘要</p></div></div><div class="card"><p id="details" class="muted">加载中</p></div></section></main><nav class="mobile-nav" aria-label="移动端导航"><a href="#overview">总览</a><a class="primary" href="desktop/">任务</a><a href="#tools">工具</a><a href="#runners">Runner</a></nav></div><script src="app.js"></script></body></html>"""
+<div id="runnerDisabled" class="card notice hidden"><strong>Runner Center v2 已由 Add-on 配置关闭</strong><p class="muted">普通 Codex 对话、MCP、Remote Work v1、微信 Poller、通知和装修业务链路继续保持原行为。</p></div></section></main><nav class="mobile-nav" aria-label="移动端导航"><a class="active" data-view-link="overview" href="#overview">总览</a><a class="primary" href="desktop/">任务</a><a data-view-link="tools" href="#tools">工具</a><a data-view-link="runners" href="#runners">Runner</a></nav></div><script src="app.js"></script></body></html>"""
 
 
 _LEGACY_DASHBOARD_JS_031 = r"""const q=id=>document.getElementById(id);let csrf='',catalog=null,statusDoc=null;

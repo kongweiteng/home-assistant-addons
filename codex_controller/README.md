@@ -17,7 +17,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。
-- `0.5.34` 保留 `0.5.33` 的实时工作台、四阶段送达、公开思考摘要、推理强度、排队消息与移动端适配，并修复 `0.5.32` 旧快照首次建立 Runner `0.3.22` 水位时的兼容冲突。迁移仅允许精确新增三个新字段，继续拒绝业务漂移；仍复用 Mac Codex App 登录，不要求 OpenAI API Key，也不传输隐藏 reasoning。
+- `0.5.35` 将总览、任务列表和任务详情统一为 SSE 持久连接，支持增量帧、心跳、游标续传、裁剪后的有界 baseline 恢复以及网络/前台自动重连；首屏最近 40 个任务，后续滚动分页，不再使用页面长轮询。浅色移动优先界面在手机/平板采用单栏对话，在宽屏采用项目/任务/对话三栏，并保留新建、发送、公开思考摘要、模型/推理强度、队列、停止和归档闭环。配套 Runner `0.3.23` 使用持久 app-server 会话池与活动任务有界并发；仍复用 Mac Codex App 登录，不要求 OpenAI API Key，也不传输隐藏 reasoning。
 - `0.5.32` 把 Desktop 工作台改为聊天优先：任务详情将用户消息、Codex 回复和实时 `assistant.delta` 合并为同一对话，命令/计划/文件变化默认折叠，底部输入框常驻；详情长轮询与 8 秒总览同步、前台恢复和网络恢复会自动刷新。手机采用任务列表到对话详情的单栏切换；写操作仍保留 request ID、revision/CAS、收据对账和 unknown 不重放边界，不需要 OpenAI API Key。
 - `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。
 - `0.5.30` 将内置 manifest 固定到 Runner `0.3.21`，精确支持 Codex App `26.901.22334` / build `7746` / CLI `0.153.0`，配套 Relay `0.2.20`；该 tuple 继续使用 v2 + `turnStart`，未知版本保持只读。`0.5.29` 的两类同 revision 安全恢复和全部业务漂移失败关闭边界保持不变。

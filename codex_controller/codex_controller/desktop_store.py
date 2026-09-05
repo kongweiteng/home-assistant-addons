@@ -795,6 +795,24 @@ class DesktopStore:
             "has_more": has_more,
         }
 
+    def event_pruned_through(self, *, scope_kind: str, scope_ref: str) -> int:
+        """Return the durable scope cursor high-water that can no longer be replayed."""
+        if scope_kind not in {"host", "thread"}:
+            raise ValueError("Desktop event watermark scope invalid")
+        with self._connect() as connection:
+            if scope_kind == "host":
+                row = connection.execute(
+                    "SELECT pruned_through FROM desktop_event_watermarks WHERE host_ref=?",
+                    (scope_ref,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT pruned_through FROM desktop_thread_event_watermarks "
+                    "WHERE thread_ref=?",
+                    (scope_ref,),
+                ).fetchone()
+        return int(row["pruned_through"]) if row is not None else 0
+
     def command(self, request_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
@@ -909,6 +927,14 @@ class DesktopStore:
                 );
                 CREATE INDEX IF NOT EXISTS desktop_events_thread_cursor
                     ON desktop_events(thread_ref,cursor);
+                CREATE TABLE IF NOT EXISTS desktop_event_watermarks(
+                    host_ref TEXT PRIMARY KEY,
+                    pruned_through INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS desktop_thread_event_watermarks(
+                    thread_ref TEXT PRIMARY KEY,
+                    pruned_through INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS desktop_commands(
                     request_id TEXT PRIMARY KEY,
                     intent_digest TEXT NOT NULL,
@@ -946,6 +972,14 @@ class DesktopStore:
                     created_at TEXT NOT NULL
                 );
                 """
+            )
+            # Older databases only recorded a host-wide prune watermark. Backfill
+            # each existing Thread conservatively once so a reconnect never treats
+            # missing, already-pruned history as replayable after an upgrade.
+            connection.execute(
+                "INSERT OR IGNORE INTO desktop_thread_event_watermarks(thread_ref,pruned_through) "
+                "SELECT thread_ref,desktop_event_watermarks.pruned_through "
+                "FROM desktop_threads JOIN desktop_event_watermarks USING(host_ref)"
             )
             columns = {
                 str(row["name"])
@@ -1084,6 +1118,32 @@ class DesktopStore:
 
     @staticmethod
     def _prune_events(connection: sqlite3.Connection, host_ref: str) -> None:
+        pruned_threads = connection.execute(
+            "SELECT thread_ref,MAX(cursor) AS value FROM desktop_events "
+            "WHERE host_ref=? AND cursor NOT IN ("
+            "SELECT cursor FROM desktop_events WHERE host_ref=? ORDER BY cursor DESC LIMIT ?) "
+            "GROUP BY thread_ref",
+            (host_ref, host_ref, EVENTS_PER_HOST),
+        ).fetchall()
+        for row in pruned_threads:
+            connection.execute(
+                "INSERT INTO desktop_thread_event_watermarks(thread_ref,pruned_through) "
+                "VALUES(?,?) ON CONFLICT(thread_ref) DO UPDATE SET pruned_through="
+                "MAX(desktop_thread_event_watermarks.pruned_through,excluded.pruned_through)",
+                (str(row["thread_ref"]), int(row["value"])),
+            )
+        pruned = connection.execute(
+            "SELECT MAX(cursor) AS value FROM desktop_events WHERE host_ref=? AND cursor NOT IN ("
+            "SELECT cursor FROM desktop_events WHERE host_ref=? ORDER BY cursor DESC LIMIT ?)",
+            (host_ref, host_ref, EVENTS_PER_HOST),
+        ).fetchone()["value"]
+        if pruned is not None:
+            connection.execute(
+                "INSERT INTO desktop_event_watermarks(host_ref,pruned_through) VALUES(?,?) "
+                "ON CONFLICT(host_ref) DO UPDATE SET pruned_through="
+                "MAX(desktop_event_watermarks.pruned_through,excluded.pruned_through)",
+                (host_ref, int(pruned)),
+            )
         connection.execute(
             "DELETE FROM desktop_events WHERE host_ref=? AND cursor NOT IN ("
             "SELECT cursor FROM desktop_events WHERE host_ref=? ORDER BY cursor DESC LIMIT ?)",

@@ -9,6 +9,31 @@ let runnerDoc = null;
 let installationState = null;
 let installationTimer = null;
 let credentialState = null;
+let statusStream = null;
+let statusReconnectTimer = null;
+let statusReconnectDelay = 1000;
+let statusLastMessageAt = 0;
+let csrfRefreshTimer = null;
+const viewNames = new Set(['overview', 'tools', 'runners']);
+
+function selectedView() {
+  const candidate = window.location.hash.replace(/^#/, '');
+  return viewNames.has(candidate) ? candidate : 'overview';
+}
+
+function activateView({scroll = true} = {}) {
+  const view = selectedView();
+  for (const element of document.querySelectorAll('[data-view]')) {
+    element.classList.toggle('active-view', element.dataset.view === view);
+  }
+  for (const link of document.querySelectorAll('[data-view-link]')) {
+    const active = link.dataset.viewLink === view;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  if (scroll) window.scrollTo(0, 0);
+}
 
 function requestId() {
   const bytes = new Uint8Array(16);
@@ -626,11 +651,25 @@ function syncRunnerConfigurationState() {
   }
 }
 
-async function refresh() {
+function setStatusStreamState(kind, message) {
+  const element = q('statusStreamState');
+  element.className = `stream-state ${kind}`;
+  element.textContent = message;
+}
+
+function scheduleCsrfRefresh() {
+  window.clearTimeout(csrfRefreshTimer);
+  csrfRefreshTimer = window.setTimeout(() => refresh(), 12 * 60 * 1000);
+}
+
+async function refresh(providedStatus = null) {
   try {
-    const status = await jsonFetch('api/status');
+    const status = providedStatus || await jsonFetch('api/status');
     statusDoc = status;
-    csrf = status.csrf_token;
+    if (!providedStatus) {
+      csrf = status.csrf_token;
+      scheduleCsrfRefresh();
+    }
     const account = status.app_server.account;
     const apiKeyMode = status.configured_auth_mode === 'api_key';
     q('ready').textContent = status.ready ? '就绪' : '未就绪';
@@ -659,6 +698,59 @@ async function refresh() {
     q('details').textContent = error.message;
     q('createRunner').disabled = true;
   }
+}
+
+function stopStatusStream() {
+  if (statusStream) statusStream.close();
+  statusStream = null;
+}
+
+function scheduleStatusReconnect(immediate = false) {
+  stopStatusStream();
+  window.clearTimeout(statusReconnectTimer);
+  if (!navigator.onLine) {
+    setStatusStreamState('bad', '网络已断开');
+    return;
+  }
+  const delay = immediate ? 0 : statusReconnectDelay;
+  if (!immediate) statusReconnectDelay = Math.min(15000, Math.round(statusReconnectDelay * 1.8));
+  setStatusStreamState('warn', delay ? `连接中 · ${Math.ceil(delay / 1000)}秒` : '正在连接');
+  statusReconnectTimer = window.setTimeout(connectStatusStream, delay);
+}
+
+function connectStatusStream() {
+  window.clearTimeout(statusReconnectTimer);
+  if (!navigator.onLine || document.visibilityState === 'hidden') return;
+  stopStatusStream();
+  setStatusStreamState('warn', '正在连接');
+  const source = new EventSource('api/stream');
+  statusStream = source;
+  source.onopen = () => {
+    if (source !== statusStream) return;
+    statusReconnectDelay = 1000;
+    statusLastMessageAt = Date.now();
+    setStatusStreamState('good', '实时已连接');
+  };
+  const onFrame = event => {
+    if (source !== statusStream) return;
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch (_) {
+      scheduleStatusReconnect();
+      return;
+    }
+    statusLastMessageAt = Date.now();
+    statusReconnectDelay = 1000;
+    setStatusStreamState('good', '实时已连接');
+    if (event.type === 'status' && data.version === 1 && data.status) refresh(data.status);
+  };
+  source.addEventListener('status', onFrame);
+  source.addEventListener('heartbeat', onFrame);
+  source.onerror = () => {
+    if (source !== statusStream) return;
+    scheduleStatusReconnect();
+  };
 }
 
 q('runnerForm').onsubmit = async event => {
@@ -759,8 +851,28 @@ q('logout').onclick = async () => {
   try { await call('api/auth/logout'); await refresh(); } catch (error) { alert(error.message); }
 };
 
-refresh();
-window.setInterval(refresh, 5000);
+activateView({scroll: false});
+refresh().finally(() => scheduleStatusReconnect(true));
+window.addEventListener('hashchange', () => activateView());
+window.setInterval(() => {
+  if (statusStream && statusLastMessageAt && Date.now() - statusLastMessageAt > 16000) {
+    scheduleStatusReconnect();
+  }
+}, 2000);
+window.addEventListener('offline', () => scheduleStatusReconnect());
+window.addEventListener('online', () => {
+  refresh();
+  scheduleStatusReconnect(true);
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    stopStatusStream();
+    setStatusStreamState('warn', '页面在后台');
+  } else {
+    refresh();
+    scheduleStatusReconnect(true);
+  }
+});
 """
 
 

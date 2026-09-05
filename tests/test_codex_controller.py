@@ -1327,6 +1327,10 @@ class ControllerAuthenticationTests(unittest.TestCase):
         self.assertIn('class="mobile-nav"', DASHBOARD_HTML)
         self.assertIn('href="desktop/"', DASHBOARD_HTML)
         self.assertIn("safe-area-inset-bottom", DASHBOARD_HTML)
+        self.assertIn('data-view="overview"', DASHBOARD_HTML)
+        self.assertIn('data-view="tools"', DASHBOARD_HTML)
+        self.assertIn('data-view="runners"', DASHBOARD_HTML)
+        self.assertIn("activateView", DASHBOARD_JS)
 
     def test_addon_config_and_run_script_keep_key_out_of_environment(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
@@ -1358,7 +1362,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.34"
+        expected = "0.5.35"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",

@@ -29,6 +29,10 @@ from .store import StoreError
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+SSE_EVENT_BATCH_LIMIT = 100
+SSE_HEARTBEAT_SECONDS = 12.0
+DATA_FRESH_SECONDS = 15
+DATA_DELAYED_SECONDS = 30
 QUEUE_ACTIONS = frozenset(
     {"queue_add", "queue_update", "queue_delete", "queue_reorder", "queue_start"}
 )
@@ -60,6 +64,9 @@ class DesktopControllerService:
         self.runner_status_provider = runner_status_provider
         self._event_condition = threading.Condition()
         self._change_sequence = 0
+        self._broadcast_sequence = 0
+        self._host_change_sequences: dict[str, int] = {}
+        self._thread_change_sequences: dict[str, int] = {}
         self._command_lock = threading.Lock()
         self._create_journal = _DesktopCreateJournal(store.database_path)
 
@@ -84,7 +91,10 @@ class DesktopControllerService:
             result = self._create_journal.ingest_receipt(document)
         else:
             result = self.store.ingest_receipt(document)
-        self._notify_change()
+        self._notify_change(
+            host_ref=str(document.get("host_ref") or "") or None,
+            thread_ref=str(document.get("thread_ref") or "") or None,
+        )
         return {"accepted": True, **result}
 
     def sweep(self) -> int:
@@ -124,6 +134,19 @@ class DesktopControllerService:
             host["online"] = online
             host["connection_observed_at"] = connection_observed_at
             host["data_synced_at"] = host.get("synced_at")
+            data_synced_at = self._parse_time(host.get("synced_at"))
+            if data_synced_at is None:
+                host["data_age_seconds"] = None
+                host["data_freshness_state"] = "unknown"
+            else:
+                data_age_seconds = max(0, int((current - data_synced_at).total_seconds()))
+                host["data_age_seconds"] = data_age_seconds
+                if data_age_seconds <= DATA_FRESH_SECONDS:
+                    host["data_freshness_state"] = "fresh"
+                elif data_age_seconds <= DATA_DELAYED_SECONDS:
+                    host["data_freshness_state"] = "delayed"
+                else:
+                    host["data_freshness_state"] = "stale"
             host["write_available"] = bool(
                 online
                 and authorized
@@ -149,6 +172,7 @@ class DesktopControllerService:
         status: str | None,
         after_cursor: int,
         limit: int,
+        order: str | None = None,
     ) -> dict[str, Any]:
         if host_ref is not None:
             self._ref(host_ref, "HS")
@@ -156,14 +180,56 @@ class DesktopControllerService:
             self._ref(project_ref, "PJ")
         if status is not None and status not in THREAD_STATUSES:
             raise StoreError("desktop_status_invalid", "Desktop Thread 状态筛选无效", status=400)
-        if after_cursor < 0 or not 1 <= limit <= 200:
+        if after_cursor < 0 or not 1 <= limit <= 200 or order not in {None, "recent"}:
             raise StoreError("desktop_cursor_invalid", "Desktop Thread cursor 或 limit 无效", status=400)
+        if order == "recent":
+            return self._recent_threads(
+                host_ref=host_ref,
+                project_ref=project_ref,
+                status=status,
+                offset=after_cursor,
+                limit=limit,
+            )
         return self.store.list_threads(
             host_ref=host_ref,
             project_ref=project_ref,
             status=status,
             after_cursor=after_cursor,
             limit=limit,
+        )
+
+    def host_stream(
+        self,
+        host_ref: str,
+        *,
+        after_cursor: int | None,
+        heartbeat_seconds: float = SSE_HEARTBEAT_SECONDS,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield bounded host event deltas and observable SSE heartbeats."""
+        self._ref(host_ref, "HS")
+        self.store.host_runner_id(host_ref)
+        yield from self._stream(
+            scope_kind="host",
+            scope_ref=host_ref,
+            after_cursor=after_cursor,
+            heartbeat_seconds=heartbeat_seconds,
+        )
+
+    def thread_stream(
+        self,
+        thread_ref: str,
+        *,
+        after_cursor: int | None,
+        heartbeat_seconds: float = SSE_HEARTBEAT_SECONDS,
+    ) -> Iterator[dict[str, Any]]:
+        """Yield bounded Thread event deltas and observable SSE heartbeats."""
+        self._ref(thread_ref, "TH")
+        self.store.runner_id(thread_ref)
+        yield from self._stream(
+            scope_kind="thread",
+            scope_ref=thread_ref,
+            after_cursor=after_cursor,
+            heartbeat_seconds=heartbeat_seconds,
         )
 
     def thread(self, thread_ref: str) -> dict[str, Any]:
@@ -223,13 +289,14 @@ class DesktopControllerService:
     def submit(self, thread_ref: str, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._command_lock:
             result = self._submit_locked(thread_ref, action, payload)
-        self._notify_change()
+        detail = self.store.thread(thread_ref)
+        self._notify_change(host_ref=str(detail["host_ref"]), thread_ref=thread_ref)
         return result
 
     def create(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         with self._command_lock:
             result = self._create_locked(payload)
-        self._notify_change()
+        self._notify_change(host_ref=str(payload.get("host_ref") or "") or None)
         return result
 
     def _create_locked(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -790,9 +857,222 @@ class DesktopControllerService:
             raise StoreError("desktop_clock_invalid", "Desktop Controller 时钟必须包含时区", status=500)
         return value.astimezone(SHANGHAI)
 
-    def _notify_change(self) -> None:
+    def _recent_threads(
+        self,
+        *,
+        host_ref: str | None,
+        project_ref: str | None,
+        status: str | None,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        conditions: list[str] = []
+        parameters: list[Any] = []
+        for column, value in (
+            ("host_ref", host_ref),
+            ("project_ref", project_ref),
+            ("status", status),
+        ):
+            if value is not None:
+                conditions.append(f"{column}=?")
+                parameters.append(value)
+        where = "" if not conditions else "WHERE " + " AND ".join(conditions)
+        parameters.extend((limit + 1, offset))
+        # DesktopStore owns the schema and public DTO conversion. This query only adds
+        # the alternate, offset-based order required for bounded initial rendering.
+        with self.store._connect() as connection:  # noqa: SLF001 - package-local read model
+            rows = connection.execute(
+                "SELECT * FROM desktop_threads "
+                f"{where} ORDER BY source_updated_at DESC,id DESC LIMIT ? OFFSET ?",
+                parameters,
+            ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return {
+            "threads": [
+                self.store._thread_public(row)  # noqa: SLF001 - package-local DTO contract
+                for row in rows
+            ],
+            "next_cursor": offset + len(rows),
+            "has_more": has_more,
+        }
+
+    def _stream(
+        self,
+        *,
+        scope_kind: str,
+        scope_ref: str,
+        after_cursor: int | None,
+        heartbeat_seconds: float,
+    ) -> Iterator[dict[str, Any]]:
+        if after_cursor is not None and (
+            isinstance(after_cursor, bool)
+            or not isinstance(after_cursor, int)
+            or after_cursor < 0
+            or after_cursor > 2**63 - 1
+        ):
+            raise StoreError("desktop_cursor_invalid", "Desktop SSE cursor 无效", status=400)
+        if not 0.01 <= heartbeat_seconds <= 15:
+            raise StoreError("desktop_stream_invalid", "Desktop SSE heartbeat 无效", status=500)
+
+        with self._event_condition:
+            tail = self._event_tail(scope_kind=scope_kind, scope_ref=scope_ref)
+            cursor = tail if after_cursor is None else after_cursor
+            pruned_through = self.store.event_pruned_through(
+                scope_kind=scope_kind,
+                scope_ref=scope_ref,
+            )
+            resync_required = bool(
+                after_cursor is not None
+                and (
+                    after_cursor > tail
+                    or (pruned_through > 0 and after_cursor <= pruned_through)
+                )
+            )
+            if resync_required:
+                cursor = tail
+            observed_scope = self._scope_change_sequence(scope_kind, scope_ref)
+            observed_broadcast = self._broadcast_sequence
+        yield self._stream_frame(
+            "ready",
+            scope_kind=scope_kind,
+            scope_ref=scope_ref,
+            cursor=cursor,
+            events=[],
+            changed=False,
+            include_host=scope_kind == "host",
+            resync_required=resync_required,
+        )
+
+        heartbeat_at = time.monotonic() + heartbeat_seconds
+        while True:
+            frame: dict[str, Any] | None = None
+            with self._event_condition:
+                while frame is None:
+                    current_scope = self._scope_change_sequence(scope_kind, scope_ref)
+                    current_broadcast = self._broadcast_sequence
+                    if scope_kind == "host":
+                        result = self.store.host_events(
+                            scope_ref,
+                            after_cursor=cursor,
+                            limit=SSE_EVENT_BATCH_LIMIT,
+                        )
+                    else:
+                        result = self.store.events(
+                            scope_ref,
+                            after_cursor=cursor,
+                            limit=SSE_EVENT_BATCH_LIMIT,
+                        )
+                    if result["events"]:
+                        cursor = int(result["next_cursor"])
+                        observed_scope = current_scope
+                        observed_broadcast = current_broadcast
+                        frame = self._stream_frame(
+                            "desktop",
+                            scope_kind=scope_kind,
+                            scope_ref=scope_ref,
+                            cursor=cursor,
+                            events=list(result["events"]),
+                            changed=False,
+                            has_more=bool(result["has_more"]),
+                        )
+                        continue
+                    if current_scope != observed_scope or current_broadcast != observed_broadcast:
+                        observed_scope = current_scope
+                        observed_broadcast = current_broadcast
+                        frame = self._stream_frame(
+                            "desktop",
+                            scope_kind=scope_kind,
+                            scope_ref=scope_ref,
+                            cursor=cursor,
+                            events=[],
+                            changed=True,
+                            has_more=False,
+                        )
+                        continue
+                    remaining = heartbeat_at - time.monotonic()
+                    if remaining <= 0:
+                        frame = self._stream_frame(
+                            "heartbeat",
+                            scope_kind=scope_kind,
+                            scope_ref=scope_ref,
+                            cursor=cursor,
+                            events=[],
+                            changed=False,
+                            include_host=scope_kind == "host",
+                        )
+                        heartbeat_at = time.monotonic() + heartbeat_seconds
+                        continue
+                    self._event_condition.wait(timeout=remaining)
+            yield frame
+
+    def _event_tail(self, *, scope_kind: str, scope_ref: str) -> int:
+        column = "host_ref" if scope_kind == "host" else "thread_ref"
+        with sqlite3.connect(self.store.database_path) as connection:
+            row = connection.execute(
+                f"SELECT MAX(cursor) FROM desktop_events WHERE {column}=?",
+                (scope_ref,),
+            ).fetchone()
+        return int(row[0]) if row is not None and row[0] is not None else 0
+
+    def _scope_change_sequence(self, scope_kind: str, scope_ref: str) -> int:
+        if scope_kind == "host":
+            return self._host_change_sequences.get(scope_ref, 0)
+        return self._thread_change_sequences.get(scope_ref, 0)
+
+    def _stream_frame(
+        self,
+        event: str,
+        *,
+        scope_kind: str,
+        scope_ref: str,
+        cursor: int,
+        events: list[dict[str, Any]],
+        changed: bool,
+        has_more: bool = False,
+        include_host: bool = False,
+        resync_required: bool = False,
+    ) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "version": 1,
+            "scope": {"type": scope_kind, "ref": scope_ref},
+            "cursor": cursor,
+            "server_time": self._now().isoformat(),
+            "events": events,
+        }
+        if event == "desktop":
+            data["changed"] = changed
+            data["has_more"] = has_more
+        if event == "ready":
+            data["resync_required"] = resync_required
+        if include_host:
+            data["host"] = self._host_document(scope_ref)
+        return {"event": event, "cursor": cursor, "data": data}
+
+    def _host_document(self, host_ref: str) -> dict[str, Any]:
+        for host in self.hosts()["hosts"]:
+            if host.get("host_ref") == host_ref:
+                return host
+        raise StoreError("desktop_host_not_found", "Desktop host 不存在", status=404)
+
+    def _notify_change(
+        self,
+        *,
+        host_ref: str | None = None,
+        thread_ref: str | None = None,
+    ) -> None:
         with self._event_condition:
             self._change_sequence += 1
+            if host_ref is None and thread_ref is None:
+                self._broadcast_sequence += 1
+            if host_ref is not None:
+                self._host_change_sequences[host_ref] = (
+                    self._host_change_sequences.get(host_ref, 0) + 1
+                )
+            if thread_ref is not None:
+                self._thread_change_sequences[thread_ref] = (
+                    self._thread_change_sequences.get(thread_ref, 0) + 1
+                )
             self._event_condition.notify_all()
 
     @staticmethod

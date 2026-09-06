@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.39 — local candidate
+
+- 内置安装身份提升到 Runner `0.3.26`；配套 Relay `0.2.26` 仅增加该版本的精确滚动安装兼容，完整保留 `0.3.25` 和既有 WSS/ACK 契约。
+- Runner 为原任务控制保留独立 app-server reader，并使用轻量元数据与 Owner IPC 实时 revision/Turn 做控制前置和写后确认，避免大历史任务或活动同步池饱和使消息在 Mac 写入前稳定超时。
+- 写结果三态按实际 IPC 阶段判定：明确未发送或 App 显式拒绝为 `failed`；写入/flush 已尝试、等待响应断开或成功响应结构异常为 `unknown` 且禁止重放。保留原生历史分页/搜索、图片、SSE、错误中心和无 OpenAI API Key 路径。
+
 ## 0.5.38
 
 - 允许同一已验证 host/project/thread 绑定的请求关联、只读 `history.*` 结果在活动任务推进 revision 后继续进入 Thread SSE；非历史事件仍必须先有精确 revision 快照。

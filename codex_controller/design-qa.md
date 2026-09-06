@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.38.
+Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.39.
 
 ## Comparison target and evidence
 
@@ -23,6 +23,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.38.
 
 ## Patches since preceding QA
 
+- Controller `0.5.39` changes only the Runner control/readback lane and pinned `0.3.26` manifest; HTML, CSS, JavaScript, responsive breakpoints, copy and interaction layout are unchanged from the accepted `0.5.38` surfaces.
 - Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
 - Separated management pages with grouped/searchable incremental tools and live status.
 - Added official icons, visible lightbox close contrast and 44px removal targets.
@@ -37,7 +38,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.38.
 ## Interaction checks and boundaries
 
 - Local fixture exercised project scope, task selection, text and pure-image task creation, exact mock receipt, paged tools navigation, four service filters, management navigation, image upload/preview/remove, pure-image mock send, lazy history read, task search POST-to-SSE, and the paged error center.
-- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling. Current history UI regression is `5/5`; full Add-on suite is `810/810` with 8 environment-dependent skips.
+- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling. Current history UI regression is `5/5`; full Add-on suite is `811/811` with 8 environment-dependent skips.
 - Physical HA companion app, Mac image interpretation, same-original-task delivery and off-LAN latency remain pending. Mock receipts and screenshots cannot prove these.
 - New-task form accepts up to four images and can create a pure-image task. The local same-origin fixture confirmed the uploaded preview and enabled create action without text; this does not prove Mac interpretation or phone delivery.
 

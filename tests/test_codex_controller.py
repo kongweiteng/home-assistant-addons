@@ -927,7 +927,7 @@ class ControllerApiBaseUrlTests(unittest.TestCase):
             "https://supervisor/v1",
             "https://service.internal/v1",
             "https://127.0.0.1/v1",
-            "https://10.80.1.69/v1",
+            "https://192.0.2.10/v1",
             "https://[::1]/v1",
         )
         for value in invalid_values:

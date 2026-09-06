@@ -1,11 +1,12 @@
 # Codex Controller 使用说明
 
-当前版本：`0.5.37`。
+当前版本：`0.5.38`。
 
 ## 瞬态 Turn 安全重试
 
+- `0.5.38` 修复活动任务在历史查询往返期间推进 revision 时结果被误丢弃的竞态；只对同一已验证 host/project/thread 绑定的请求关联、只读 `history.*` 事件允许较早 revision，普通实时事件仍需精确快照。首次请求改为收到 SSE `ready` 后提交；发布结果不确定或断线后游标窗口被裁剪时解锁按钮并明确要求手动重试，不自动重放请求。该版本固定 Runner `0.3.25` manifest，并要求 Relay `0.2.25` 的精确滚动安装兼容；Relay 数据面与 ACK 行为不变。
 - `0.5.37` 在状态页增加最近错误摘要与独立错误中心。错误按组件与任务上下文区分，使用稳定错误码、短引用、上海时间和可重试标志；不显示微信用户、消息正文、URL、凭据或原始异常。错误流使用 SSE `error_revision`，变更后仅重取当前分页，不使用浏览器长轮询或全量错误加载。Controller 以既有 Gateway 内部 URL 和 Bearer 读取最小受保护失败目录，浏览器不访问 Gateway 管理 API。Runner `0.3.24`、Relay `0.2.23` 不变。
-- 同版本使用当前 Mac App 原生 cursor 分页读取较早 Turn 并搜索公开文本；页面每次最多合并 20 Turn，结果只从 Thread SSE 返回。原始 cursor 与搜索执行留在 Mac，Controller 不保存搜索词，也不会让只读历史请求阻塞发送、中断或其他控制。
+- 同版本由 Runner `0.3.25` 使用当前 Mac App 原生 cursor 分页读取较早 Turn 并搜索公开文本；页面每次最多合并 20 Turn，结果只从 Thread SSE 返回。原始 cursor 与搜索执行留在 Mac，Controller 不保存搜索词，也不会让只读历史请求阻塞发送、中断或其他控制。Runner `0.3.24` 未声明对应 capability，旧生产组合不会显示为可用。
 - `0.5.35` 将 Controller 总览、host 任务列表和 Thread 详情统一为 SSE 持久连接：变化即时增量推送，无变化只发送心跳；断线、网络恢复和页面回到前台会自动重连并从游标续传，裁剪或连续失败时执行有界 baseline 对账。首屏最近 40 个任务，后续滚动分页；手机/平板单栏和宽屏三栏都保留新建、发送、公开思考摘要、模型/推理强度、队列、停止与归档。配套 Runner `0.3.23` 使用持久会话池和有界并发，仍复用 Mac Codex App 登录且不要求 OpenAI API Key。
 - `0.5.32` 将 `/desktop` 改为聊天优先的实时工作台：默认只显示用户消息、Codex 回复和人类可读状态，运行细节折叠；输入框固定在底部，Enter 发送、Shift+Enter 换行，实时事件长轮询、8 秒列表同步、回到前台和网络恢复都会自动刷新。手机为列表到对话的单栏体验。后端写控制与无 API Key 路径不变。
 - `0.5.31` 补齐 App 重启后的同 revision `notLoaded/load_required` 恢复：只锁存不可写控制态，保留既有整数控制 revision、状态、Turn 历史和业务字段；Runner `0.3.21`、Relay `0.2.20` 与未知 tuple 只读边界不变。

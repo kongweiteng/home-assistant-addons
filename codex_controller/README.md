@@ -15,8 +15,9 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 ## 当前阶段
 
+- `0.5.38` 收紧历史分页的实时交付：活动任务 revision 在查询期间推进不再丢弃同绑定的只读结果，首次请求等待 SSE `ready`，不确定发布或重连后事件窗口裁剪会明确解锁手动重试。历史请求仍不自动重放，普通实时事件的精确 revision 快照门禁不变。内置 manifest 固定 Runner `0.3.25`，配套 Relay `0.2.25` 只增加精确安装兼容，不改变 WSS 与 ACK 契约。
 - `0.5.37` 新增移动端/Web 共用错误中心：状态页展示最近错误并可进入独立、分页的错误列表，明确区分组件错误和 Mac 任务上下文。错误通过 SSE `error_revision` 即时刷新；浏览器只看到稳定错误码、短引用、上海时间和是否可重试，不会看到微信身份、消息正文、URL、凭据或原始异常。Controller 使用既有 Gateway 内部地址与 Bearer 读取最小受保护失败目录，页面不访问 Gateway 管理 API。Runner `0.3.24`/Relay `0.2.23` 保持不变。
-- 同版本新增较早对话分页和任务内公开文本搜索：调用 Mac App 原生 cursor 接口，每页最多 20 Turn；结果经既有 Thread SSE 按 request ID 合并，不保存查询明文、不占写控制互斥，也不会覆盖实时到达的回复。
+- 同版本新增较早对话分页和任务内公开文本搜索：Runner `0.3.25` 调用 Mac App 原生 cursor 接口，每页最多 20 Turn；结果经既有 Thread SSE 按 request ID 合并，不保存查询明文、不占写控制互斥，也不会覆盖实时到达的回复。旧生产 Runner `0.3.24` 不声明这两项能力，页面会失败关闭而不会回退为一次性全量读取。
 - `0.5.36` 按方案 1 将默认入口设为任务，Web 两栏、手机列表/全屏对话；工具、运行设备与设置分开。既有对话和新建任务均可选图或粘贴、预览移除、仅图发送及按需查看历史图片；配套 Runner `0.3.24`/Relay `0.2.23`，继续复用 Mac 登录，不要求 OpenAI API Key。新建回执走 SSE，不重复 POST 轮询。
 - 固定官方 `@openai/codex@0.146.0`，按锁文件 SHA-512 校验平台包，镜像只保留原生 Codex 二进制并在构建时生成 app-server Schema。
 - 默认 `intake_enabled=false`，不会接收正式微信任务。

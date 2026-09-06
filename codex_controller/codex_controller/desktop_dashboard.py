@@ -688,7 +688,13 @@ async function requestHistoryPage({initial = false} = {}) {
   renderHistoryControls();
   const body = {request_id: request, ...(cursor ? {cursor} : {})};
   try {
-    await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/history/page`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    const submitted = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/history/page`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    if (threadRef !== state.selectedThread || request !== state.historyRequestId) return;
+    if (submitted?.state !== 'submitted') {
+      state.historyLoading = false;
+      state.historyError = '历史请求是否送达还不能确认，请手动重试';
+      renderHistoryControls();
+    }
   } catch (error) {
     if (threadRef !== state.selectedThread || request !== state.historyRequestId) return;
     state.historyLoading = false;
@@ -722,7 +728,13 @@ async function requestHistorySearch({append = false} = {}) {
   renderHistoryControls();
   const body = {request_id: request, query, ...(cursor ? {cursor} : {})};
   try {
-    await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/history/search`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    const submitted = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/history/search`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    if (threadRef !== state.selectedThread || request !== state.searchRequestId) return;
+    if (submitted?.state !== 'submitted') {
+      state.searchLoading = false;
+      state.searchError = '搜索请求是否送达还不能确认，请手动重试';
+      renderHistoryControls();
+    }
   } catch (error) {
     if (threadRef !== state.selectedThread || request !== state.searchRequestId) return;
     state.searchLoading = false;
@@ -774,6 +786,27 @@ function applyHistoryEvent(event) {
     state.searchError = '';
     renderHistoryControls();
   }
+}
+
+function handleHistoryStreamReady(document) {
+  if (document?.resync_required) {
+    if (state.historyLoading) {
+      state.historyLoading = false;
+      state.historyError = '实时窗口已更新，上次历史结果未能对账，请手动重试';
+    }
+    if (state.searchLoading) {
+      state.searchLoading = false;
+      state.searchError = '实时窗口已更新，上次搜索结果未能对账，请手动重试';
+    }
+    renderHistoryControls();
+  }
+  if (
+    state.detail?.history?.paging_available === true
+    && state.historyInitialized
+    && state.historyHasMore
+    && !state.historyLoading
+    && !state.historyRequestId
+  ) void requestHistoryPage({initial: true});
 }
 
 function isNearConversationBottom() {
@@ -1490,6 +1523,7 @@ function startEventStream() {
         q('composerFeedback').className = 'composer-status muted';
         q('composerFeedback').textContent = '事件窗口已更新，正在读取最新任务状态';
       }
+      handleHistoryStreamReady(document);
       scheduleDetailReload(threadRef);
     }
     if (event.type === 'desktop' && document.events?.length) {
@@ -1510,17 +1544,6 @@ function startEventStream() {
     state.detailStreamState = 'open';
     state.streamFailures.delete('detail');
     renderFreshness();
-    // The Controller tails the current event cursor when a stream first opens.
-    // Submit the initial history request only after that cursor is established,
-    // otherwise a very fast Runner reply can land before the SSE subscriber and
-    // be mistaken for an already-seen event.
-    if (
-      state.detail?.history?.paging_available === true
-      && state.historyInitialized
-      && state.historyHasMore
-      && !state.historyLoading
-      && !state.historyRequestId
-    ) void requestHistoryPage({initial: true});
   };
   source.onerror = () => { if (source === state.eventSource) scheduleEventReconnect(); };
 }

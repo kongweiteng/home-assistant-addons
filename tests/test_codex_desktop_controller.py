@@ -462,6 +462,48 @@ class DesktopStoreServiceTests(unittest.TestCase):
         self.assertEqual(context.exception.code, "desktop_history_capability_unavailable")
         self.assertEqual(self.publisher.desktop_commands, [])
 
+    def test_history_reply_survives_a_newer_active_thread_snapshot(self) -> None:
+        capabilities = list(snapshot(self.runner_id)["host"]["capabilities"]) + [
+            "history_paging_v1",
+            "history_search_v1",
+        ]
+        older = snapshot(self.runner_id, revision=8, status="active", capabilities=capabilities)
+        self.service.receive("desktop_snapshot", older)
+        self.service.history_query(
+            THREAD_REF,
+            "search",
+            {"request_id": "history-search-active-1", "query": "公开文本"},
+        )
+
+        for revision in (9, 10, 11):
+            newer = snapshot(
+                self.runner_id,
+                revision=revision,
+                status="active",
+                capabilities=capabilities,
+            )
+            self.service.receive("desktop_snapshot", newer)
+        with self.store._connect() as connection:  # noqa: SLF001 - prove the exact old snapshot was pruned
+            retained = connection.execute(
+                "SELECT 1 FROM desktop_snapshots WHERE thread_ref=? AND thread_revision=8",
+                (THREAD_REF,),
+            ).fetchone()
+        self.assertIsNone(retained)
+        received = self.service.receive(
+            "desktop_event",
+            history_event(
+                self.runner_id,
+                sequence=1,
+                revision=8,
+                request_id="history-search-active-1",
+            ),
+        )
+
+        replay = self.service.events(THREAD_REF, after_cursor=0, limit=10, wait_seconds=0)
+        self.assertEqual(received["status"], "stored")
+        self.assertEqual(replay["events"][-1]["event_kind"], "history.search")
+        self.assertEqual(replay["events"][-1]["thread_revision"], 8)
+
     def test_hosts_projects_threads_and_monotonic_snapshot_are_ref_only(self) -> None:
         hosts = self.service.hosts()
         self.assertTrue(hosts["hosts"][0]["online"])

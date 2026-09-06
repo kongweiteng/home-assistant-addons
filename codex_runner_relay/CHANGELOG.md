@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.25
+
+- 安装目录精确接受 Runner 0.3.25，并完整保留 0.3.24 与全部原有回滚版本。
+- WSS envelope、存储、连接绑定与 ACK 语义不变；`desktop_snapshot + desktop_revision_conflict` 仍只按 0.2.24 已冻结的精确组合消费，其他冲突继续失败关闭。
+
 ## 0.2.24
 
 - 将 Controller 已由更新投影取代的 `desktop_revision_conflict` 快照精确视为已消费并返回 ACK，防止一个不可重放的旧快照永久阻塞 Runner 心跳、实时事件和自动重连。

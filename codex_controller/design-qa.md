@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.37.
+Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.38.
 
 ## Comparison target and evidence
 
@@ -37,7 +37,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.37.
 ## Interaction checks and boundaries
 
 - Local fixture exercised project scope, task selection, text and pure-image task creation, exact mock receipt, paged tools navigation, four service filters, management navigation, image upload/preview/remove, pure-image mock send, lazy history read, task search POST-to-SSE, and the paged error center.
-- Automated gates cover unknown receipts, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling.
+- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling. Current history UI regression is `5/5`; full Add-on suite is `810/810` with 8 environment-dependent skips.
 - Physical HA companion app, Mac image interpretation, same-original-task delivery and off-LAN latency remain pending. Mock receipts and screenshots cannot prove these.
 - New-task form accepts up to four images and can create a pure-image task. The local same-origin fixture confirmed the uploaded preview and enabled create action without text; this does not prove Mac interpretation or phone delivery.
 

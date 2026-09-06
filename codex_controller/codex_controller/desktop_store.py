@@ -334,17 +334,28 @@ class DesktopStore:
                 (thread_ref, int(document["thread_revision"])),
             ).fetchone()
             if target_snapshot is None:
-                if int(binding["thread_revision"]) > int(document["thread_revision"]):
+                event_revision = int(document["thread_revision"])
+                current_revision = int(binding["thread_revision"])
+                history_event = str(document["event_kind"]).startswith("history.")
+                # History replies are request-bound, read-only pages.  An active
+                # task can advance after the Controller submits the query but
+                # before the Runner's result returns.  Keep the strict snapshot
+                # prerequisite for live events, while allowing an older history
+                # reply on the same already-verified host/project/thread binding.
+                if history_event and event_revision <= current_revision:
+                    pass
+                elif current_revision > event_revision:
                     raise StoreError(
                         "desktop_event_sequence_stale",
                         "Desktop event 对应 revision 已被更新快照取代",
                         status=409,
                     )
-                raise StoreError(
-                    "desktop_snapshot_required",
-                    "Desktop event 对应 revision 的快照必须先接收",
-                    status=409,
-                )
+                else:
+                    raise StoreError(
+                        "desktop_snapshot_required",
+                        "Desktop event 对应 revision 的快照必须先接收",
+                        status=409,
+                    )
             cursor = connection.execute(
                 "INSERT INTO desktop_events("
                 "host_ref,project_ref,thread_ref,turn_ref,event_sequence,event_kind,source,thread_revision,"

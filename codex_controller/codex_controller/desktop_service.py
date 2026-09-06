@@ -146,11 +146,18 @@ class DesktopControllerService:
         created_at = self._parse_time(document.get("created_at"))
         host = document.get("host")
         host_synced_at = self._parse_time(host.get("synced_at")) if isinstance(host, Mapping) else None
+        data_synced_at = (
+            self._parse_time(host.get("data_synced_at")) if isinstance(host, Mapping) else None
+        )
         if created_at is None or created_at > current + dt.timedelta(minutes=5):
             raise StoreError("desktop_clock_skew", "Desktop 消息时间超出允许范围", status=409)
         if host_synced_at is not None and host_synced_at > current + dt.timedelta(minutes=5):
             raise StoreError("desktop_clock_skew", "Desktop host 同步时间超出允许范围", status=409)
-        if event_type == "desktop_snapshot":
+        if data_synced_at is not None and data_synced_at > current + dt.timedelta(minutes=5):
+            raise StoreError("desktop_clock_skew", "Desktop 数据同步时间超出允许范围", status=409)
+        if event_type == "desktop_host":
+            result = self.store.ingest_host(document, observed_at=current.isoformat())
+        elif event_type == "desktop_snapshot":
             result = self.store.ingest_snapshot(document, observed_at=current.isoformat())
         elif event_type == "desktop_event":
             resource_command = self._resource_event_command(document)
@@ -263,9 +270,19 @@ class DesktopControllerService:
             )
             host["online"] = online
             host["connection_observed_at"] = connection_observed_at
-            host["data_synced_at"] = host.get("synced_at")
-            data_synced_at = self._parse_time(host.get("synced_at"))
-            if data_synced_at is None:
+            capabilities = host.get("capabilities") or []
+            # New Runners publish an independent inventory watermark.  A Host
+            # heartbeat proves connectivity only and must not make stale task
+            # data writable.  Legacy Runners keep their historical snapshot
+            # timestamp fallback until they advertise desktop_host_v1.
+            data_value = (
+                host.get("data_synced_at")
+                if "desktop_host_v1" in capabilities
+                else host.get("synced_at")
+            )
+            host["data_synced_at"] = data_value
+            data_synced_at = self._parse_time(data_value)
+            if data_synced_at is None or data_synced_at > current:
                 host["data_age_seconds"] = None
                 host["data_freshness_state"] = "unknown"
             else:
@@ -282,6 +299,7 @@ class DesktopControllerService:
                 and authorized
                 and host.get("control_enabled") is True
                 and self.publisher is not None
+                and host["data_freshness_state"] in {"fresh", "delayed"}
             )
         return {
             "hosts": hosts,
@@ -1918,6 +1936,7 @@ class DesktopControllerService:
                             events=list(result["events"]),
                             changed=False,
                             has_more=bool(result["has_more"]),
+                            include_host=scope_kind == "host",
                         )
                         continue
                     if current_scope != observed_scope or current_broadcast != observed_broadcast:
@@ -1931,6 +1950,7 @@ class DesktopControllerService:
                             events=[],
                             changed=True,
                             has_more=False,
+                            include_host=scope_kind == "host",
                         )
                         continue
                     remaining = heartbeat_at - time.monotonic()

@@ -1,6 +1,13 @@
 # 更新记录
 
-## 0.5.44 — local candidate
+## 0.5.45 — released
+
+- 内置安装身份提升到 Runner `0.3.32`。Runner 通过独立、持久的 `desktop_host` 上行发布 Host、App Bridge、能力目录和实时健康；任务历史读取阻塞或全部任务繁忙时不再阻塞 Host 状态恢复。
+- Controller 持久化单调 `host_sequence` 与 Host 摘要，明确拒绝同序列冲突并安全忽略迟到状态；Host 心跳不再刷新任务数据水位，过期任务数据保持只读失败关闭。Host SSE 在状态变化时立即携带当前 Host。
+- 页面在手机和 Web 显示 Bridge 恢复尝试、重试倒计时、最近尝试/成功及稳定错误码，并提供复制、错误中心和 Runner 管理入口；390px 视口不横向溢出，交互入口保持移动端触控尺寸。
+- Gateway 保持 `0.4.10`，Relay `0.2.32` 只增加 `desktop_host` 透传、明确 stale Host ACK 和 Runner `0.3.32` 的精确安装兼容；原 Thread/Turn、图片、SSE/WSS、unknown 不重放和无 OpenAI API Key 边界不变。
+
+## 0.5.44 — released
 
 - 内置安装身份提升到 Runner `0.3.31`；管理能力待发布时在既有 worker 限额内为一个非活动最近任务保留承载槽位，避免超长活动任务占满通道并阻塞 rename、pin、fork 和 Review 发布。
 - 承载仍经过既有任务读取、脱敏、revision 和正文一致性校验；只有快照已原子进入 durable outbox 或相同摘要已存在时才确认发布，入队失败会保留待发布状态并重试。Controller 页面、SSE/WSS、图文、新建/继续、审批/提问、Diff/资源、模式与权限边界不变。

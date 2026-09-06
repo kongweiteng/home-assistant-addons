@@ -1,6 +1,11 @@
 # 更新记录
 
-## 0.2.31 — local candidate
+## 0.2.32 — released
+
+- 新增 `desktop_host` 上行事件白名单，并只对 Controller 明确返回的 `desktop_host_sequence_stale` 旧序号拒绝进行安全消费与 ACK；其他 Host 冲突仍关闭连接并失败关闭。
+- 安装目录精确接受 Runner `0.3.32`，同时保留 `0.3.31` 与全部既有回滚版本；Relay 不解析 Host、Bridge 或任务内容，也不改变连接身份和权限边界。
+
+## 0.2.31 — released
 
 - 安装目录精确接受 Runner `0.3.31`，并完整保留 `0.3.30` 与全部原有回滚版本。
 - WSS、ACK、身份、存储与权限边界不变；并发 Host 能力承载逻辑仍只存在于 Runner。

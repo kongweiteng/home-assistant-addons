@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
+import re
 import sqlite3
 import threading
 from typing import Any, Mapping
@@ -58,6 +60,30 @@ class DesktopStore:
         self._migrate()
         self._recover_pending_commands()
 
+    def ingest_host(self, document: Mapping[str, Any], *, observed_at: str) -> dict[str, Any]:
+        host = dict(document["host"])
+        host_ref = str(document["host_ref"])
+        runner_id = str(document["runner_id"])
+        host_sequence = int(document["host_sequence"])
+        encoded_host = canonical_json(host)
+        with self._lock, self._connect() as connection:
+            status = self._bind_host(
+                connection,
+                host_ref,
+                runner_id,
+                host,
+                encoded_host,
+                observed_at,
+                host_sequence=host_sequence,
+            )
+            if status == "stale_ignored":
+                raise StoreError(
+                    "desktop_host_sequence_stale",
+                    "Desktop host sequence 已被更新状态取代",
+                    status=409,
+                )
+        return {"status": status}
+
     def ingest_snapshot(self, document: Mapping[str, Any], *, observed_at: str) -> dict[str, Any]:
         body = dict(document["snapshot"])
         host = dict(document.get("host") or {})
@@ -78,7 +104,15 @@ class DesktopStore:
             ).fetchone()
             if existing_snapshot is not None:
                 return {"status": "duplicate", "thread": self._thread_row(connection, thread_ref)}
-            self._bind_host(connection, host_ref, runner_id, host, encoded_host, observed_at)
+            self._bind_host(
+                connection,
+                host_ref,
+                runner_id,
+                host,
+                encoded_host,
+                observed_at,
+                host_sequence=document.get("host_sequence"),
+            )
             self._upsert_project(
                 connection,
                 host_ref,
@@ -712,7 +746,8 @@ class DesktopStore:
     def list_hosts(self) -> list[dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT host_ref,state,control_enabled,document_json,synced_at,updated_at "
+                "SELECT host_ref,state,control_enabled,document_json,host_sequence,synced_at,"
+                "data_synced_at,updated_at "
                 "FROM desktop_hosts ORDER BY host_ref"
             ).fetchall()
         result: list[dict[str, Any]] = []
@@ -732,7 +767,11 @@ class DesktopStore:
                     "settings_catalog": document.get("settings_catalog"),
                     "permission_profiles": list(document.get("permission_profiles") or []),
                     "collaboration_modes": list(document.get("collaboration_modes") or []),
+                    "host_sequence": row["host_sequence"],
+                    "sync_health": _public_sync_health(document.get("sync_health")),
+                    "app_bridge": _public_app_bridge(document.get("app_bridge")),
                     "synced_at": row["synced_at"],
+                    "data_synced_at": row["data_synced_at"],
                     "updated_at": row["updated_at"],
                 }
             )
@@ -1008,7 +1047,10 @@ class DesktopStore:
                     state TEXT NOT NULL,
                     control_enabled INTEGER NOT NULL,
                     document_json TEXT NOT NULL,
+                    host_sequence INTEGER,
+                    host_digest TEXT,
                     synced_at TEXT NOT NULL,
+                    data_synced_at TEXT,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS desktop_projects(
@@ -1128,6 +1170,16 @@ class DesktopStore:
                 connection.execute("ALTER TABLE desktop_threads ADD COLUMN control_revision INTEGER")
             if "snapshot_sequence" not in columns:
                 connection.execute("ALTER TABLE desktop_threads ADD COLUMN snapshot_sequence INTEGER")
+            host_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(desktop_hosts)").fetchall()
+            }
+            if "host_sequence" not in host_columns:
+                connection.execute("ALTER TABLE desktop_hosts ADD COLUMN host_sequence INTEGER")
+            if "host_digest" not in host_columns:
+                connection.execute("ALTER TABLE desktop_hosts ADD COLUMN host_digest TEXT")
+            if "data_synced_at" not in host_columns:
+                connection.execute("ALTER TABLE desktop_hosts ADD COLUMN data_synced_at TEXT")
             snapshot_columns = {
                 str(row["name"])
                 for row in connection.execute("PRAGMA table_info(desktop_snapshots)").fetchall()
@@ -1164,9 +1216,12 @@ class DesktopStore:
         host: Mapping[str, Any],
         encoded_host: str,
         observed_at: str,
-    ) -> None:
+        *,
+        host_sequence: Any = None,
+    ) -> str:
         existing = connection.execute(
-            "SELECT runner_id,document_json,synced_at FROM desktop_hosts WHERE host_ref=?",
+            "SELECT runner_id,document_json,host_sequence,host_digest,synced_at,data_synced_at "
+            "FROM desktop_hosts WHERE host_ref=?",
             (host_ref,),
         ).fetchone()
         runner_binding = connection.execute(
@@ -1179,6 +1234,56 @@ class DesktopStore:
             raise StoreError("desktop_host_binding_conflict", "Desktop Runner 绑定了其他 host ref", status=409)
         if existing is None and self._count(connection, "desktop_hosts") >= MAX_HOSTS:
             raise StoreError("desktop_host_capacity", "Desktop host 容量已满", status=507)
+        incoming_digest = _host_projection_digest(host) if host else None
+        existing_data_synced_at = existing["data_synced_at"] if existing is not None else None
+        incoming_data_synced_at = host.get("data_synced_at") if host else None
+        data_synced_at = _newest_host_time(existing_data_synced_at, incoming_data_synced_at)
+        if host and existing is not None:
+            existing_sequence = existing["host_sequence"]
+            if host_sequence is None and existing_sequence is not None:
+                connection.execute(
+                    "UPDATE desktop_hosts SET updated_at=? WHERE host_ref=?",
+                    (observed_at, host_ref),
+                )
+                return "stale_ignored"
+            if host_sequence is not None and existing_sequence is not None:
+                if int(host_sequence) < int(existing_sequence):
+                    connection.execute(
+                        "UPDATE desktop_hosts SET updated_at=? WHERE host_ref=?",
+                        (observed_at, host_ref),
+                    )
+                    return "stale_ignored"
+                if int(host_sequence) == int(existing_sequence):
+                    existing_digest = existing["host_digest"] or _host_projection_digest(
+                        json.loads(str(existing["document_json"]))
+                    )
+                    if incoming_digest != existing_digest:
+                        raise StoreError(
+                            "desktop_host_sequence_conflict",
+                            "同一 Desktop host sequence 出现不同状态",
+                            status=409,
+                        )
+                    if _host_time(host.get("synced_at")) >= _host_time(existing["synced_at"]):
+                        connection.execute(
+                            "UPDATE desktop_hosts SET state=?,control_enabled=?,document_json=?,"
+                            "host_digest=?,synced_at=?,data_synced_at=?,updated_at=? WHERE host_ref=?",
+                            (
+                                str(host.get("state") or "unavailable")[:64],
+                                1 if host.get("control_enabled") is True else 0,
+                                encoded_host,
+                                incoming_digest,
+                                str(host.get("synced_at") or observed_at),
+                                data_synced_at,
+                                observed_at,
+                                host_ref,
+                            ),
+                        )
+                        return "refreshed"
+                    connection.execute(
+                        "UPDATE desktop_hosts SET updated_at=? WHERE host_ref=?",
+                        (observed_at, host_ref),
+                    )
+                    return "duplicate"
         if host:
             state = str(host.get("state") or "unavailable")[:64]
             control_enabled = 1 if host.get("control_enabled") is True else 0
@@ -1204,21 +1309,44 @@ class DesktopStore:
             )
         if existing is None:
             connection.execute(
-                "INSERT INTO desktop_hosts(host_ref,runner_id,state,control_enabled,document_json,synced_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (host_ref, runner_id, state, control_enabled, document_json, synced_at, observed_at),
+                "INSERT INTO desktop_hosts(host_ref,runner_id,state,control_enabled,document_json,"
+                "host_sequence,host_digest,synced_at,data_synced_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    host_ref,
+                    runner_id,
+                    state,
+                    control_enabled,
+                    document_json,
+                    host_sequence,
+                    incoming_digest,
+                    synced_at,
+                    data_synced_at,
+                    observed_at,
+                ),
             )
         elif host:
             connection.execute(
-                "UPDATE desktop_hosts SET state=?,control_enabled=?,document_json=?,synced_at=?,updated_at=? "
+                "UPDATE desktop_hosts SET state=?,control_enabled=?,document_json=?,host_sequence=?,"
+                "host_digest=?,synced_at=?,data_synced_at=?,updated_at=? "
                 "WHERE host_ref=?",
-                (state, control_enabled, document_json, synced_at, observed_at, host_ref),
+                (
+                    state,
+                    control_enabled,
+                    document_json,
+                    host_sequence,
+                    incoming_digest,
+                    synced_at,
+                    data_synced_at,
+                    observed_at,
+                    host_ref,
+                ),
             )
         else:
             connection.execute(
                 "UPDATE desktop_hosts SET updated_at=? WHERE host_ref=?",
                 (observed_at, host_ref),
             )
+        return "stored"
 
     def _upsert_project(
         self,
@@ -1407,6 +1535,107 @@ class DesktopStore:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
+
+
+def _host_projection_digest(host: Mapping[str, Any]) -> str:
+    stable = dict(host)
+    stable.pop("synced_at", None)
+    app_bridge = stable.get("app_bridge")
+    if isinstance(app_bridge, Mapping):
+        bridge_stable = dict(app_bridge)
+        bridge_stable.pop("last_success", None)
+        stable["app_bridge"] = bridge_stable
+    return "sha256:" + hashlib.sha256(canonical_json(stable).encode("utf-8")).hexdigest()
+
+
+def _host_time(value: Any) -> dt.datetime:
+    if isinstance(value, str):
+        try:
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None and parsed.utcoffset() is not None:
+            return parsed
+    return dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+
+
+def _newest_host_time(current: Any, candidate: Any) -> str | None:
+    current_time = _host_time(current)
+    candidate_time = _host_time(candidate)
+    if candidate_time >= current_time and candidate_time != dt.datetime.min.replace(
+        tzinfo=dt.timezone.utc
+    ):
+        return str(candidate)
+    if current_time != dt.datetime.min.replace(tzinfo=dt.timezone.utc):
+        return str(current)
+    return None
+
+
+def _public_sync_health(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    lane = value.get("lane")
+    last_success = value.get("last_success")
+    timings = value.get("timings_ms")
+    result: dict[str, Any] = {
+        "lane": lane if isinstance(lane, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", lane) else None,
+        "last_success": last_success if _host_time(last_success) != dt.datetime.min.replace(tzinfo=dt.timezone.utc) else None,
+        "data_age_ms": _bounded_integer(value.get("data_age_ms"), 86_400_000),
+        "consecutive_failures": _bounded_integer(value.get("consecutive_failures"), 1_000_000),
+        "timings_ms": {},
+    }
+    if isinstance(timings, Mapping):
+        result["timings_ms"] = {
+            str(key): int(item)
+            for key, item in timings.items()
+            if isinstance(key, str)
+            and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", key)
+            and isinstance(item, int)
+            and not isinstance(item, bool)
+            and 0 <= item <= 300_000
+        }
+    return result
+
+
+def _public_app_bridge(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    last_success = value.get("last_success")
+    result: dict[str, Any] = {
+        "ready": value.get("ready") is True,
+        "last_success": last_success if _host_time(last_success) != dt.datetime.min.replace(tzinfo=dt.timezone.utc) else None,
+        "last_error_code": _bridge_error_code(value.get("last_error_code")),
+    }
+    for field in ("last_attempt", "last_activation_success"):
+        timestamp = value.get(field)
+        if _host_time(timestamp) != dt.datetime.min.replace(tzinfo=dt.timezone.utc):
+            result[field] = timestamp
+    if isinstance(value.get("sidecar_running"), bool):
+        result["sidecar_running"] = value["sidecar_running"]
+    for field, maximum in (
+        ("restart_count", 1_000_000),
+        ("recovery_attempt_count", 1_000_000),
+        ("retry_seconds", 30),
+    ):
+        item = _bounded_integer(value.get(field), maximum)
+        if item is not None:
+            result[field] = item
+    supervisor_error = _bridge_error_code(value.get("supervisor_error_code"))
+    if supervisor_error is not None:
+        result["supervisor_error_code"] = supervisor_error
+    return result
+
+
+def _bounded_integer(value: Any, maximum: int) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= maximum:
+        return value
+    return None
+
+
+def _bridge_error_code(value: Any) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"bridge_[a-z0-9_]{1,56}", value):
+        return value
+    return None
 
 
 def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> str | None:

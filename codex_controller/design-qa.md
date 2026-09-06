@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.44.
+Date: 2026-09-07, Asia/Shanghai. Candidate: Controller 0.5.45.
 
 ## Comparison target and evidence
 
@@ -23,7 +23,8 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.44.
 
 ## Patches since preceding QA
 
-- Controller `0.5.44` retains the approved `0.5.42` responsive shell and advanced controls while pinning Runner `0.3.31`; this candidate changes only the timing and recovery of App-owned management capability publication and does not alter the accepted layout.
+- Controller `0.5.45` retains the approved scheme 1 responsive shell and advanced controls while pinning Runner `0.3.32`. The connection sheet now distinguishes App activation from Bridge health, exposes stable copyable error codes and recovery timing, and keeps the 390px layout within the viewport.
+- Host-only SSE frames update connection health without reloading projects and the first task page. The page treats the server-provided task-inventory watermark as authoritative, so a live heartbeat cannot make stale or unknown task data look green.
 - Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
 - Separated management pages with grouped/searchable incremental tools and live status.
 - Added official icons, visible lightbox close contrast and 44px removal targets.
@@ -40,7 +41,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.44.
 ## Interaction checks and boundaries
 
 - Local fixture exercised project scope, task selection, text and pure-image task creation, exact mock receipt, paged tools navigation, four service filters, management navigation, image upload/preview/remove, pure-image mock send, lazy history read, task search POST-to-SSE, and the paged error center.
-- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling. The current full Add-on suite is `852/852` with 8 environment-dependent skips; the focused responsive/management/settings/Diff/resources gate is `38/38`.
+- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads, Host sequence arbitration and task-switch generations. SSE is not converted to polling. The current full Add-on suite is `869/869` with 8 environment-dependent skips.
 - Physical HA companion app, Mac image interpretation, same-original-task delivery and off-LAN latency remain pending. Mock receipts and screenshots cannot prove these.
 - New-task form accepts up to four images and can create a pure-image task. The local same-origin fixture confirmed the uploaded preview and enabled create action without text; this does not prove Mac interpretation or phone delivery.
 

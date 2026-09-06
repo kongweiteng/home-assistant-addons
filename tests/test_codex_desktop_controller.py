@@ -169,6 +169,49 @@ def snapshot(
     )
 
 
+def desktop_host(
+    runner_id: str,
+    *,
+    sequence: int = 1,
+    ready: bool = True,
+    synced_at: str | None = None,
+    data_synced_at: str | None = None,
+) -> dict:
+    host = dict(snapshot(runner_id)["host"])
+    host["capabilities"] = [*host["capabilities"], "desktop_host_v1"]
+    host["synced_at"] = synced_at or NOW.isoformat()
+    host["data_synced_at"] = data_synced_at or NOW.isoformat()
+    host["sync_health"] = {
+        "lane": "host",
+        "timings_ms": {"runtime_identity": 4, "total": 7},
+        "last_success": synced_at or NOW.isoformat(),
+        "data_age_ms": 0,
+        "consecutive_failures": 0,
+    }
+    host["app_bridge"] = {
+        "sidecar_running": True,
+        "ready": ready,
+        "restart_count": 2,
+        "recovery_attempt_count": 3,
+        "retry_seconds": 0,
+        "last_attempt": NOW.isoformat(),
+        "last_activation_success": NOW.isoformat() if ready else None,
+        "last_success": NOW.isoformat() if ready else None,
+        "last_error_code": None if ready else "bridge_unavailable",
+    }
+    return digest(
+        {
+            "version": 1,
+            "message_type": "desktop_host",
+            "runner_id": runner_id,
+            "created_at": NOW.isoformat(),
+            "host_ref": HOST_REF,
+            "host_sequence": sequence,
+            "host": host,
+        }
+    )
+
+
 def event(runner_id: str, *, sequence: int = 1, revision: int = 7) -> dict:
     return digest(
         {
@@ -260,7 +303,7 @@ def redeem_payload(runner_id: str, token: str) -> dict:
         "codex_version": "0.146.0",
         "os": "macos",
         "arch": "aarch64",
-        "capabilities": ["registered_projects", "desktop_takeover_v1"],
+        "capabilities": ["registered_projects", "desktop_takeover_v1", "desktop_host_v1"],
         "projects": ["demo-project"],
         "labels": ["desktop"],
         "policy_revision": 1,
@@ -269,6 +312,39 @@ def redeem_payload(runner_id: str, token: str) -> dict:
 
 
 class DesktopProtocolTests(unittest.TestCase):
+    def test_independent_host_document_is_strict_and_bridge_health_is_bounded(self) -> None:
+        runner_id = "RN-" + "E" * 20
+        document = desktop_host(runner_id, sequence=11)
+        validated = validate_desktop_document("desktop_host", document)
+        self.assertEqual(validated["host_sequence"], 11)
+        self.assertTrue(validated["host"]["app_bridge"]["ready"])
+        self.assertEqual(validated["host"]["app_bridge"]["recovery_attempt_count"], 3)
+
+        missing_sequence = snapshot(runner_id)
+        missing_sequence["host"] = dict(validated["host"])
+        missing_sequence["body_digest"] = body_digest(missing_sequence)
+        with self.assertRaises(DesktopProtocolError) as context:
+            validate_desktop_document("desktop_snapshot", missing_sequence)
+        self.assertEqual(context.exception.code, "desktop_sequence_invalid")
+
+        for mutate in (
+            lambda item: item["host"].update({"socket": "/private/tmp/bridge.sock"}),
+            lambda item: item["host"]["app_bridge"].update({"last_error_code": "raw failure"}),
+            lambda item: item["host"]["capabilities"].remove("desktop_host_v1"),
+        ):
+            invalid = json.loads(json.dumps(document))
+            mutate(invalid)
+            invalid["body_digest"] = body_digest(invalid)
+            with self.assertRaises(DesktopProtocolError):
+                validate_desktop_document("desktop_host", invalid)
+
+        sequence_without_capability = snapshot(runner_id)
+        sequence_without_capability["host_sequence"] = 12
+        sequence_without_capability["body_digest"] = body_digest(sequence_without_capability)
+        with self.assertRaises(DesktopProtocolError) as context:
+            validate_desktop_document("desktop_snapshot", sequence_without_capability)
+        self.assertEqual(context.exception.code, "desktop_sequence_invalid")
+
     def test_history_event_is_strict_ref_only_and_byte_bounded(self) -> None:
         runner_id = "RN-" + "E" * 20
         turn = {
@@ -397,6 +473,145 @@ class DesktopStoreServiceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_host_sequence_arbitrates_standalone_and_late_snapshot_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "host.sqlite3"
+            store = DesktopStore(path)
+            service = DesktopControllerService(
+                store,
+                publisher=self.publisher,
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            current = desktop_host(self.runner_id, sequence=10, ready=True)
+            self.assertEqual(service.receive("desktop_host", current)["status"], "stored")
+            host = service.hosts()["hosts"][0]
+            self.assertEqual(host["host_sequence"], 10)
+            self.assertTrue(host["app_bridge"]["ready"])
+            self.assertEqual(host["sync_health"]["timings_ms"]["total"], 7)
+
+            late = snapshot(self.runner_id, revision=1, status="idle")
+            late["host"] = desktop_host(self.runner_id, sequence=9, ready=False)["host"]
+            late["host_sequence"] = 9
+            late["body_digest"] = body_digest(late)
+            self.assertEqual(service.receive("desktop_snapshot", late)["status"], "stored")
+            host = service.hosts()["hosts"][0]
+            self.assertEqual(host["host_sequence"], 10)
+            self.assertTrue(host["app_bridge"]["ready"])
+
+            conflicting = snapshot(self.runner_id, revision=2, status="idle")
+            conflicting["host"] = desktop_host(self.runner_id, sequence=10, ready=False)["host"]
+            conflicting["host_sequence"] = 10
+            conflicting["body_digest"] = body_digest(conflicting)
+            with self.assertRaises(StoreError) as context:
+                service.receive("desktop_snapshot", conflicting)
+            self.assertEqual(context.exception.code, "desktop_host_sequence_conflict")
+
+            newer = desktop_host(self.runner_id, sequence=11, ready=False)
+            self.assertEqual(service.receive("desktop_host", newer)["status"], "stored")
+            reopened = DesktopControllerService(
+                DesktopStore(path),
+                publisher=self.publisher,
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            persisted = reopened.hosts()["hosts"][0]
+            self.assertEqual(persisted["host_sequence"], 11)
+            self.assertFalse(persisted["app_bridge"]["ready"])
+            with self.assertRaises(StoreError) as context:
+                reopened.receive("desktop_host", current)
+            self.assertEqual(context.exception.code, "desktop_host_sequence_stale")
+
+    def test_host_heartbeat_does_not_refresh_stale_task_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clock = [NOW]
+            store = DesktopStore(Path(temporary) / "freshness.sqlite3")
+            service = DesktopControllerService(
+                store,
+                publisher=self.publisher,
+                now=lambda: clock[0],
+                runner_authorizer=lambda _runner_id: True,
+            )
+            initial = snapshot(self.runner_id)
+            initial_host = desktop_host(
+                self.runner_id,
+                sequence=1,
+                synced_at=NOW.isoformat(),
+                data_synced_at=NOW.isoformat(),
+            )
+            initial["host"] = initial_host["host"]
+            initial["host_sequence"] = 1
+            initial["body_digest"] = body_digest(initial)
+            service.receive("desktop_snapshot", initial)
+            self.assertTrue(service.hosts()["hosts"][0]["write_available"])
+
+            clock[0] = NOW + dt.timedelta(seconds=31)
+            heartbeat = desktop_host(
+                self.runner_id,
+                sequence=2,
+                synced_at=clock[0].isoformat(),
+                data_synced_at=NOW.isoformat(),
+            )
+            heartbeat["created_at"] = clock[0].isoformat()
+            heartbeat["body_digest"] = body_digest(heartbeat)
+            service.receive("desktop_host", heartbeat)
+            host = service.hosts()["hosts"][0]
+            self.assertTrue(host["online"])
+            self.assertEqual(host["data_freshness_state"], "stale")
+            self.assertFalse(host["write_available"])
+
+    def test_future_inventory_watermark_never_enables_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = DesktopStore(Path(temporary) / "future.sqlite3")
+            service = DesktopControllerService(
+                store,
+                publisher=self.publisher,
+                now=lambda: NOW,
+                runner_authorizer=lambda _runner_id: True,
+            )
+            future = desktop_host(
+                self.runner_id,
+                sequence=1,
+                synced_at=NOW.isoformat(),
+                data_synced_at=(NOW + dt.timedelta(minutes=4)).isoformat(),
+            )
+            service.receive("desktop_host", future)
+
+            host = service.hosts()["hosts"][0]
+            self.assertEqual(host["data_freshness_state"], "unknown")
+            self.assertIsNone(host["data_age_seconds"])
+            self.assertFalse(host["write_available"])
+
+    def test_host_changed_stream_frame_includes_current_host_immediately(self) -> None:
+        stream = self.service.host_stream(HOST_REF, after_cursor=0, heartbeat_seconds=15)
+        ready = next(stream)
+        self.assertEqual(ready["event"], "ready")
+        self.assertIn("host", ready["data"])
+
+        self.service.receive(
+            "desktop_host",
+            desktop_host(self.runner_id, sequence=1, ready=False),
+        )
+        changed = next(stream)
+        self.assertEqual(changed["event"], "desktop")
+        self.assertTrue(changed["data"]["changed"])
+        self.assertFalse(changed["data"]["host"]["app_bridge"]["ready"])
+
+    def test_host_stream_event_batch_also_carries_coincident_host_change(self) -> None:
+        stream = self.service.host_stream(HOST_REF, after_cursor=0, heartbeat_seconds=15)
+        self.assertEqual(next(stream)["event"], "ready")
+
+        self.service.receive("desktop_event", event(self.runner_id))
+        self.service.receive(
+            "desktop_host",
+            desktop_host(self.runner_id, sequence=1, ready=False),
+        )
+
+        changed = next(stream)
+        self.assertEqual(changed["event"], "desktop")
+        self.assertEqual(len(changed["data"]["events"]), 1)
+        self.assertFalse(changed["data"]["host"]["app_bridge"]["ready"])
 
     def test_history_query_is_unjournaled_capability_gated_and_streamed(self) -> None:
         capabilities = list(snapshot(self.runner_id)["host"]["capabilities"]) + [
@@ -1757,6 +1972,8 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn('id="newTaskSheet"', body)
         self.assertIn('id="modelSelect"', body)
         self.assertIn('id="conversationView"', body)
+        self.assertIn('id="connectionBridgeAttempt"', body)
+        self.assertIn('id="connectionBridgeSuccess"', body)
         self.assertIn('id="advancedControls"', body)
         self.assertIn('id="composerInput" rows="1"', body)
         self.assertIn("回复会自动出现在这里", body)
@@ -1786,7 +2003,7 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("document.changed && !document.events?.length", script)
         self.assertIn("scheduleOverviewReconcile", script)
         self.assertIn("scheduleDetailReload", script)
-        self.assertIn("scheduleOverviewReconcile();", script)
+        self.assertIn("if (document.events?.length) scheduleOverviewReconcile();", script)
         self.assertIn("limit=40&order=recent", script)
         self.assertIn("maybeLoadMoreThreads", script)
         self.assertIn("renderConversation", script)
@@ -1799,6 +2016,9 @@ class DesktopApiTests(unittest.TestCase):
         self.assertIn("queued_submissions", script)
         self.assertIn("action === 'reorder' ? `${base}/reorder`", script)
         self.assertIn("connection_observed_at", script)
+        self.assertIn("recovery_attempt_count", script)
+        self.assertIn("秒后重试", script)
+        self.assertIn("last_activation_success", script)
         self.assertIn("Controller 已接收", script)
         self.assertIn("Relay 已送达", script)
         self.assertIn("Runner 已接收", script)
@@ -2044,6 +2264,30 @@ class DesktopApiTests(unittest.TestCase):
         self.assertEqual(command["result"]["state"], "submitted")
         self.assertEqual(self.publisher.desktop_commands[0][0], self.runner_id)
 
+    def test_internal_relay_accepts_independent_host_before_any_thread_snapshot(self) -> None:
+        callback_headers = {
+            "Authorization": "Bearer " + self.callback_token,
+            "X-Runner-Credential": self.credential,
+        }
+        status, accepted = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_host",
+            desktop_host(self.runner_id, sequence=21, ready=True),
+            callback_headers,
+        )
+        self.assertEqual(status, 200, accepted)
+        self.assertEqual(accepted["result"]["status"], "stored")
+        status, hosts = self.request("GET", "/api/desktop/v1/hosts")
+        self.assertEqual(status, 200, hosts)
+        host = hosts["result"]["hosts"][0]
+        self.assertEqual(host["host_sequence"], 21)
+        self.assertTrue(host["app_bridge"]["ready"])
+        self.assertEqual(host["app_bridge"]["restart_count"], 2)
+        self.assertEqual(host["app_bridge"]["recovery_attempt_count"], 3)
+        status, threads = self.request("GET", "/api/desktop/v1/threads")
+        self.assertEqual(status, 200, threads)
+        self.assertEqual(threads["result"]["threads"], [])
+
     def test_bad_callback_credential_csrf_and_query_fail_closed(self) -> None:
         status, result = self.request(
             "POST",
@@ -2102,6 +2346,19 @@ class DesktopApiTests(unittest.TestCase):
                 "UPDATE runner_registry SET capabilities_json=? WHERE runner_id=?",
                 (json.dumps(["registered_projects", "desktop_takeover_v1"]), self.runner_id),
             )
+        sequenced = snapshot(self.runner_id)
+        sequenced["host"]["capabilities"].append("desktop_host_v1")
+        sequenced["host_sequence"] = 1
+        sequenced["body_digest"] = body_digest(sequenced)
+        status, result = self.request(
+            "POST",
+            "/internal/v2/runner-relay/events/desktop_snapshot",
+            sequenced,
+            callback_headers,
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(result["error"]["code"], "desktop_runner_capability_required")
+
         status, result = self.request(
             "POST",
             "/internal/v2/runner-relay/events/desktop_snapshot",

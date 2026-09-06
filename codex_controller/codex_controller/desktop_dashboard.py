@@ -57,7 +57,7 @@ DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
 <section class="panel detail-panel" aria-label="任务对话"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个任务</h2><p class="muted">打开后即可像 Codex App 一样查看回复并继续对话。</p></div></div><div id="detailContent" class="detail-content hidden"><header class="detail-head"><div class="detail-title-row"><button id="detailBack" class="detail-back" type="button" aria-label="返回任务列表">返回</button><div class="detail-heading"><div id="detailProject" class="eyebrow">当前项目</div><h2 id="detailTitle">-</h2><div id="detailPreview" class="detail-preview"></div></div><details id="taskMenu" class="task-menu"><summary aria-label="更多任务操作">更多</summary><div class="task-menu-popover"><button id="renameButton" type="button">重命名</button><button id="pinButton" type="button">置顶任务</button><button id="forkButton" type="button">派生新任务</button><button id="reviewButton" type="button">开始代码审查</button><button id="resourceButton" type="button">文件、Diff 与诊断</button><button id="interruptButton" class="danger" type="button">停止当前任务</button><button id="archiveButton" type="button">归档任务</button><button id="unarchiveButton" type="button">恢复归档</button></div></details></div><div id="detailMeta" class="detail-meta"></div></header><div id="detailNotice" class="notice hidden"></div><div class="conversation-wrap"><div id="conversationView" class="conversation" aria-live="polite"><div id="conversationInner" class="conversation-inner"></div></div><button id="newReplyButton" class="new-reply hidden" type="button">查看新回复</button></div><form id="composer" class="composer"><details id="advancedControls" class="advanced"><summary>模型、推理强度与发送方式</summary><div class="advanced-grid"><div class="field"><label for="modelSelect">模型</label><select id="modelSelect" aria-describedby="modelMeta"></select></div><div class="field"><label for="effortSelect">推理强度</label><select id="effortSelect" aria-describedby="modelMeta"></select></div><div class="field"><label>发送方式</label><div class="mode-switch"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">快速调整</button></div></div><div id="modelMeta" class="model-meta"></div></div></details><label class="sr-only" for="composerInput">给 Codex 发消息</label><div class="composer-bar"><div class="composer-tools"><textarea id="composerInput" rows="1" maxlength="12000" placeholder="给 Codex 发消息"></textarea><div id="composerFeedback" class="composer-status" role="status">回复会自动出现在这里</div></div><button id="submitDirection" class="primary send-button" type="submit">发送</button></div></form></div></section>
 </section></main>
 <nav class="mobile-nav" aria-label="移动端导航"><a href="./">任务</a><button id="mobileProjects" type="button">项目</button><button id="mobileNewTask" class="primary-nav" type="button">新建</button><button id="mobileConnection" type="button">状态</button><button id="mobileManagement" type="button">管理</button></nav>
-<div id="modalBackdrop" class="modal-backdrop hidden"></div><section id="newTaskSheet" class="new-task-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="newTaskTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="newTaskTitle">新建任务</h2><button id="closeNewTask" class="ghost" type="button">关闭</button></div><p class="sheet-copy">任务会出现在 Mac 和手机的同一列表里。连接未确认时不会发送。</p><form id="newTaskForm" class="new-task-form"><div class="field"><label for="newTaskProject">项目</label><select id="newTaskProject" required></select></div><div class="field"><label for="newTaskInput">给 Codex 的任务</label><textarea id="newTaskInput" maxlength="12000" required placeholder="描述希望 Codex 完成的任务"></textarea></div><div class="field"><label for="newTaskModel">模型</label><select id="newTaskModel"></select></div><div class="field"><label for="newTaskEffort">推理强度</label><select id="newTaskEffort"></select></div><div id="newTaskFeedback" class="feedback" role="status">正在检查是否可以创建任务。</div><div class="sheet-actions"><button id="cancelNewTask" type="button">取消</button><button id="createTaskButton" class="primary" type="submit" disabled>创建并打开</button></div></form></section><section id="connectionSheet" class="connection-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="connectionTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="connectionTitle">实时连接</h2><button id="closeConnection" class="ghost" type="button">关闭</button></div><p class="sheet-copy">页面使用持续推送连接；断线后会从最后一个事件自动续传。</p><div class="connection-grid"><div class="connection-row"><span>页面推送</span><strong id="connectionBrowser">正在连接</strong></div><div class="connection-row"><span>Mac 长连接</span><strong id="connectionRunner">等待心跳</strong></div><div class="connection-row"><span>最近推送</span><strong id="connectionEventAt">尚未收到</strong></div><div class="connection-row"><span>任务数据</span><strong id="connectionDataAt">尚未同步</strong></div><div class="connection-row"><span>自动重连</span><strong id="connectionRetry">已启用</strong></div></div><p id="connectionNote" class="connection-note">连接正常时无需任何手动操作。</p></section><section id="managementSheet" class="management-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="managementTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="managementTitle">设置与权限</h2><button id="closeManagement" class="ghost" type="button">关闭</button></div><p class="sheet-copy">只显示 Mac Runner 实际公开的设置与能力，不会在手机端伪造或修改。</p><div id="managementContent" class="management-grid"><div class="management-row"><span>目录</span><strong>正在加载</strong></div></div><p id="managementNote" class="management-note">模型目录会按需加载。</p></section><section id="renameSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="renameTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="renameTitle">重命名任务</h2><button id="closeRename" class="ghost" type="button">关闭</button></div><form id="renameForm" class="rename-form"><div class="field"><label for="renameInput">任务名称</label><input id="renameInput" maxlength="80" required></div><div id="renameFeedback" class="feedback" role="status"></div><div class="sheet-actions"><button id="cancelRename" type="button">取消</button><button id="saveRename" class="primary" type="submit">保存</button></div></form></section><section id="reviewSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="reviewTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="reviewTitle">开始代码审查</h2><button id="closeReview" class="ghost" type="button">关闭</button></div><form id="reviewForm" class="rename-form"><div class="field"><label for="reviewType">审查范围</label><select id="reviewType"><option value="uncommittedChanges">未提交更改</option><option value="baseBranch">与基准分支比较</option></select></div><div id="reviewBranchField" class="field hidden"><label for="reviewBranch">基准分支</label><input id="reviewBranch" maxlength="255" placeholder="例如 origin/main"></div><div id="reviewFeedback" class="feedback" role="status">审查会在当前任务中启动新的 Turn。</div><div class="sheet-actions"><button id="cancelReview" type="button">取消</button><button id="startReview" class="primary" type="submit">开始审查</button></div></form></section><section id="resourceSheet" class="resource-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="resourceTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="resourceTitle">项目资源</h2><button id="closeResource" class="ghost" type="button">关闭</button></div><p class="sheet-copy">首屏只加载摘要；文件和 Diff 内容均按需分块持续加载。</p><div class="resource-tabs" role="tablist"><button id="resourceFilesTab" type="button" role="tab" aria-selected="true">项目文件</button><button id="resourceDiffTab" type="button" role="tab" aria-selected="false">Git Diff</button><button id="resourceDiagnosticsTab" type="button" role="tab" aria-selected="false">固定诊断</button></div><div id="resourceToolbar" class="resource-toolbar"><button id="resourceBack" type="button">上一级</button><div id="resourcePath" class="resource-path">项目根目录</div></div><div id="resourceBody" class="resource-body" aria-live="polite"></div><div class="resource-footer"><div id="resourceStatus" class="resource-status" role="status">打开后按需读取，不会一次加载全部内容。</div><button id="resourceMore" type="button" class="hidden">继续加载</button></div></section>
+<div id="modalBackdrop" class="modal-backdrop hidden"></div><section id="newTaskSheet" class="new-task-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="newTaskTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="newTaskTitle">新建任务</h2><button id="closeNewTask" class="ghost" type="button">关闭</button></div><p class="sheet-copy">任务会出现在 Mac 和手机的同一列表里。连接未确认时不会发送。</p><form id="newTaskForm" class="new-task-form"><div class="field"><label for="newTaskProject">项目</label><select id="newTaskProject" required></select></div><div class="field"><label for="newTaskInput">给 Codex 的任务</label><textarea id="newTaskInput" maxlength="12000" required placeholder="描述希望 Codex 完成的任务"></textarea></div><div class="field"><label for="newTaskModel">模型</label><select id="newTaskModel"></select></div><div class="field"><label for="newTaskEffort">推理强度</label><select id="newTaskEffort"></select></div><div id="newTaskFeedback" class="feedback" role="status">正在检查是否可以创建任务。</div><div class="sheet-actions"><button id="cancelNewTask" type="button">取消</button><button id="createTaskButton" class="primary" type="submit" disabled>创建并打开</button></div></form></section><section id="connectionSheet" class="connection-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="connectionTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="connectionTitle">实时连接</h2><button id="closeConnection" class="ghost" type="button">关闭</button></div><p class="sheet-copy">页面使用持续推送连接；断线后会从最后一个事件自动续传。</p><div class="connection-grid"><div class="connection-row"><span>页面推送</span><strong id="connectionBrowser">正在连接</strong></div><div class="connection-row"><span>Mac 长连接</span><strong id="connectionRunner">等待心跳</strong></div><div class="connection-row"><span>App Bridge</span><strong id="connectionBridge">等待状态</strong></div><div class="connection-row"><span>Bridge 最近尝试</span><strong id="connectionBridgeAttempt">尚未记录</strong></div><div class="connection-row"><span>Bridge 最近成功</span><strong id="connectionBridgeSuccess">尚未记录</strong></div><div class="connection-row"><span>最近推送</span><strong id="connectionEventAt">尚未收到</strong></div><div class="connection-row"><span>任务数据</span><strong id="connectionDataAt">尚未同步</strong></div><div class="connection-row"><span>自动重连</span><strong id="connectionRetry">已启用</strong></div></div><p id="connectionNote" class="connection-note">连接正常时无需任何手动操作。</p></section><section id="managementSheet" class="management-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="managementTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="managementTitle">设置与权限</h2><button id="closeManagement" class="ghost" type="button">关闭</button></div><p class="sheet-copy">只显示 Mac Runner 实际公开的设置与能力，不会在手机端伪造或修改。</p><div id="managementContent" class="management-grid"><div class="management-row"><span>目录</span><strong>正在加载</strong></div></div><p id="managementNote" class="management-note">模型目录会按需加载。</p></section><section id="renameSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="renameTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="renameTitle">重命名任务</h2><button id="closeRename" class="ghost" type="button">关闭</button></div><form id="renameForm" class="rename-form"><div class="field"><label for="renameInput">任务名称</label><input id="renameInput" maxlength="80" required></div><div id="renameFeedback" class="feedback" role="status"></div><div class="sheet-actions"><button id="cancelRename" type="button">取消</button><button id="saveRename" class="primary" type="submit">保存</button></div></form></section><section id="reviewSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="reviewTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="reviewTitle">开始代码审查</h2><button id="closeReview" class="ghost" type="button">关闭</button></div><form id="reviewForm" class="rename-form"><div class="field"><label for="reviewType">审查范围</label><select id="reviewType"><option value="uncommittedChanges">未提交更改</option><option value="baseBranch">与基准分支比较</option></select></div><div id="reviewBranchField" class="field hidden"><label for="reviewBranch">基准分支</label><input id="reviewBranch" maxlength="255" placeholder="例如 origin/main"></div><div id="reviewFeedback" class="feedback" role="status">审查会在当前任务中启动新的 Turn。</div><div class="sheet-actions"><button id="cancelReview" type="button">取消</button><button id="startReview" class="primary" type="submit">开始审查</button></div></form></section><section id="resourceSheet" class="resource-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="resourceTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="resourceTitle">项目资源</h2><button id="closeResource" class="ghost" type="button">关闭</button></div><p class="sheet-copy">首屏只加载摘要；文件和 Diff 内容均按需分块持续加载。</p><div class="resource-tabs" role="tablist"><button id="resourceFilesTab" type="button" role="tab" aria-selected="true">项目文件</button><button id="resourceDiffTab" type="button" role="tab" aria-selected="false">Git Diff</button><button id="resourceDiagnosticsTab" type="button" role="tab" aria-selected="false">固定诊断</button></div><div id="resourceToolbar" class="resource-toolbar"><button id="resourceBack" type="button">上一级</button><div id="resourcePath" class="resource-path">项目根目录</div></div><div id="resourceBody" class="resource-body" aria-live="polite"></div><div class="resource-footer"><div id="resourceStatus" class="resource-status" role="status">打开后按需读取，不会一次加载全部内容。</div><button id="resourceMore" type="button" class="hidden">继续加载</button></div></section>
 <script src="desktop.js"></script></body></html>"""
 
 
@@ -162,8 +162,16 @@ function freshness() {
   const syncedAt = new Date(connectionObservedAt).getTime();
   if (!Number.isFinite(syncedAt)) return {label: '同步时间未知', kind: 'bad', seconds: null};
   const seconds = Math.max(0, Math.floor((estimatedServerNow() - syncedAt) / 1000));
-  const dataAt = new Date(host.data_synced_at || host.synced_at || '').getTime();
-  const dataSeconds = Number.isFinite(dataAt) ? Math.max(0, Math.floor((estimatedServerNow() - dataAt) / 1000)) : null;
+  const hostV1 = Array.isArray(host.capabilities) && host.capabilities.includes('desktop_host_v1');
+  const declaredAge = Number(host.data_age_seconds);
+  const dataAt = new Date(host.data_synced_at || (!hostV1 ? host.synced_at : '') || '').getTime();
+  const dataSeconds = Number.isFinite(declaredAge) && declaredAge >= 0
+    ? Math.floor(declaredAge)
+    : Number.isFinite(dataAt)
+      ? Math.max(0, Math.floor((estimatedServerNow() - dataAt) / 1000))
+      : null;
+  if (hostV1 && (host.data_freshness_state === 'unknown' || dataSeconds === null)) return {label: '链路在线 · 任务目录尚未同步', kind: 'bad', seconds, dataSeconds};
+  if (hostV1 && host.data_freshness_state === 'stale') return {label: `链路在线 · 任务目录同步过期${dataSeconds === null ? '' : ` ${dataSeconds} 秒`}`, kind: 'bad', seconds, dataSeconds};
   if (dataSeconds === null) return {label: '任务数据时间未知', kind: 'bad', seconds, dataSeconds};
   if (dataSeconds > 30) return {label: `任务数据延迟 ${dataSeconds} 秒`, kind: 'bad', seconds, dataSeconds};
   if (seconds <= 10 && dataSeconds <= 10) return {label: '实时已连接', kind: 'good', seconds, dataSeconds};
@@ -177,7 +185,9 @@ function renderFreshness() {
   setConnection(value.label, value.kind);
   const hostMeta = q('hostMeta');
   const host = currentHost();
-  if (hostMeta && host) hostMeta.textContent = state.overviewError || `${value.label} · 任务数据最近变化 ${formatTime(host.data_synced_at || host.synced_at)}`;
+  const hostV1 = Array.isArray(host?.capabilities) && host.capabilities.includes('desktop_host_v1');
+  const dataTimestamp = host?.data_synced_at || (!hostV1 ? host?.synced_at : null);
+  if (hostMeta && host) hostMeta.textContent = state.overviewError || `${value.label} · 任务目录同步 ${formatTime(dataTimestamp)}`;
   const badgeNode = q('detailSyncState');
   if (badgeNode) {
     badgeNode.className = `badge sync-badge ${value.kind}`.trim();
@@ -186,11 +196,53 @@ function renderFreshness() {
   if (q('connectionBrowser')) {
     q('connectionBrowser').textContent = state.overviewStreamState === 'open' ? 'SSE 已连接' : 'SSE 正在重连';
     q('connectionRunner').textContent = host?.online ? `已连接 · ${value.seconds ?? '-'} 秒心跳` : '未连接';
+    const bridge = host?.app_bridge;
+    const diagnosticCodes = [...new Set([
+      bridge?.last_error_code,
+      bridge?.supervisor_error_code,
+      host?.last_error_code,
+      host?.sync_health?.last_error_code,
+    ].filter(item => typeof item === 'string' && /^[a-z][a-z0-9_]{1,63}$/.test(item)))];
+    const bridgeAttempts = bridge?.recovery_attempt_count ?? bridge?.restart_count ?? 0;
+    const bridgeRetry = bridge?.retry_seconds ?? 0;
+    q('connectionBridge').textContent = bridge?.ready
+      ? '健康检查通过'
+      : bridge
+        ? `不可用 · 激活尝试 ${bridgeAttempts} 次 · ${bridgeRetry > 0 ? `${bridgeRetry} 秒后重试` : '等待再次探测'}`
+        : '等待 Bridge 探测';
+    q('connectionBridge').title = '';
+    q('connectionBridgeAttempt').textContent = formatTime(bridge?.last_attempt);
+    q('connectionBridgeSuccess').textContent = formatTime(bridge?.last_activation_success);
+    q('connectionBridgeHealth').textContent = formatTime(bridge?.last_success);
+    q('connectionErrorPanel').className = `connection-error ${diagnosticCodes.length ? '' : 'hidden'}`.trim();
+    q('connectionErrorCode').textContent = diagnosticCodes.join('\n');
+    q('copyConnectionError').disabled = diagnosticCodes.length === 0;
+    if (!diagnosticCodes.length) q('connectionErrorCopyState').textContent = '错误码仅包含脱敏后的稳定标识。';
     q('connectionEventAt').textContent = state.lastOverviewFrameAt ? formatTime(new Date(state.lastOverviewFrameAt).toISOString()) : '尚未收到';
-    q('connectionDataAt').textContent = formatTime(host?.data_synced_at || host?.synced_at);
+    q('connectionDataAt').textContent = formatTime(dataTimestamp);
     q('connectionRetry').textContent = state.overviewStreamState === 'open' ? '待命 · 保留游标' : `第 ${Math.max(1, state.overviewReconnectAttempt)} 次尝试`;
-    q('connectionNote').textContent = state.overviewError || (value.kind === 'good' ? '连接正常；任务变化会主动推送，无需手动刷新。' : '草稿会保留，连接恢复后会从最后事件继续。');
+    q('connectionNote').textContent = state.overviewError || (value.kind === 'good' ? '连接正常；任务变化会主动推送，无需手动刷新。' : '草稿会保留；链路或任务目录恢复后会从最后事件继续。');
   }
+}
+
+function copyConnectionError() {
+  const source = q('connectionErrorCode');
+  const value = source.textContent.trim();
+  if (!value) return Promise.resolve();
+  const clipboardWrite = navigator.clipboard?.writeText
+    ? navigator.clipboard.writeText(value)
+    : Promise.reject(new Error('clipboard_unavailable'));
+  return clipboardWrite.then(() => {
+    q('connectionErrorCopyState').textContent = '错误码已复制。';
+  }).catch(() => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(source);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    source.focus();
+    q('connectionErrorCopyState').textContent = '已选中错误码，请使用系统复制。';
+  });
 }
 
 function currentHost() { return state.hosts.find(host => host.host_ref === state.selectedHost) || null; }
@@ -2251,7 +2303,7 @@ function startOverviewStream() {
     }
     if (event.type === 'desktop') {
       applyOverviewEvents(document.events);
-      scheduleOverviewReconcile();
+      if (document.events?.length) scheduleOverviewReconcile();
     }
   };
   source.addEventListener('ready', receive);
@@ -2505,6 +2557,7 @@ q('threadSearch').oninput = () => {
 q('loadMoreThreads').onclick = () => void loadThreadPage();
 q('threadList').addEventListener('scroll', maybeLoadMoreThreads, {passive: true});
 q('checkConnection').onclick = () => { state.overviewError = ''; startOverviewStream(); if (state.selectedThread) startEventStream(); };
+q('copyConnectionError').onclick = () => { void copyConnectionError(); };
 q('mobileProjects').onclick = () => setProjectsOpen(true);
 q('closeProjects').onclick = () => setProjectsOpen(false);
 q('detailBack').onclick = leaveDetail;

@@ -34,6 +34,7 @@ RUNNER_CAPABILITIES = frozenset(
         "lease",
         "self_check",
         "desktop_takeover_v1",
+        "desktop_host_v1",
     }
 )
 TASK_STATES = frozenset(

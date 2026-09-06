@@ -38,7 +38,7 @@ RECOVERY_PATH_RE = re.compile(r"^/internal/v1/jobs/([0-9a-f-]{36})/recovery-reso
 TOOL_PATH_RE = re.compile(r"^/api/tools/([a-z0-9_]{1,96})$")
 RUNNER_RELAY_EVENT_RE = re.compile(
     r"^/internal/v2/runner-relay/events/"
-    r"(heartbeat|status|result|desktop_snapshot|desktop_event|desktop_receipt)$"
+    r"(heartbeat|status|result|desktop_host|desktop_snapshot|desktop_event|desktop_receipt)$"
 )
 DESKTOP_THREAD_STREAM_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/stream$"
@@ -254,7 +254,7 @@ def create_server(
             time.sleep(5)
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "CodexController/0.5.44"
+        server_version = "CodexController/0.5.45"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

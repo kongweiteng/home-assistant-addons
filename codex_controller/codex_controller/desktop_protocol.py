@@ -198,6 +198,8 @@ def intent_digest(value: Mapping[str, Any]) -> str:
 
 
 def validate_desktop_document(message_type: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    if message_type == "desktop_host":
+        return _validate_host(value)
     if message_type == "desktop_snapshot":
         return _validate_snapshot(value)
     if message_type == "desktop_event":
@@ -639,7 +641,11 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
         "snapshot",
         "body_digest",
     }
-    document = _exact_mapping(value, required, {"host", "snapshot_sequence"})
+    document = _exact_mapping(
+        value,
+        required,
+        {"host", "host_sequence", "snapshot_sequence"},
+    )
     _base(document, "desktop_snapshot")
     _ref(document["host_ref"], "HS")
     _ref(document["project_ref"], "PJ")
@@ -656,6 +662,35 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
             "desktop_sequence_invalid",
             "Desktop snapshot sequence 无效",
         )
+    host_sequence = document.get("host_sequence")
+    if "host_sequence" in document and (
+        not isinstance(host_sequence, int)
+        or isinstance(host_sequence, bool)
+        or host_sequence < 1
+        or host_sequence > (1 << 63) - 1
+    ):
+        raise DesktopProtocolError(
+            "desktop_sequence_invalid",
+            "Desktop host sequence 无效",
+        )
+    if host_sequence is not None and "host" not in document:
+        raise DesktopProtocolError(
+            "desktop_host_invalid",
+            "Desktop host sequence 缺少 host 文档",
+        )
+    if "host" in document:
+        host_capabilities = document["host"].get("capabilities") if isinstance(
+            document["host"], Mapping
+        ) else None
+        declares_host_v1 = (
+            isinstance(host_capabilities, list)
+            and "desktop_host_v1" in host_capabilities
+        )
+        if declares_host_v1 != (host_sequence is not None):
+            raise DesktopProtocolError(
+                "desktop_sequence_invalid",
+                "Desktop host sequence 与 capability 声明不一致",
+            )
     _shanghai_time(document["created_at"], "created_at")
     snapshot = document["snapshot"]
     if not isinstance(snapshot, Mapping):
@@ -711,119 +746,203 @@ def _validate_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
     _public(snapshot)
     host = document.get("host")
     if host is not None:
-        if not isinstance(host, Mapping) or host.get("host_ref") != document["host_ref"]:
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host 文档无效")
-        _shanghai_time(host.get("synced_at"), "host.synced_at")
-        capabilities = host.get("capabilities")
-        if not isinstance(capabilities, list) or any(not isinstance(item, str) for item in capabilities):
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host capabilities 无效")
-        if host.get("state") not in {"normal", "unavailable", "protocol_degraded"}:
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host state 无效")
-        if not isinstance(host.get("control_enabled"), bool):
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host control flag 无效")
-        if host.get("control_enabled") is True and host.get("state") != "normal":
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host control/state 不一致")
-        models = host.get("models", [])
-        complete_reasoning_catalog = _model_catalog(models)
-        settings_catalog = host.get("settings_catalog")
-        permission_profiles = host.get("permission_profiles")
-        collaboration_modes = host.get("collaboration_modes")
-        if settings_catalog is not None:
-            _settings_catalog(settings_catalog)
-        if permission_profiles is not None:
-            _permission_profiles(permission_profiles)
-        if collaboration_modes is not None:
-            _collaboration_mode_catalog(collaboration_modes)
-        if "settings_catalog_v1" in capabilities and settings_catalog is None:
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host 设置能力与目录不一致")
-        if "permission_profile_selection_v1" in capabilities and (
-            host.get("control_enabled") is not True
-            or "owner_request_response_v1" not in capabilities
-            or not permission_profiles
-            or not permission_profile_present
-        ):
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host 权限能力与目录不一致")
-        if "permission_profile_selection_v1" in capabilities:
-            allowed_profiles = {item["id"] for item in permission_profiles}
-            current_options = {
-                item["id"] for item in snapshot["permission_profile"]["options"]
-            }
-            if not current_options.issubset(allowed_profiles):
-                raise DesktopProtocolError(
-                    "desktop_host_invalid",
-                    "Desktop Thread 权限选项超出 Runner 目录",
-                )
-        if "model_override_v1" in capabilities and (
-            host.get("control_enabled") is not True or not models
-        ):
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host model capability 与目录不一致",
-            )
-        if "reasoning_effort_v1" in capabilities and (
-            host.get("control_enabled") is not True
-            or not complete_reasoning_catalog
-            or not any(item.get("supported_reasoning_efforts") for item in models)
-        ):
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 推理强度能力与目录不一致",
-            )
-        if "thread_queue_v1" in capabilities and (
-            not queue_is_present or snapshot_sequence is None
-        ):
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 排队能力与快照序号不一致",
-            )
-        if "owner_request_response_v1" in capabilities and (
-            not pending_requests_present or snapshot_sequence is None
-        ):
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 请求响应能力与快照序号不一致",
-            )
-        catalog_capability = "collaboration_mode_catalog_v1" in capabilities
-        turn_capability = "collaboration_mode_turn_v1" in capabilities
-        update_capability = "thread_collaboration_mode_update_v1" in capabilities
-        if catalog_capability != (collaboration_modes is not None):
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 计划模式目录能力不一致",
-            )
-        if catalog_capability and not collaboration_mode_present:
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 计划模式目录缺少当前状态",
-            )
-        if (turn_capability or update_capability or collaboration_mode_present) and not catalog_capability:
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 计划模式能力缺少目录",
-            )
-        if (turn_capability or update_capability) and host.get("control_enabled") is not True:
-            raise DesktopProtocolError(
-                "desktop_host_invalid",
-                "Desktop host 计划模式写入能力与控制状态不一致",
-            )
-        if collaboration_mode_present:
-            current_mode_id = snapshot["collaboration_mode"].get("id")
-            allowed_mode_ids = {item["id"] for item in collaboration_modes or []}
-            if current_mode_id is not None and current_mode_id not in allowed_mode_ids:
-                raise DesktopProtocolError(
-                    "desktop_host_invalid",
-                    "Desktop Thread 当前计划模式不在 Runner 目录",
-                )
-        listener_count = host.get("tcp_listener_count")
-        if not isinstance(listener_count, int) or isinstance(listener_count, bool) or listener_count < -1:
-            raise DesktopProtocolError("desktop_host_invalid", "Desktop host listener count 无效")
-        for field in ("app_version", "app_build", "cli_version", "schema_digest", "socket_mode"):
-            field_value = host.get(field)
-            if not isinstance(field_value, str) or not field_value or len(field_value) > 128:
-                raise DesktopProtocolError("desktop_host_invalid", f"Desktop host {field} 无效")
-        _public(host)
+        _validate_host_projection(
+            host,
+            host_ref=str(document["host_ref"]),
+            standalone=False,
+            permission_profile_present=permission_profile_present,
+            collaboration_mode_present=collaboration_mode_present,
+            queue_is_present=queue_is_present,
+            pending_requests_present=pending_requests_present,
+            snapshot_sequence=snapshot_sequence,
+            snapshot=snapshot,
+        )
     _digest(document)
     return document
+
+
+def _validate_host(value: Mapping[str, Any]) -> dict[str, Any]:
+    document = _exact_mapping(
+        value,
+        {
+            "version",
+            "message_type",
+            "runner_id",
+            "created_at",
+            "host_ref",
+            "host_sequence",
+            "host",
+            "body_digest",
+        },
+    )
+    _base(document, "desktop_host")
+    _ref(document["host_ref"], "HS")
+    sequence = document["host_sequence"]
+    if (
+        not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+        or sequence > (1 << 63) - 1
+    ):
+        raise DesktopProtocolError("desktop_sequence_invalid", "Desktop host sequence 无效")
+    _shanghai_time(document["created_at"], "created_at")
+    _validate_host_projection(
+        document["host"],
+        host_ref=str(document["host_ref"]),
+        standalone=True,
+    )
+    _digest(document)
+    return document
+
+
+def _validate_host_projection(
+    value: Any,
+    *,
+    host_ref: str,
+    standalone: bool,
+    permission_profile_present: bool = False,
+    collaboration_mode_present: bool = False,
+    queue_is_present: bool = False,
+    pending_requests_present: bool = False,
+    snapshot_sequence: Any = None,
+    snapshot: Mapping[str, Any] | None = None,
+) -> None:
+    required = {
+        "host_ref",
+        "state",
+        "app_version",
+        "app_build",
+        "cli_version",
+        "schema_digest",
+        "socket_mode",
+        "tcp_listener_count",
+        "capabilities",
+        "control_enabled",
+        "synced_at",
+    }
+    host = _exact_mapping(
+        value,
+        required,
+        {
+            "models",
+            "settings_catalog",
+            "permission_profiles",
+            "collaboration_modes",
+            "sync_health",
+            "app_bridge",
+            "data_synced_at",
+        },
+    )
+    if host.get("host_ref") != host_ref:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 文档无效")
+    _shanghai_time(host.get("synced_at"), "host.synced_at")
+    if host.get("data_synced_at") is not None:
+        _shanghai_time(host["data_synced_at"], "host.data_synced_at")
+    capabilities = host.get("capabilities")
+    if (
+        not isinstance(capabilities, list)
+        or len(capabilities) > 64
+        or any(
+            not isinstance(item, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", item)
+            for item in capabilities
+        )
+        or len(set(capabilities)) != len(capabilities)
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host capabilities 无效")
+    if host.get("state") not in {"normal", "unavailable", "protocol_degraded"}:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host state 无效")
+    if not isinstance(host.get("control_enabled"), bool):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host control flag 无效")
+    if host.get("control_enabled") is True and host.get("state") != "normal":
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host control/state 不一致")
+    models = host.get("models", [])
+    complete_reasoning_catalog = _model_catalog(models)
+    settings_catalog = host.get("settings_catalog")
+    permission_profiles = host.get("permission_profiles")
+    collaboration_modes = host.get("collaboration_modes")
+    if settings_catalog is not None:
+        _settings_catalog(settings_catalog)
+    if permission_profiles is not None:
+        _permission_profiles(permission_profiles)
+    if collaboration_modes is not None:
+        _collaboration_mode_catalog(collaboration_modes)
+    if "settings_catalog_v1" in capabilities and settings_catalog is None:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 设置能力与目录不一致")
+    if "permission_profile_selection_v1" in capabilities and (
+        host.get("control_enabled") is not True
+        or "owner_request_response_v1" not in capabilities
+        or not permission_profiles
+        or (not standalone and not permission_profile_present)
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 权限能力与目录不一致")
+    if not standalone and "permission_profile_selection_v1" in capabilities:
+        assert snapshot is not None
+        allowed_profiles = {item["id"] for item in permission_profiles}
+        current_options = {item["id"] for item in snapshot["permission_profile"]["options"]}
+        if not current_options.issubset(allowed_profiles):
+            raise DesktopProtocolError(
+                "desktop_host_invalid",
+                "Desktop Thread 权限选项超出 Runner 目录",
+            )
+    if "model_override_v1" in capabilities and (
+        host.get("control_enabled") is not True or not models
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host model capability 与目录不一致")
+    if "reasoning_effort_v1" in capabilities and (
+        host.get("control_enabled") is not True
+        or not complete_reasoning_catalog
+        or not any(item.get("supported_reasoning_efforts") for item in models)
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 推理强度能力与目录不一致")
+    if not standalone and "thread_queue_v1" in capabilities and (
+        not queue_is_present or snapshot_sequence is None
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 排队能力与快照序号不一致")
+    if not standalone and "owner_request_response_v1" in capabilities and (
+        not pending_requests_present or snapshot_sequence is None
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 请求响应能力与快照序号不一致")
+    catalog_capability = "collaboration_mode_catalog_v1" in capabilities
+    turn_capability = "collaboration_mode_turn_v1" in capabilities
+    update_capability = "thread_collaboration_mode_update_v1" in capabilities
+    if catalog_capability != (collaboration_modes is not None):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 计划模式目录能力不一致")
+    if not standalone and catalog_capability and not collaboration_mode_present:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 计划模式目录缺少当前状态")
+    if (turn_capability or update_capability) and not catalog_capability:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 计划模式能力缺少目录")
+    if not standalone and collaboration_mode_present and not catalog_capability:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 计划模式能力缺少目录")
+    if (turn_capability or update_capability) and host.get("control_enabled") is not True:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 计划模式写入能力与控制状态不一致")
+    if not standalone and collaboration_mode_present:
+        assert snapshot is not None
+        current_mode_id = snapshot["collaboration_mode"].get("id")
+        allowed_mode_ids = {item["id"] for item in collaboration_modes or []}
+        if current_mode_id is not None and current_mode_id not in allowed_mode_ids:
+            raise DesktopProtocolError(
+                "desktop_host_invalid",
+                "Desktop Thread 当前计划模式不在 Runner 目录",
+            )
+    listener_count = host.get("tcp_listener_count")
+    if not isinstance(listener_count, int) or isinstance(listener_count, bool) or listener_count < -1:
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host listener count 无效")
+    for field in ("app_version", "app_build", "cli_version", "schema_digest", "socket_mode"):
+        field_value = host.get(field)
+        if not isinstance(field_value, str) or not field_value or len(field_value) > 128:
+            raise DesktopProtocolError("desktop_host_invalid", f"Desktop host {field} 无效")
+    if host.get("sync_health") is not None:
+        _sync_health(host["sync_health"])
+    if host.get("app_bridge") is not None:
+        _app_bridge(host["app_bridge"])
+    if standalone and (
+        "desktop_host_v1" not in capabilities
+        or host.get("sync_health") is None
+        or host.get("app_bridge") is None
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 独立状态能力不完整")
+    _public(host)
 
 
 def _validate_event(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1669,6 +1788,80 @@ def _settings_catalog(value: Any) -> None:
             or any(ord(character) < 32 for character in item)
         ):
             raise DesktopProtocolError("desktop_host_invalid", f"Desktop host {field} 设置无效")
+
+
+def _sync_health(value: Any) -> None:
+    health = _exact_mapping(
+        value,
+        {"lane", "timings_ms", "last_success", "data_age_ms", "consecutive_failures"},
+    )
+    lane = health.get("lane")
+    if not isinstance(lane, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", lane):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 同步通道无效")
+    timings = health.get("timings_ms")
+    if (
+        not isinstance(timings, Mapping)
+        or len(timings) > 16
+        or any(
+            not isinstance(key, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", key)
+            or not isinstance(item, int)
+            or isinstance(item, bool)
+            or not 0 <= item <= 300_000
+            for key, item in timings.items()
+        )
+    ):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop host 同步耗时无效")
+    _shanghai_time(health.get("last_success"), "host.sync_health.last_success")
+    for field, maximum in (("data_age_ms", 86_400_000), ("consecutive_failures", 1_000_000)):
+        item = health.get(field)
+        if not isinstance(item, int) or isinstance(item, bool) or not 0 <= item <= maximum:
+            raise DesktopProtocolError("desktop_host_invalid", f"Desktop host {field} 无效")
+
+
+def _app_bridge(value: Any) -> None:
+    bridge = _exact_mapping(
+        value,
+        {"ready", "last_success", "last_error_code"},
+        {
+            "sidecar_running",
+            "restart_count",
+            "retry_seconds",
+            "supervisor_error_code",
+            "recovery_attempt_count",
+            "last_attempt",
+            "last_activation_success",
+        },
+    )
+    if not isinstance(bridge.get("ready"), bool):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop App Bridge ready 状态无效")
+    last_success = bridge.get("last_success")
+    if last_success is not None:
+        _shanghai_time(last_success, "host.app_bridge.last_success")
+    for field in ("last_attempt", "last_activation_success"):
+        timestamp = bridge.get(field)
+        if timestamp is not None:
+            _shanghai_time(timestamp, f"host.app_bridge.{field}")
+    for field in ("last_error_code", "supervisor_error_code"):
+        error_code = bridge.get(field)
+        if error_code is not None and (
+            not isinstance(error_code, str)
+            or not re.fullmatch(r"bridge_[a-z0-9_]{1,56}", error_code)
+        ):
+            raise DesktopProtocolError("desktop_host_invalid", f"Desktop App Bridge {field} 无效")
+    sidecar_running = bridge.get("sidecar_running")
+    if sidecar_running is not None and not isinstance(sidecar_running, bool):
+        raise DesktopProtocolError("desktop_host_invalid", "Desktop App Bridge sidecar 状态无效")
+    for field, maximum in (
+        ("restart_count", 1_000_000),
+        ("recovery_attempt_count", 1_000_000),
+        ("retry_seconds", 30),
+    ):
+        item = bridge.get(field)
+        if item is not None and (
+            not isinstance(item, int) or isinstance(item, bool) or not 0 <= item <= maximum
+        ):
+            raise DesktopProtocolError("desktop_host_invalid", f"Desktop App Bridge {field} 无效")
 
 
 def _permission_profiles(value: Any) -> None:

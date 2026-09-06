@@ -14,6 +14,7 @@ EVENT_TYPES = frozenset(
         "heartbeat",
         "status",
         "result",
+        "desktop_host",
         "desktop_snapshot",
         "desktop_event",
         "desktop_receipt",

@@ -268,6 +268,14 @@ class RunnerManagerService:
                 "Runner 未声明 Desktop takeover capability",
                 status=403,
             )
+        if event_type == "desktop_host" and "desktop_host_v1" not in runner.get(
+            "capabilities", []
+        ):
+            raise StoreError(
+                "desktop_runner_capability_required",
+                "Runner 未声明独立 Desktop host capability",
+                status=403,
+            )
         if event_type == "desktop_snapshot":
             snapshot = payload.get("snapshot")
             project_alias = snapshot.get("project_alias") if isinstance(snapshot, Mapping) else None
@@ -275,6 +283,20 @@ class RunnerManagerService:
                 raise StoreError(
                     "desktop_project_not_allowed",
                     "Desktop snapshot 项目不在 Runner 白名单",
+                    status=403,
+                )
+            host = payload.get("host")
+            advertised_host_v1 = bool(
+                isinstance(host, Mapping)
+                and "desktop_host_v1" in (host.get("capabilities") or [])
+            )
+            registered_host_v1 = "desktop_host_v1" in runner.get("capabilities", [])
+            # Accept already-durable legacy snapshots during a rolling upgrade,
+            # but never let an unregistered Runner introduce sequenced Host state.
+            if advertised_host_v1 and not registered_host_v1:
+                raise StoreError(
+                    "desktop_runner_capability_required",
+                    "Desktop snapshot 的 Host capability 与 Runner 登记不一致",
                     status=403,
                 )
         return self.desktop_controller.receive(event_type, payload)

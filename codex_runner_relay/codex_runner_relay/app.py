@@ -27,6 +27,7 @@ CONSUMED_EVENT_REJECTIONS = frozenset({"runner_late_message"})
 CONSUMED_EVENT_TYPE_REJECTIONS = frozenset(
     {
         ("desktop_event", "desktop_event_sequence_stale"),
+        ("desktop_host", "desktop_host_sequence_stale"),
         # A durable snapshot can outlive a newer projection with the same
         # Desktop revision.  The Controller deliberately retains the newer
         # projection and rejects the old body; retrying that immutable outbox

@@ -34,12 +34,12 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.31")
-        self.assertIn('version: "0.2.31"', config)
+        self.assertEqual(__version__, "0.2.32")
+        self.assertIn('version: "0.2.32"', config)
         self.assertEqual(
             SUPPORTED_RUNNER_VERSIONS,
             frozenset(
-                {"0.3.6", "0.3.11", "0.3.12", "0.3.13", "0.3.14", "0.3.15", "0.3.16", "0.3.17", "0.3.18", "0.3.19", "0.3.20", "0.3.21", "0.3.22", "0.3.23", "0.3.24", "0.3.25", "0.3.26", "0.3.27", "0.3.28", "0.3.29", "0.3.30", "0.3.31"}
+                {"0.3.6", "0.3.11", "0.3.12", "0.3.13", "0.3.14", "0.3.15", "0.3.16", "0.3.17", "0.3.18", "0.3.19", "0.3.20", "0.3.21", "0.3.22", "0.3.23", "0.3.24", "0.3.25", "0.3.26", "0.3.27", "0.3.28", "0.3.29", "0.3.30", "0.3.31", "0.3.32"}
             ),
         )
         self.assertIn('controller_base_url: "http://local-codex-controller:8102"', config)
@@ -108,6 +108,19 @@ class RelayProtocolUnitTests(unittest.TestCase):
         )
         self.assertEqual(desktop_type, "desktop_snapshot")
         self.assertEqual(desktop_document["runner_id"], RUNNER_ID)
+        host_type, host_document = validate_event_message(
+            {
+                "type": "event",
+                "event_type": "desktop_host",
+                "document": {
+                    "message_type": "desktop_host",
+                    "runner_id": RUNNER_ID,
+                },
+            },
+            runner_id=RUNNER_ID,
+        )
+        self.assertEqual(host_type, "desktop_host")
+        self.assertEqual(host_document["runner_id"], RUNNER_ID)
         command = {
             "message_type": "desktop_command",
             "runner_id": RUNNER_ID,
@@ -273,6 +286,23 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_desktop_upstream_and_command_downlink_share_bound_runner_connection(self) -> None:
         ws = await self.enroll()
+        host = {
+            "message_type": "desktop_host",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "c" * 64,
+        }
+        await ws.send_json(
+            {"type": "event", "event_type": "desktop_host", "document": host}
+        )
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {
+                "type": "ack",
+                "event_type": "desktop_host",
+                "body_digest": host["body_digest"],
+            },
+        )
+        self.assertEqual(self.controller.events[-1], ("desktop_host", host, CREDENTIAL))
         snapshot = {
             "message_type": "desktop_snapshot",
             "runner_id": RUNNER_ID,
@@ -359,6 +389,33 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "message_type": "heartbeat",
             "runner_id": RUNNER_ID,
             "body_digest": "sha256:" + "f" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
+        self.assertEqual((await ws.receive_json(timeout=2))["event_type"], "heartbeat")
+        await ws.close()
+
+    async def test_stale_desktop_host_is_transport_acked_without_closing_runner(self) -> None:
+        self.controller.event_error_code = "desktop_host_sequence_stale"
+        ws = await self.enroll()
+        host = {
+            "message_type": "desktop_host",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "9" * 64,
+        }
+        await ws.send_json({"type": "event", "event_type": "desktop_host", "document": host})
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {
+                "type": "ack",
+                "event_type": "desktop_host",
+                "body_digest": host["body_digest"],
+            },
+        )
+        self.controller.event_error_code = None
+        heartbeat = {
+            "message_type": "heartbeat",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "8" * 64,
         }
         await ws.send_json({"type": "event", "event_type": "heartbeat", "document": heartbeat})
         self.assertEqual((await ws.receive_json(timeout=2))["event_type"], "heartbeat")

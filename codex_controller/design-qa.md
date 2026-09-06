@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.43.
+Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.44.
 
 ## Comparison target and evidence
 
@@ -23,7 +23,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.43.
 
 ## Patches since preceding QA
 
-- Controller `0.5.43` retains the approved `0.5.42` responsive shell and advanced controls while pinning Runner `0.3.30`; this candidate changes only the timing and recovery of App-owned management capability publication and does not alter the accepted layout.
+- Controller `0.5.44` retains the approved `0.5.42` responsive shell and advanced controls while pinning Runner `0.3.31`; this candidate changes only the timing and recovery of App-owned management capability publication and does not alter the accepted layout.
 - Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
 - Separated management pages with grouped/searchable incremental tools and live status.
 - Added official icons, visible lightbox close contrast and 44px removal targets.

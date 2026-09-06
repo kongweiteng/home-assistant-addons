@@ -1,6 +1,12 @@
 # 更新记录
 
-## 0.5.43 — local candidate
+## 0.5.44 — local candidate
+
+- 内置安装身份提升到 Runner `0.3.31`；管理能力待发布时在既有 worker 限额内为一个非活动最近任务保留承载槽位，避免超长活动任务占满通道并阻塞 rename、pin、fork 和 Review 发布。
+- 承载仍经过既有任务读取、脱敏、revision 和正文一致性校验；只有快照已原子进入 durable outbox 或相同摘要已存在时才确认发布，入队失败会保留待发布状态并重试。Controller 页面、SSE/WSS、图文、新建/继续、审批/提问、Diff/资源、模式与权限边界不变。
+- Gateway 保持 `0.4.10`，Relay `0.2.31` 只增加 Runner `0.3.31` 精确滚动安装兼容。
+
+## 0.5.43 — released
 
 - 内置安装身份提升到 Runner `0.3.30`；App-owned Bridge 在大型任务库全量清单之前探测，并由活动通道异步周期重试。
 - 没有活动任务时以一个最近任务承载 Host 能力变化，使 rename、pin、fork 和 Review 在启动或网络恢复后快速可用。

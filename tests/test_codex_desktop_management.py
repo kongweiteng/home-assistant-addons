@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -580,6 +581,41 @@ class DesktopManagementTests(unittest.TestCase):
             self.service.thread(THREAD_REF)["snapshot"]["permission_profile"]["id"],
             ":read-only",
         )
+
+    def test_same_revision_identical_snapshot_refreshes_only_host_capabilities(self) -> None:
+        first = snapshot(capabilities=["list_read"], sequence=1)
+        self.service.receive("desktop_snapshot", first)
+        with sqlite3.connect(self.store.database_path) as connection:
+            before_snapshot_json = connection.execute(
+                "SELECT snapshot_json FROM desktop_threads WHERE thread_ref=?",
+                (THREAD_REF,),
+            ).fetchone()[0]
+
+        management_capabilities = [
+            "list_read",
+            "thread_rename_v1",
+            "thread_pin_v1",
+            "thread_fork_v1",
+            "review_inline_v1",
+        ]
+        second = snapshot(capabilities=management_capabilities, sequence=2)
+        self.assertEqual(first["thread_revision"], second["thread_revision"])
+        self.assertEqual(first["snapshot"], second["snapshot"])
+
+        result = self.service.receive("desktop_snapshot", second)
+
+        self.assertEqual(result["status"], "refreshed")
+        self.assertEqual(
+            set(self.store.list_hosts()[0]["capabilities"]),
+            set(management_capabilities),
+        )
+        with sqlite3.connect(self.store.database_path) as connection:
+            after_snapshot_json = connection.execute(
+                "SELECT snapshot_json FROM desktop_threads WHERE thread_ref=?",
+                (THREAD_REF,),
+            ).fetchone()[0]
+        self.assertEqual(after_snapshot_json, before_snapshot_json)
+        self.assertEqual(self.store.thread(THREAD_REF)["snapshot"], first["snapshot"])
 
     def test_mobile_ui_uses_server_search_and_capability_gates(self) -> None:
         combined = DESKTOP_DASHBOARD_HTML + DESKTOP_DASHBOARD_JS

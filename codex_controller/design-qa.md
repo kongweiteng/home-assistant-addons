@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-07, Asia/Shanghai. Candidate: Controller 0.5.45.
+Date: 2026-09-07, Asia/Shanghai. Candidate: Controller 0.5.46.
 
 ## Comparison target and evidence
 
@@ -23,7 +23,7 @@ Date: 2026-09-07, Asia/Shanghai. Candidate: Controller 0.5.45.
 
 ## Patches since preceding QA
 
-- Controller `0.5.45` retains the approved scheme 1 responsive shell and advanced controls while pinning Runner `0.3.32`. The connection sheet now distinguishes App activation from Bridge health, exposes stable copyable error codes and recovery timing, and keeps the 390px layout within the viewport.
+- Controller `0.5.46` retains the approved scheme 1 responsive shell and advanced controls while pinning Runner `0.3.33`. The connection sheet now distinguishes App activation from Bridge health, exposes stable copyable error codes and recovery timing, and keeps the 390px layout within the viewport.
 - Host-only SSE frames update connection health without reloading projects and the first task page. The page treats the server-provided task-inventory watermark as authoritative, so a live heartbeat cannot make stale or unknown task data look green.
 - Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
 - Separated management pages with grouped/searchable incremental tools and live status.

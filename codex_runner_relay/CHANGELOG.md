@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.33 — released
+
+- 安装目录精确接受 Runner `0.3.33`，并完整保留 `0.3.32` 与全部既有回滚版本。
+- WSS、ACK、连接身份和失败关闭边界不变；旧 Host 队头压缩仅由 Runner 对严格更高序号的 durable Host 状态执行。
+
 ## 0.2.32 — released
 
 - 新增 `desktop_host` 上行事件白名单，并只对 Controller 明确返回的 `desktop_host_sequence_stale` 旧序号拒绝进行安全消费与 ACK；其他 Host 冲突仍关闭连接并失败关闭。

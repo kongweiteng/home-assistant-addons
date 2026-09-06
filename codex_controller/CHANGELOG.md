@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.46 — released
+
+- 内置安装身份提升到 Runner `0.3.33`，修复升级后已尝试的旧 `desktop_host` 协议信封永久阻塞新 Host、任务快照、实时事件与心跳的问题。
+- Runner 只清理同 topic 且 `host_sequence` 严格更低的 Host 状态投影；命令、回执、任务结果、unknown 写入和其余 outbox 内容保持不变。Relay `0.2.33` 仅增加精确滚动安装兼容，Gateway 保持 `0.4.10`。
+
 ## 0.5.45 — released
 
 - 内置安装身份提升到 Runner `0.3.32`。Runner 通过独立、持久的 `desktop_host` 上行发布 Host、App Bridge、能力目录和实时健康；任务历史读取阻塞或全部任务繁忙时不再阻塞 Host 状态恢复。

@@ -36,23 +36,28 @@ DESKTOP_DASHBOARD_HTML = r"""<!doctype html>
 .detail-panel{display:flex;flex-direction:column}.detail-empty{height:100%;display:grid;place-items:center;padding:30px;text-align:center}.detail-empty h2{margin:0 0 6px;font-size:20px}.detail-content{height:100%;min-height:0;display:flex;flex-direction:column}.detail-head{flex:0 0 auto;position:relative;padding:13px 16px 11px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.95)}.detail-title-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:10px}.detail-heading{min-width:0}.detail-head h2{margin:0;font-size:18px;line-height:1.3;letter-spacing:-.015em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.eyebrow{color:var(--muted);font-size:11px}.detail-preview{margin-top:3px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.detail-meta{margin-top:8px}.sync-badge{display:inline-flex;align-items:center;gap:5px}.sync-badge::before{content:"";width:6px;height:6px;border-radius:99px;background:currentColor}.detail-back{display:none}.task-menu{position:relative}.task-menu summary{width:42px;height:42px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:11px;background:var(--surface);cursor:pointer;list-style:none;font-weight:650}.task-menu summary::-webkit-details-marker{display:none}.task-menu-popover{position:absolute;z-index:12;top:48px;right:0;width:210px;display:grid;gap:5px;padding:7px;border:1px solid var(--line);border-radius:13px;background:var(--surface);box-shadow:0 16px 44px rgba(20,22,26,.14)}.task-menu-popover button{width:100%;text-align:left}.notice{flex:0 0 auto;margin:10px 16px 0;border-left:3px solid var(--blue);border-radius:6px 11px 11px 6px;background:var(--blue-soft);padding:9px 11px;color:#4c5d8d;font-size:12px}.notice.warn{border-color:var(--amber);background:var(--amber-soft);color:#805a20}.notice.bad{border-color:var(--red);background:var(--red-soft);color:#983547}
 .conversation-wrap{position:relative;flex:1;min-height:0;overflow:hidden}.conversation{height:100%;overflow:auto;padding:20px clamp(16px,4vw,54px) 26px;scroll-behavior:smooth}.conversation-inner{max-width:820px;display:grid;gap:18px;margin:0 auto}.message{min-width:0}.message-role{margin:0 0 5px;color:var(--muted);font-size:11px;font-weight:650}.message-body{white-space:pre-wrap;overflow-wrap:anywhere}.message.assistant{padding-right:9%}.message.assistant .message-body{font-size:15px;line-height:1.65}.message.user{justify-self:end;width:min(82%,680px);padding:11px 14px;border-radius:17px 17px 5px 17px;background:var(--surface-2)}.message.user .message-role{display:none}.message.activity{max-width:92%;border-left:2px solid var(--amber);border-radius:7px;background:var(--surface-3);padding:8px 11px;color:#555b63}.message.activity .message-role{color:var(--amber)}.message.activity .message-body{font-size:12px}.message.system{justify-self:center;color:var(--muted);font-size:12px;text-align:center}.message.streaming .message-role{color:var(--green)}.typing-dot{display:inline-block;width:6px;height:6px;margin-left:6px;border-radius:99px;background:var(--green);animation:pulse 1.3s infinite}@keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}.run-details{border:1px solid var(--line);border-radius:12px;background:var(--surface-3)}.run-details summary{cursor:pointer;list-style:none;padding:9px 11px;color:var(--muted);font-size:12px}.run-details summary::-webkit-details-marker{display:none}.run-details[open] summary{border-bottom:1px solid var(--line)}.run-detail-items{display:grid;gap:7px;padding:9px}.run-item{border-left:2px solid var(--line-strong);border-radius:6px;background:var(--surface);padding:8px 9px}.run-item-label{margin-bottom:3px;color:var(--muted);font-size:11px;font-weight:650}.run-item-text{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.code-output{max-height:190px;margin:6px 0 0;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:8px;padding:8px;background:#f2f2ef;color:#3b4540;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}.new-reply{position:absolute;z-index:4;left:50%;bottom:13px;transform:translateX(-50%);min-height:36px;border-color:#d9dfef;border-radius:999px;background:var(--blue-soft);color:var(--blue);box-shadow:0 5px 16px rgba(30,44,80,.12)}
 .composer{flex:0 0 auto;margin:0 16px 14px;border:1px solid var(--line-strong);border-radius:17px;background:var(--surface);box-shadow:0 8px 28px rgba(20,22,26,.08);padding:7px}.composer textarea{min-height:50px;max-height:160px;border:0;background:transparent;padding:9px 10px;overflow:auto}.composer-bar{display:flex;align-items:flex-end;gap:8px}.composer-tools{min-width:0;flex:1}.composer-status{min-height:20px;padding:1px 9px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.send-button{flex:0 0 auto;min-width:70px}.advanced{margin:1px 4px 5px}.advanced summary{display:inline-flex;min-height:30px;align-items:center;cursor:pointer;color:var(--muted);font-size:11px;list-style:none}.advanced summary::-webkit-details-marker{display:none}.advanced-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;padding:5px}.mode-switch{display:flex;gap:5px}.mode-switch button{min-height:36px;padding:6px 9px;background:transparent;font-size:12px}.mode-switch button[aria-pressed="true"]{border-color:#222326;background:#222326;color:#fff}.model-meta{grid-column:1/-1;color:var(--muted);font-size:11px}
-.mobile-nav{display:none}.new-task-sheet,.connection-sheet{position:fixed;z-index:90;left:50%;top:50%;width:min(520px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;transform:translate(-50%,-50%);border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:0 24px 80px rgba(22,25,30,.2);padding:8px 18px 20px}.connection-sheet{width:min(440px,calc(100% - 32px))}.sheet-handle{display:none;width:38px;height:4px;border-radius:4px;background:#c7c9cc;margin:0 auto 6px}.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.sheet-head h2{margin:9px 0;font-size:20px}.sheet-copy{margin:0 0 15px;color:var(--muted);font-size:13px}.new-task-form{display:grid;gap:13px}.new-task-form textarea{min-height:126px;resize:vertical}.sheet-actions{display:flex;gap:8px;justify-content:flex-end}.sheet-actions .primary{min-width:130px}.feedback{min-height:20px;color:var(--muted);font-size:12px}.modal-backdrop{position:fixed;z-index:80;inset:0;background:rgba(25,27,30,.25)}.connection-grid{display:grid;gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden}.connection-row{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:11px 12px;border-bottom:1px solid var(--line)}.connection-row:last-child{border-bottom:0}.connection-row span{color:var(--muted);font-size:12px}.connection-row strong{min-width:0;text-align:right;font-size:12px;overflow-wrap:anywhere}.connection-note{margin:12px 2px 0;color:var(--muted);font-size:12px}
+.mobile-nav{display:none}.new-task-sheet,.connection-sheet,.management-sheet,.rename-sheet{position:fixed;z-index:90;left:50%;top:50%;width:min(520px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;transform:translate(-50%,-50%);border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:0 24px 80px rgba(22,25,30,.2);padding:8px 18px 20px}.connection-sheet,.rename-sheet{width:min(440px,calc(100% - 32px))}.sheet-handle{display:none;width:38px;height:4px;border-radius:4px;background:#c7c9cc;margin:0 auto 6px}.sheet-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.sheet-head h2{margin:9px 0;font-size:20px}.sheet-copy{margin:0 0 15px;color:var(--muted);font-size:13px}.new-task-form,.rename-form{display:grid;gap:13px}.new-task-form textarea{min-height:126px;resize:vertical}.sheet-actions{display:flex;gap:8px;justify-content:flex-end}.sheet-actions .primary{min-width:130px}.feedback{min-height:20px;color:var(--muted);font-size:12px}.modal-backdrop{position:fixed;z-index:80;inset:0;background:rgba(25,27,30,.25)}.connection-grid,.management-grid{display:grid;gap:0;border:1px solid var(--line);border-radius:14px;overflow:hidden}.connection-row,.management-row{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:11px 12px;border-bottom:1px solid var(--line)}.connection-row:last-child,.management-row:last-child{border-bottom:0}.connection-row span,.management-row span{color:var(--muted);font-size:12px}.connection-row strong,.management-row strong{min-width:0;text-align:right;font-size:12px;overflow-wrap:anywhere}.connection-note,.management-note{margin:12px 2px 0;color:var(--muted);font-size:12px}
 @media(max-width:1050px){.workspace{grid-template-columns:190px 300px minmax(360px,1fr)}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:920px){body{padding-bottom:calc(76px + env(safe-area-inset-bottom));min-height:-webkit-fill-available}.shell{padding:0 12px 16px}.topbar{height:74px;margin:0;padding-top:env(safe-area-inset-top)}.brand-mark,.subtitle,.settings-link{display:none}.brand h1{font-size:24px}.top-actions .connection{padding-inline:9px}.top-actions .primary{padding-inline:11px}.runner-banner{margin:3px 0 11px}.metrics{display:none}.workspace{height:auto;min-height:0;display:block}.panel{box-shadow:none}.project-panel{display:none;position:fixed;z-index:90;left:10px;right:10px;bottom:10px;max-height:76dvh;overflow:auto;border-radius:20px}.project-panel.open{display:block}.project-panel .panel-head button{display:inline-flex}.project-panel.open+.thread-panel{pointer-events:none}.thread-panel{border:0;background:transparent}.thread-panel .panel-head{padding-inline:3px;background:transparent;border:0}.thread-panel .panel-body{padding:5px 0 9px}.thread-scroll{height:auto;padding:0}.thread-button{padding:13px 10px;min-height:98px}.detail-panel{display:none;position:fixed;z-index:40;inset:0;height:var(--app-height,100dvh);border:0;border-radius:0;background:var(--bg)}.detail-open .detail-panel{display:flex}.detail-open .shell{padding:0}.detail-open .topbar,.detail-open .runner-banner,.detail-open .metrics,.detail-open .project-panel,.detail-open .thread-panel,.detail-open .mobile-nav{display:none}.detail-content{height:var(--app-height,100dvh)}.detail-head{padding:calc(9px + env(safe-area-inset-top)) 10px 10px;background:rgba(247,247,245,.94);backdrop-filter:blur(18px)}.detail-title-row{grid-template-columns:48px minmax(0,1fr) 44px;align-items:center}.detail-back,.task-menu summary,.send-button{min-height:44px}.detail-back{width:48px;display:inline-flex;align-items:center;justify-content:center;border-color:transparent;background:transparent;padding:0}.task-menu summary{width:44px;height:44px}.detail-preview{display:none}.detail-meta{margin-left:58px;margin-top:4px}.conversation{padding:17px 14px 210px}.conversation-inner{gap:17px}.message.assistant{padding-right:2%}.message.user{width:min(88%,680px)}.notice{margin-inline:10px}.composer{position:fixed;z-index:8;left:8px;right:8px;bottom:max(8px,env(safe-area-inset-bottom));max-height:calc(var(--app-height,100dvh) - max(16px,env(safe-area-inset-top)) - max(16px,env(safe-area-inset-bottom)));overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;margin:0;border-radius:19px;padding:6px 7px calc(7px + env(safe-area-inset-bottom));background:rgba(255,255,255,.96);backdrop-filter:blur(18px)}.composer textarea{max-height:118px}.advanced-grid{grid-template-columns:1fr}.model-meta{grid-column:auto}.mobile-nav{position:fixed;z-index:30;left:12px;right:12px;bottom:max(10px,env(safe-area-inset-bottom));height:calc(64px + env(safe-area-inset-bottom));display:grid;grid-template-columns:repeat(4,1fr);padding:4px 7px env(safe-area-inset-bottom);border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.95);box-shadow:0 8px 28px rgba(25,28,32,.11);backdrop-filter:blur(18px)}.mobile-nav button,.mobile-nav a{min-height:54px;border:0;border-radius:12px;background:transparent;color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:12px}.mobile-nav .primary-nav{margin-top:-14px;height:56px;align-self:start;background:#222326;color:#fff;box-shadow:0 6px 16px rgba(0,0,0,.18)}.new-task-sheet{left:8px;right:8px;top:auto;bottom:0;width:auto;max-height:88dvh;transform:none;border-radius:22px 22px 0 0;padding-bottom:calc(18px + env(safe-area-inset-bottom))}.sheet-handle{display:block}.sheet-actions{display:grid;grid-template-columns:1fr 1.4fr}.sheet-actions button{width:100%}}
 @media(max-width:520px){.shell{padding-inline:9px}.runner-banner{padding:11px}.filters{grid-template-columns:1fr 1.25fr}.task-menu-popover{position:fixed;top:auto;left:10px;right:10px;bottom:calc(12px + env(safe-area-inset-bottom));width:auto}.advanced-grid{padding-inline:2px}.new-task-form textarea{min-height:108px}.new-task-sheet{left:0;right:0}.connection-row{grid-template-columns:96px minmax(0,1fr)}}
 @media(max-width:920px){.mobile-nav{grid-template-columns:repeat(5,1fr)}}
+@media(max-width:920px){.management-sheet,.rename-sheet{left:8px;right:8px;top:auto;bottom:0;width:auto;max-height:88dvh;transform:none;border-radius:22px 22px 0 0;padding-bottom:calc(18px + env(safe-area-inset-bottom))}.management-sheet .sheet-handle,.rename-sheet .sheet-handle{display:block}}
+.request-tray{margin:10px 15px 0;border:1px solid #ead8b9;border-radius:14px;background:var(--amber-soft);padding:10px}.request-tray-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.request-tray-head h3{margin:0;font-size:14px}.request-list{display:grid;gap:7px}.request-card{width:100%;min-height:64px;display:grid;gap:3px;text-align:left;background:var(--surface);border-color:#e6d5b8}.request-card strong,.request-card span{overflow-wrap:anywhere}.request-card span{color:var(--muted);font-size:12px}.request-card.unknown{border-color:#efd0d7;background:var(--red-soft)}.request-sheet{position:fixed;z-index:95;left:50%;top:50%;width:min(560px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;transform:translate(-50%,-50%);border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:0 24px 80px rgba(22,25,30,.2);padding:8px 18px 20px}.request-detail{display:grid;gap:13px}.request-summary{margin:0;border-radius:11px;background:var(--surface-3);padding:11px;white-space:pre-wrap;overflow-wrap:anywhere}.request-question{display:grid;gap:6px;border-top:1px solid var(--line);padding-top:12px}.request-question h3{margin:0;font-size:14px}.request-question p{margin:0;color:var(--muted);font-size:12px}.request-option{min-height:44px;display:flex;align-items:center;gap:9px}.request-option input{width:20px;height:20px}.request-answer,.request-other{min-height:44px}.request-decisions{position:sticky;bottom:0;display:flex;gap:8px;flex-wrap:wrap;padding-top:12px;background:var(--surface)}.request-decisions button{min-height:44px;flex:1 1 120px}.request-warning{color:var(--red);font-size:12px}
+@media(max-width:920px){.request-tray{margin-inline:10px}.request-sheet{left:8px;right:8px;top:auto;bottom:0;width:auto;max-height:90dvh;transform:none;border-radius:22px 22px 0 0;padding-bottom:calc(18px + env(safe-area-inset-bottom))}.request-sheet .sheet-handle{display:block}.request-decisions{padding-bottom:env(safe-area-inset-bottom)}.advanced-grid .field select,.new-task-form .field select{min-height:44px}}
 .delivery{flex:0 0 auto;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:10px 16px 0}.delivery-stage{min-width:0;border:1px solid var(--line);border-radius:10px;padding:7px 9px;background:var(--surface-3);color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.delivery-stage::before{content:"";display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:99px;background:#b7b9bd}.delivery-stage.done{color:var(--green);background:var(--green-soft)}.delivery-stage.done::before{background:var(--green)}.delivery-stage.current{color:var(--blue);background:var(--blue-soft)}.delivery-stage.current::before{background:var(--blue);animation:pulse 1.3s infinite}.delivery-stage.failed{color:var(--red);background:var(--red-soft)}.delivery-stage.failed::before{background:var(--red)}@media(max-width:920px){.delivery{margin-inline:10px;grid-template-columns:repeat(2,minmax(0,1fr))}}
+.resource-sheet{position:fixed;z-index:94;left:50%;top:50%;width:min(760px,calc(100% - 32px));height:min(760px,calc(100dvh - 32px));display:flex;flex-direction:column;overflow:hidden;transform:translate(-50%,-50%);border:1px solid var(--line);border-radius:20px;background:var(--surface);box-shadow:0 24px 80px rgba(22,25,30,.2);padding:8px 16px 16px}.resource-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:2px 0 10px}.resource-tabs button{min-height:44px}.resource-tabs button[aria-selected="true"]{border-color:#222326;background:#222326;color:#fff}.resource-toolbar{display:flex;align-items:center;gap:7px;margin-bottom:8px}.resource-toolbar button{min-height:44px}.resource-path{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace}.resource-body{min-height:0;flex:1;overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface-3)}.resource-list{display:grid}.resource-entry{width:100%;min-height:52px;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;text-align:left}.resource-entry:last-child{border-bottom:0}.resource-entry-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:620}.resource-entry-meta{color:var(--muted);font-size:11px}.resource-empty{padding:28px 16px;color:var(--muted);text-align:center}.resource-more{width:calc(100% - 16px);min-height:44px;margin:8px}.resource-output{min-height:100%;margin:0;padding:14px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}.resource-summary{padding:12px 14px;border-bottom:1px solid var(--line);background:var(--surface)}.resource-summary strong,.resource-summary span{display:block}.resource-summary span{margin-top:3px;color:var(--muted);font-size:12px}.resource-preview{min-height:180px;display:grid;place-items:center;padding:12px}.resource-preview img{display:block;max-width:100%;height:auto;border-radius:10px}.resource-preview object{display:block;width:100%;height:clamp(360px,58dvh,620px);border:0;border-radius:10px;background:#fff}.resource-download{min-height:44px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line-strong);border-radius:11px;padding:8px 13px;background:var(--surface)}.diagnostic-list{display:grid;gap:8px;padding:10px}.diagnostic-list button{min-height:52px;text-align:left}.resource-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:9px}.resource-footer button{min-height:44px}.resource-status{min-width:0;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.resource-status.error{color:var(--red)}
+@media(max-width:920px){.resource-sheet{left:0;right:0;top:auto;bottom:0;width:auto;height:min(88dvh,760px);transform:none;border-radius:22px 22px 0 0;padding:8px 10px calc(10px + env(safe-area-inset-bottom))}.resource-sheet .sheet-handle{display:block}.resource-entry{min-height:56px}.resource-footer{padding-bottom:env(safe-area-inset-bottom)}.resource-preview{padding:8px}.resource-preview object{height:58dvh}}
 </style></head><body><main class="shell">
-<header class="topbar"><div class="brand"><span class="brand-mark">C</span><div><h1>Codex</h1><p class="subtitle">Mac 上的任务，随时继续对话</p></div></div><div class="top-actions"><button id="connectionState" class="connection" type="button" aria-haspopup="dialog">正在连接</button><a href="../" class="settings-link">设置</a><button id="newTaskButton" class="primary" type="button">新建任务</button></div></header>
+<header class="topbar"><div class="brand"><span class="brand-mark">C</span><div><h1>Codex</h1><p class="subtitle">Mac 上的任务，随时继续对话</p></div></div><div class="top-actions"><button id="connectionState" class="connection" type="button" aria-haspopup="dialog">正在连接</button><button id="managementButton" class="settings-link" type="button">管理</button><button id="newTaskButton" class="primary" type="button">新建任务</button></div></header>
 <section id="runnerBanner" class="runner-banner"><div><strong id="runnerBannerTitle">正在连接 Mac</strong><span id="runnerBannerText">任务与回复会自动同步。</span></div><button id="checkConnection" type="button">重试连接</button></section>
 <section class="metrics" aria-label="任务概览"><div class="metric"><span>Mac 主机</span><strong id="metricHosts">0</strong></div><div class="metric"><span>项目</span><strong id="metricProjects">0</strong></div><div class="metric"><span>全部任务</span><strong id="metricThreads">0</strong></div><div class="metric"><span>Codex 正在工作</span><strong id="metricActive">0</strong></div><div class="metric"><span>需要处理</span><strong id="metricRecovery">0</strong></div></section>
 <section class="workspace">
 <aside id="projectPanel" class="panel project-panel" aria-label="主机与项目"><div class="panel-head"><h2>项目</h2><button id="closeProjects" class="ghost" type="button">完成</button></div><div class="panel-body stack"><div class="field"><label for="hostSelect">Mac</label><select id="hostSelect" aria-label="选择 Mac 主机"></select></div><div class="badge-row"><span id="hostWriteState" class="badge">正在连接</span></div><div id="hostMeta" class="muted">等待第一次自动同步。</div><div id="projectList" class="project-list" aria-label="项目列表"></div></div></aside>
-<section class="panel thread-panel" aria-label="任务列表"><div class="panel-head"><h2>任务</h2><span id="threadCount" class="badge">0</span></div><div class="panel-body stack"><div class="filters"><div class="field"><label for="statusFilter">查看</label><select id="statusFilter"><option value="all">全部任务</option><option value="active">正在工作</option><option value="idle">可以继续</option><option value="notLoaded">最近任务</option><option value="failed">需要处理</option><option value="recovery_required">需要处理</option><option value="protocol_degraded">暂时只读</option><option value="archived">已归档</option></select></div><div class="field"><label for="threadSearch">搜索</label><input id="threadSearch" maxlength="120" inputmode="search" placeholder="搜索已加载任务"></div></div></div><div id="threadList" class="thread-list thread-scroll" aria-live="polite"></div><div class="thread-list-footer"><button id="loadMoreThreads" type="button">加载更多任务</button><div id="threadListStatus" class="thread-list-status" role="status">正在加载最近任务</div></div></section>
-<section class="panel detail-panel" aria-label="任务对话"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个任务</h2><p class="muted">打开后即可像 Codex App 一样查看回复并继续对话。</p></div></div><div id="detailContent" class="detail-content hidden"><header class="detail-head"><div class="detail-title-row"><button id="detailBack" class="detail-back" type="button" aria-label="返回任务列表">返回</button><div class="detail-heading"><div id="detailProject" class="eyebrow">当前项目</div><h2 id="detailTitle">-</h2><div id="detailPreview" class="detail-preview"></div></div><details id="taskMenu" class="task-menu"><summary aria-label="更多任务操作">更多</summary><div class="task-menu-popover"><button id="interruptButton" class="danger" type="button">停止当前任务</button><button id="archiveButton" type="button">归档任务</button><button id="unarchiveButton" type="button">恢复归档</button></div></details></div><div id="detailMeta" class="detail-meta"></div></header><div id="detailNotice" class="notice hidden"></div><div class="conversation-wrap"><div id="conversationView" class="conversation" aria-live="polite"><div id="conversationInner" class="conversation-inner"></div></div><button id="newReplyButton" class="new-reply hidden" type="button">查看新回复</button></div><form id="composer" class="composer"><details id="advancedControls" class="advanced"><summary>模型、推理强度与发送方式</summary><div class="advanced-grid"><div class="field"><label for="modelSelect">模型</label><select id="modelSelect" aria-describedby="modelMeta"></select></div><div class="field"><label for="effortSelect">推理强度</label><select id="effortSelect" aria-describedby="modelMeta"></select></div><div class="field"><label>发送方式</label><div class="mode-switch"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">快速调整</button></div></div><div id="modelMeta" class="model-meta"></div></div></details><label class="sr-only" for="composerInput">给 Codex 发消息</label><div class="composer-bar"><div class="composer-tools"><textarea id="composerInput" rows="1" maxlength="12000" placeholder="给 Codex 发消息"></textarea><div id="composerFeedback" class="composer-status" role="status">回复会自动出现在这里</div></div><button id="submitDirection" class="primary send-button" type="submit">发送</button></div></form></div></section>
+<section class="panel thread-panel" aria-label="任务列表"><div class="panel-head"><h2>任务</h2><span id="threadCount" class="badge">0</span></div><div class="panel-body stack"><div class="filters"><div class="field"><label for="statusFilter">查看</label><select id="statusFilter"><option value="all">全部任务</option><option value="active">正在工作</option><option value="idle">可以继续</option><option value="notLoaded">最近任务</option><option value="failed">需要处理</option><option value="recovery_required">需要处理</option><option value="protocol_degraded">暂时只读</option><option value="archived">已归档</option></select></div><div class="field"><label for="threadSearch">搜索</label><input id="threadSearch" maxlength="120" inputmode="search" placeholder="搜索全部已同步任务"></div></div></div><div id="threadList" class="thread-list thread-scroll" aria-live="polite"></div><div class="thread-list-footer"><button id="loadMoreThreads" type="button">加载更多任务</button><div id="threadListStatus" class="thread-list-status" role="status">正在加载最近任务</div></div></section>
+<section class="panel detail-panel" aria-label="任务对话"><div id="detailEmpty" class="detail-empty"><div><h2>选择一个任务</h2><p class="muted">打开后即可像 Codex App 一样查看回复并继续对话。</p></div></div><div id="detailContent" class="detail-content hidden"><header class="detail-head"><div class="detail-title-row"><button id="detailBack" class="detail-back" type="button" aria-label="返回任务列表">返回</button><div class="detail-heading"><div id="detailProject" class="eyebrow">当前项目</div><h2 id="detailTitle">-</h2><div id="detailPreview" class="detail-preview"></div></div><details id="taskMenu" class="task-menu"><summary aria-label="更多任务操作">更多</summary><div class="task-menu-popover"><button id="renameButton" type="button">重命名</button><button id="pinButton" type="button">置顶任务</button><button id="forkButton" type="button">派生新任务</button><button id="reviewButton" type="button">开始代码审查</button><button id="resourceButton" type="button">文件、Diff 与诊断</button><button id="interruptButton" class="danger" type="button">停止当前任务</button><button id="archiveButton" type="button">归档任务</button><button id="unarchiveButton" type="button">恢复归档</button></div></details></div><div id="detailMeta" class="detail-meta"></div></header><div id="detailNotice" class="notice hidden"></div><div class="conversation-wrap"><div id="conversationView" class="conversation" aria-live="polite"><div id="conversationInner" class="conversation-inner"></div></div><button id="newReplyButton" class="new-reply hidden" type="button">查看新回复</button></div><form id="composer" class="composer"><details id="advancedControls" class="advanced"><summary>模型、推理强度与发送方式</summary><div class="advanced-grid"><div class="field"><label for="modelSelect">模型</label><select id="modelSelect" aria-describedby="modelMeta"></select></div><div class="field"><label for="effortSelect">推理强度</label><select id="effortSelect" aria-describedby="modelMeta"></select></div><div class="field"><label>发送方式</label><div class="mode-switch"><button id="safeMode" type="button" aria-pressed="true">安全调整</button><button id="nativeMode" type="button" aria-pressed="false">快速调整</button></div></div><div id="modelMeta" class="model-meta"></div></div></details><label class="sr-only" for="composerInput">给 Codex 发消息</label><div class="composer-bar"><div class="composer-tools"><textarea id="composerInput" rows="1" maxlength="12000" placeholder="给 Codex 发消息"></textarea><div id="composerFeedback" class="composer-status" role="status">回复会自动出现在这里</div></div><button id="submitDirection" class="primary send-button" type="submit">发送</button></div></form></div></section>
 </section></main>
-<nav class="mobile-nav" aria-label="移动端导航"><a href="./">任务</a><button id="mobileProjects" type="button">项目</button><button id="mobileNewTask" class="primary-nav" type="button">新建</button><button id="mobileConnection" type="button">状态</button><a href="../">设置</a></nav>
-<div id="modalBackdrop" class="modal-backdrop hidden"></div><section id="newTaskSheet" class="new-task-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="newTaskTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="newTaskTitle">新建任务</h2><button id="closeNewTask" class="ghost" type="button">关闭</button></div><p class="sheet-copy">任务会出现在 Mac 和手机的同一列表里。连接未确认时不会发送。</p><form id="newTaskForm" class="new-task-form"><div class="field"><label for="newTaskProject">项目</label><select id="newTaskProject" required></select></div><div class="field"><label for="newTaskInput">给 Codex 的任务</label><textarea id="newTaskInput" maxlength="12000" required placeholder="描述希望 Codex 完成的任务"></textarea></div><div class="field"><label for="newTaskModel">模型</label><select id="newTaskModel"></select></div><div class="field"><label for="newTaskEffort">推理强度</label><select id="newTaskEffort"></select></div><div id="newTaskFeedback" class="feedback" role="status">正在检查是否可以创建任务。</div><div class="sheet-actions"><button id="cancelNewTask" type="button">取消</button><button id="createTaskButton" class="primary" type="submit" disabled>创建并打开</button></div></form></section><section id="connectionSheet" class="connection-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="connectionTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="connectionTitle">实时连接</h2><button id="closeConnection" class="ghost" type="button">关闭</button></div><p class="sheet-copy">页面使用持续推送连接；断线后会从最后一个事件自动续传。</p><div class="connection-grid"><div class="connection-row"><span>页面推送</span><strong id="connectionBrowser">正在连接</strong></div><div class="connection-row"><span>Mac 长连接</span><strong id="connectionRunner">等待心跳</strong></div><div class="connection-row"><span>最近推送</span><strong id="connectionEventAt">尚未收到</strong></div><div class="connection-row"><span>任务数据</span><strong id="connectionDataAt">尚未同步</strong></div><div class="connection-row"><span>自动重连</span><strong id="connectionRetry">已启用</strong></div></div><p id="connectionNote" class="connection-note">连接正常时无需任何手动操作。</p></section>
+<nav class="mobile-nav" aria-label="移动端导航"><a href="./">任务</a><button id="mobileProjects" type="button">项目</button><button id="mobileNewTask" class="primary-nav" type="button">新建</button><button id="mobileConnection" type="button">状态</button><button id="mobileManagement" type="button">管理</button></nav>
+<div id="modalBackdrop" class="modal-backdrop hidden"></div><section id="newTaskSheet" class="new-task-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="newTaskTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="newTaskTitle">新建任务</h2><button id="closeNewTask" class="ghost" type="button">关闭</button></div><p class="sheet-copy">任务会出现在 Mac 和手机的同一列表里。连接未确认时不会发送。</p><form id="newTaskForm" class="new-task-form"><div class="field"><label for="newTaskProject">项目</label><select id="newTaskProject" required></select></div><div class="field"><label for="newTaskInput">给 Codex 的任务</label><textarea id="newTaskInput" maxlength="12000" required placeholder="描述希望 Codex 完成的任务"></textarea></div><div class="field"><label for="newTaskModel">模型</label><select id="newTaskModel"></select></div><div class="field"><label for="newTaskEffort">推理强度</label><select id="newTaskEffort"></select></div><div id="newTaskFeedback" class="feedback" role="status">正在检查是否可以创建任务。</div><div class="sheet-actions"><button id="cancelNewTask" type="button">取消</button><button id="createTaskButton" class="primary" type="submit" disabled>创建并打开</button></div></form></section><section id="connectionSheet" class="connection-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="connectionTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="connectionTitle">实时连接</h2><button id="closeConnection" class="ghost" type="button">关闭</button></div><p class="sheet-copy">页面使用持续推送连接；断线后会从最后一个事件自动续传。</p><div class="connection-grid"><div class="connection-row"><span>页面推送</span><strong id="connectionBrowser">正在连接</strong></div><div class="connection-row"><span>Mac 长连接</span><strong id="connectionRunner">等待心跳</strong></div><div class="connection-row"><span>最近推送</span><strong id="connectionEventAt">尚未收到</strong></div><div class="connection-row"><span>任务数据</span><strong id="connectionDataAt">尚未同步</strong></div><div class="connection-row"><span>自动重连</span><strong id="connectionRetry">已启用</strong></div></div><p id="connectionNote" class="connection-note">连接正常时无需任何手动操作。</p></section><section id="managementSheet" class="management-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="managementTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="managementTitle">设置与权限</h2><button id="closeManagement" class="ghost" type="button">关闭</button></div><p class="sheet-copy">只显示 Mac Runner 实际公开的设置与能力，不会在手机端伪造或修改。</p><div id="managementContent" class="management-grid"><div class="management-row"><span>目录</span><strong>正在加载</strong></div></div><p id="managementNote" class="management-note">模型目录会按需加载。</p></section><section id="renameSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="renameTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="renameTitle">重命名任务</h2><button id="closeRename" class="ghost" type="button">关闭</button></div><form id="renameForm" class="rename-form"><div class="field"><label for="renameInput">任务名称</label><input id="renameInput" maxlength="80" required></div><div id="renameFeedback" class="feedback" role="status"></div><div class="sheet-actions"><button id="cancelRename" type="button">取消</button><button id="saveRename" class="primary" type="submit">保存</button></div></form></section><section id="reviewSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="reviewTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="reviewTitle">开始代码审查</h2><button id="closeReview" class="ghost" type="button">关闭</button></div><form id="reviewForm" class="rename-form"><div class="field"><label for="reviewType">审查范围</label><select id="reviewType"><option value="uncommittedChanges">未提交更改</option><option value="baseBranch">与基准分支比较</option></select></div><div id="reviewBranchField" class="field hidden"><label for="reviewBranch">基准分支</label><input id="reviewBranch" maxlength="255" placeholder="例如 origin/main"></div><div id="reviewFeedback" class="feedback" role="status">审查会在当前任务中启动新的 Turn。</div><div class="sheet-actions"><button id="cancelReview" type="button">取消</button><button id="startReview" class="primary" type="submit">开始审查</button></div></form></section><section id="resourceSheet" class="resource-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="resourceTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="resourceTitle">项目资源</h2><button id="closeResource" class="ghost" type="button">关闭</button></div><p class="sheet-copy">首屏只加载摘要；文件和 Diff 内容均按需分块持续加载。</p><div class="resource-tabs" role="tablist"><button id="resourceFilesTab" type="button" role="tab" aria-selected="true">项目文件</button><button id="resourceDiffTab" type="button" role="tab" aria-selected="false">Git Diff</button><button id="resourceDiagnosticsTab" type="button" role="tab" aria-selected="false">固定诊断</button></div><div id="resourceToolbar" class="resource-toolbar"><button id="resourceBack" type="button">上一级</button><div id="resourcePath" class="resource-path">项目根目录</div></div><div id="resourceBody" class="resource-body" aria-live="polite"></div><div class="resource-footer"><div id="resourceStatus" class="resource-status" role="status">打开后按需读取，不会一次加载全部内容。</div><button id="resourceMore" type="button" class="hidden">继续加载</button></div></section>
 <script src="desktop.js"></script></body></html>"""
 
 
@@ -65,7 +70,10 @@ const q = id => document.getElementById(id);
 const API = '../api/desktop/v1';
 const STATUS_API = '../api/status';
 const SHANGHAI_TIME = new Intl.DateTimeFormat('zh-CN', {timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
-const state = {csrf: '', hosts: [], projects: [], threads: [], threadsCursor: 0, threadsHasMore: false, threadsLoading: false, selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', selectedEffort: '', detail: null, events: [], eventCursor: 0, eventSource: null, eventReconnectTimer: 0, eventReconnectAttempt: 0, overviewCursor: 0, overviewSource: null, overviewReconnectTimer: 0, overviewReconnectAttempt: 0, overviewStreamState: 'connecting', detailStreamState: 'idle', refreshGeneration: 0, mode: 'safe', loading: false, drafts: {}, pendingCreate: null, createBusy: false, queueBusy: false, queueOpen: false, queueEditing: '', queueDrafts: {}, following: true, serverTimeMs: 0, serverTimeObservedAt: 0, lastOverviewFrameAt: 0, lastDetailFrameAt: 0, lastDataEventAt: '', overviewError: '', streamFailures: new Set(), detailReloadTimer: 0, overviewReconcileTimer: 0, newTaskReturnFocus: null, connectionReturnFocus: null, historyTurns: [], historyCursor: null, historyHasMore: false, historyLoading: false, historyRequestId: '', historyInitialized: false, historyError: '', searchQuery: '', searchResults: [], searchCursor: null, searchHasMore: false, searchLoading: false, searchRequestId: '', searchAppend: false, searchError: ''};
+const requestUiState = {selectedRef: '', returnFocus: null, busy: false};
+const state = {csrf: '', hosts: [], projects: [], threads: [], threadsCursor: 0, threadsHasMore: false, threadsLoading: false, selectedHost: '', selectedProject: 'all', selectedThread: '', selectedModel: '', selectedEffort: '', selectedCollaborationMode: '', detail: null, threadSettings: null, events: [], eventCursor: 0, eventSource: null, eventReconnectTimer: 0, eventReconnectAttempt: 0, overviewCursor: 0, overviewSource: null, overviewReconnectTimer: 0, overviewReconnectAttempt: 0, overviewStreamState: 'connecting', detailStreamState: 'idle', refreshGeneration: 0, mode: 'safe', loading: false, drafts: {}, pendingCreate: null, createBusy: false, settingsBusy: false, queueBusy: false, queueOpen: false, queueEditing: '', queueDrafts: {}, following: true, serverTimeMs: 0, serverTimeObservedAt: 0, lastOverviewFrameAt: 0, lastDetailFrameAt: 0, lastDataEventAt: '', overviewError: '', streamFailures: new Set(), detailReloadTimer: 0, overviewReconcileTimer: 0, newTaskReturnFocus: null, connectionReturnFocus: null, taskSettingsReturnFocus: null, historyTurns: [], historyCursor: null, historyHasMore: false, historyLoading: false, historyRequestId: '', historyInitialized: false, historyError: '', searchQuery: '', searchResults: [], searchCursor: null, searchHasMore: false, searchLoading: false, searchRequestId: '', searchAppend: false, searchError: '', taskSearchTimer: 0, taskSearchGeneration: 0, management: null, managementReturnFocus: null, renameReturnFocus: null, reviewReturnFocus: null, handledForks: new Set()};
+state.selectedPermission = '';
+const resourceUi = {returnFocus: null, tab: 'files', path: '', entries: [], cursor: null, hasMore: false, loading: false, pending: new Map(), file: null, chunks: [], diagnostic: null, diffSummary: null, diffFile: null, diffChunks: [], error: ''};
 
 function requestId() {
   const bytes = new Uint8Array(16);
@@ -264,6 +272,29 @@ function populateEffortOptions(select, modelId, {detail = null, value = ''} = {}
   return efforts.length > 0;
 }
 
+function collaborationModeCatalog() {
+  return Array.isArray(currentHost()?.collaboration_modes) ? currentHost().collaboration_modes : [];
+}
+
+function populateCollaborationModes(select, {value = '', includeInherit = true} = {}) {
+  const modes = collaborationModeCatalog();
+  select.replaceChildren();
+  if (includeInherit) {
+    const inherit = document.createElement('option');
+    inherit.value = '';
+    inherit.textContent = '沿用当前模式';
+    select.append(inherit);
+  }
+  for (const mode of modes) {
+    const option = document.createElement('option');
+    option.value = mode.id;
+    option.textContent = `${mode.label || mode.id}${mode.mode === 'plan' ? ' · 先规划' : ''}`;
+    select.append(option);
+  }
+  select.value = modes.some(mode => mode.id === value) ? value : '';
+  return modes.length > 0;
+}
+
 function renderNewTaskState() {
   syncCreateDraftHost();
   const projectSelect = q('newTaskProject');
@@ -305,11 +336,15 @@ function renderNewTaskState() {
   else if (!hasCapability('create_thread_v1')) q('newTaskFeedback').textContent = '当前 Runner 尚未提供 create_thread_v1，不能远程新建任务。';
   else q('newTaskFeedback').textContent = '当前主机没有可选项目，不能创建任务。';
   if (otherPending) q('newTaskFeedback').textContent = '另一台 Mac 的新建结果待确认，请切回原主机查看；当前草稿已保留。';
+  renderPermissionSelectors();
+  renderCollaborationModeSelectors();
+  if (pending?.body.permission_profile_id) q('newTaskPermission').value = pending.body.permission_profile_id;
+  if (pending?.body.collaboration_mode_id) q('newTaskCollaborationMode').value = pending.body.collaboration_mode_id;
   renderCreateAttachments();
 }
 
 function syncDialogBackground() {
-  const modalOpen = !q('newTaskSheet').classList.contains('hidden') || !q('connectionSheet').classList.contains('hidden') || q('projectPanel').classList.contains('open') || !q('imageDialog').classList.contains('hidden');
+  const modalOpen = !q('newTaskSheet').classList.contains('hidden') || !q('connectionSheet').classList.contains('hidden') || !q('managementSheet').classList.contains('hidden') || !q('taskSettingsSheet').classList.contains('hidden') || !q('renameSheet').classList.contains('hidden') || !q('reviewSheet').classList.contains('hidden') || !q('resourceSheet').classList.contains('hidden') || (q('requestSheet') && !q('requestSheet').classList.contains('hidden')) || q('projectPanel').classList.contains('open') || !q('imageDialog').classList.contains('hidden');
   document.querySelector('main.shell').inert = modalOpen;
   document.querySelector('nav.mobile-nav').inert = modalOpen;
 }
@@ -323,7 +358,7 @@ function setNewTaskOpen(open) {
   const wasOpen = !q('newTaskSheet').classList.contains('hidden');
   if (open && !wasOpen) state.newTaskReturnFocus = document.activeElement;
   q('newTaskSheet').classList.toggle('hidden', !open);
-  if (open) setConnectionOpen(false);
+  if (open) { setConnectionOpen(false); q('managementSheet').classList.add('hidden'); q('taskSettingsSheet').classList.add('hidden'); q('renameSheet').classList.add('hidden'); if (q('requestSheet')) q('requestSheet').classList.add('hidden'); }
   q('modalBackdrop').classList.toggle('hidden', !open && !q('projectPanel').classList.contains('open') && q('connectionSheet').classList.contains('hidden'));
   syncDialogBackground();
   if (open) {
@@ -341,6 +376,11 @@ function setConnectionOpen(open) {
   q('connectionSheet').classList.toggle('hidden', !open);
   if (open) {
     q('newTaskSheet').classList.add('hidden');
+    q('managementSheet').classList.add('hidden');
+    q('taskSettingsSheet').classList.add('hidden');
+    q('renameSheet').classList.add('hidden');
+    q('reviewSheet').classList.add('hidden');
+    if (q('requestSheet')) q('requestSheet').classList.add('hidden');
     setProjectsOpen(false);
     renderFreshness();
     window.setTimeout(() => q('closeConnection').focus(), 0);
@@ -351,6 +391,452 @@ function setConnectionOpen(open) {
     restoreFocus(state.connectionReturnFocus);
     state.connectionReturnFocus = null;
   }
+}
+
+async function setManagementOpen(open) {
+  const wasOpen = !q('managementSheet').classList.contains('hidden');
+  if (open && !wasOpen) state.managementReturnFocus = document.activeElement;
+  q('managementSheet').classList.toggle('hidden', !open);
+  if (open) {
+    q('newTaskSheet').classList.add('hidden');
+    q('connectionSheet').classList.add('hidden');
+    q('taskSettingsSheet').classList.add('hidden');
+    q('renameSheet').classList.add('hidden');
+    if (q('requestSheet')) q('requestSheet').classList.add('hidden');
+    setProjectsOpen(false);
+    q('managementContent').replaceChildren();
+    const loadingRow = document.createElement('div'); loadingRow.className = 'management-row';
+    const loadingLabel = document.createElement('span'); loadingLabel.textContent = '目录';
+    const loadingValue = document.createElement('strong'); loadingValue.textContent = '正在加载';
+    loadingRow.append(loadingLabel, loadingValue); q('managementContent').append(loadingRow);
+    q('managementNote').textContent = '只读取当前 Runner 已公开的数据。';
+    try {
+      state.management = await jsonFetch(`${API}/management?host_ref=${encodeURIComponent(state.selectedHost)}`);
+      if (!q('managementSheet').classList.contains('hidden')) renderManagement();
+    } catch (error) {
+      q('managementContent').replaceChildren();
+      const row = document.createElement('div'); row.className = 'management-row';
+      const label = document.createElement('span'); label.textContent = '读取失败';
+      const value = document.createElement('strong'); value.textContent = error.message;
+      row.append(label, value); q('managementContent').append(row);
+    }
+    window.setTimeout(() => q('closeManagement').focus(), 0);
+  }
+  const otherOpen = !q('newTaskSheet').classList.contains('hidden') || !q('connectionSheet').classList.contains('hidden') || !q('managementSheet').classList.contains('hidden') || !q('taskSettingsSheet').classList.contains('hidden') || !q('renameSheet').classList.contains('hidden') || q('projectPanel').classList.contains('open') || !q('imageDialog').classList.contains('hidden');
+  q('modalBackdrop').classList.toggle('hidden', !open && !otherOpen);
+  syncDialogBackground();
+  if (!open && wasOpen) { restoreFocus(state.managementReturnFocus); state.managementReturnFocus = null; }
+}
+
+function renderManagement() {
+  const root = q('managementContent'); root.replaceChildren();
+  const management = state.management || {};
+  const add = (label, value) => { const row = document.createElement('div'); row.className = 'management-row'; const left = document.createElement('span'); left.textContent = label; const right = document.createElement('strong'); right.textContent = value; row.append(left, right); root.append(row); };
+  const feature = management.features || {};
+  add('任务改名', feature.rename?.available ? '可用' : 'Runner 更新后可用');
+  add('任务置顶', feature.pin?.available ? '可用' : 'Runner 更新后可用');
+  add('派生任务', feature.fork?.available ? '可用' : 'Runner 更新后可用');
+  add('代码审查', feature.review?.available ? '可用' : 'Runner 更新后可用');
+  add('Git Diff', feature.git_diff?.available ? '可用 · 按需分页' : 'Runner 更新后可用');
+  add('全局搜索', feature.global_search?.available ? '已启用 · 已同步数据' : '不可用');
+  add('模型目录', `${(management.models || []).length} 个模型`);
+  const settings = management.settings;
+  if (settings) for (const [key, value] of Object.entries(settings)) add(`设置 · ${key}`, value || '未设置');
+  else add('有效设置', 'Runner 更新后可查看');
+  const profiles = management.permission_profiles;
+  if (profiles) for (const profile of profiles) add(`权限 · ${profile.label}`, 'Runner 已允许');
+  else add('权限目录', 'Runner 更新后可查看');
+  q('managementNote').textContent = '这是只读目录；缺失能力会明确显示，不会假装设置成功。';
+}
+
+function collaborationModeReason(value) {
+  return {
+    current_mode_unavailable: 'Mac 重启或普通同步后无法确认当前模式',
+    active_turn_in_progress: '任务正在运行，请结束当前 Turn 后再修改',
+    snapshot_refresh_required: '需要等待 Mac 刷新任务状态',
+    runner_offline: 'Mac Runner 当前离线',
+    runner_update_required: 'Runner 更新后可用',
+  }[value] || '当前模式不可编辑';
+}
+
+function renderTaskSettings() {
+  const settings = state.threadSettings;
+  const current = settings?.current || {};
+  const update = settings?.features?.update || {available: false, reason: 'runner_update_required'};
+  const select = q('taskCollaborationMode');
+  const selected = select.value;
+  populateCollaborationModes(select, {value: selected || current.id || ''});
+  const currentText = current.id ? `Mac 已确认：${current.label || current.id}` : collaborationModeReason(current.reason || 'current_mode_unavailable');
+  q('taskSettingsState').textContent = currentText;
+  q('taskSettingsState').className = `task-settings-state${current.id ? '' : ' warning'}`;
+  select.disabled = state.settingsBusy || !update.available;
+  q('saveTaskSettings').disabled = state.settingsBusy || !update.available || !select.value || select.value === current.id;
+  q('taskSettingsFeedback').textContent = update.available ? '保存后等待 Mac 精确确认；结果未知时不会自动重发。' : collaborationModeReason(update.reason);
+}
+
+async function setTaskSettingsOpen(open) {
+  const wasOpen = !q('taskSettingsSheet').classList.contains('hidden');
+  if (open && !wasOpen) state.taskSettingsReturnFocus = document.activeElement;
+  q('taskSettingsSheet').classList.toggle('hidden', !open);
+  if (open) {
+    q('taskMenu').open = false;
+    q('newTaskSheet').classList.add('hidden');
+    q('connectionSheet').classList.add('hidden');
+    q('managementSheet').classList.add('hidden');
+    q('renameSheet').classList.add('hidden');
+    q('reviewSheet').classList.add('hidden');
+    q('resourceSheet').classList.add('hidden');
+    state.threadSettings = null;
+    q('taskSettingsState').textContent = '正在读取当前模式。';
+    q('taskSettingsFeedback').textContent = '';
+    q('saveTaskSettings').disabled = true;
+    try {
+      state.threadSettings = await jsonFetch(`${API}/threads/${encodeURIComponent(state.selectedThread)}/settings`);
+      if (!q('taskSettingsSheet').classList.contains('hidden')) renderTaskSettings();
+    } catch (error) {
+      q('taskSettingsState').textContent = error.message;
+      q('taskSettingsState').className = 'task-settings-state warning';
+    }
+    window.setTimeout(() => q('closeTaskSettings').focus(), 0);
+  }
+  q('modalBackdrop').classList.toggle('hidden', !open);
+  syncDialogBackground();
+  if (!open && wasOpen) { restoreFocus(state.taskSettingsReturnFocus); state.taskSettingsReturnFocus = null; }
+}
+
+function setRenameOpen(open) {
+  const wasOpen = !q('renameSheet').classList.contains('hidden');
+  if (open && !wasOpen) state.renameReturnFocus = document.activeElement;
+  q('renameSheet').classList.toggle('hidden', !open);
+  if (open) {
+    q('taskMenu').open = false;
+    q('renameInput').value = state.detail?.title || '';
+    q('renameFeedback').textContent = hasCapability('thread_rename_v1') ? '保存后等待 Mac 确认。' : '当前 Runner 尚未提供重命名能力。';
+    q('saveRename').disabled = !writeAvailable() || !hasCapability('thread_rename_v1');
+    window.setTimeout(() => { q('renameInput').focus(); q('renameInput').select(); }, 0);
+  }
+  q('modalBackdrop').classList.toggle('hidden', !open);
+  syncDialogBackground();
+  if (!open && wasOpen) { restoreFocus(state.renameReturnFocus); state.renameReturnFocus = null; }
+}
+
+function setReviewOpen(open) {
+  const wasOpen = !q('reviewSheet').classList.contains('hidden');
+  if (open && !wasOpen) state.reviewReturnFocus = document.activeElement;
+  q('reviewSheet').classList.toggle('hidden', !open);
+  if (open) {
+    q('taskMenu').open = false;
+    q('newTaskSheet').classList.add('hidden');
+    q('connectionSheet').classList.add('hidden');
+    q('managementSheet').classList.add('hidden');
+    q('renameSheet').classList.add('hidden');
+    q('resourceSheet').classList.add('hidden');
+    if (q('requestSheet')) q('requestSheet').classList.add('hidden');
+    q('reviewType').value = 'uncommittedChanges';
+    q('reviewBranch').value = '';
+    q('reviewBranchField').classList.add('hidden');
+    q('reviewFeedback').textContent = '审查会在当前任务中启动新的 Turn。';
+    q('startReview').disabled = !writeAvailable() || !hasCapability('review_inline_v1');
+    window.setTimeout(() => q('reviewType').focus(), 0);
+  }
+  q('modalBackdrop').classList.toggle('hidden', !open);
+  syncDialogBackground();
+  if (!open && wasOpen) { restoreFocus(state.reviewReturnFocus); state.reviewReturnFocus = null; }
+}
+
+function resetResourceView() {
+  if (resourceUi.file?.objectUrl) URL.revokeObjectURL(resourceUi.file.objectUrl);
+  resourceUi.path = '';
+  resourceUi.entries = [];
+  resourceUi.cursor = null;
+  resourceUi.hasMore = false;
+  resourceUi.loading = false;
+  resourceUi.pending.clear();
+  resourceUi.file = null;
+  resourceUi.chunks = [];
+  resourceUi.diagnostic = null;
+  resourceUi.diffSummary = null;
+  resourceUi.diffFile = null;
+  resourceUi.diffChunks = [];
+  resourceUi.error = '';
+}
+
+function setResourceOpen(open) {
+  const sheet = q('resourceSheet');
+  const wasOpen = !sheet.classList.contains('hidden');
+  if (open && !wasOpen) resourceUi.returnFocus = document.activeElement;
+  sheet.classList.toggle('hidden', !open);
+  if (open) {
+    q('taskMenu').open = false;
+    q('newTaskSheet').classList.add('hidden');
+    q('connectionSheet').classList.add('hidden');
+    q('managementSheet').classList.add('hidden');
+    q('renameSheet').classList.add('hidden');
+    q('reviewSheet').classList.add('hidden');
+    if (q('requestSheet')) q('requestSheet').classList.add('hidden');
+    resetResourceView();
+    resourceUi.tab = hasCapability('file_browse_v1') ? 'files' : hasCapability('git_diff_v1') ? 'diff' : 'diagnostics';
+    renderResources();
+    if (resourceUi.tab === 'files') void requestResourceList('');
+    if (resourceUi.tab === 'diff') void requestDiffSummary();
+    window.setTimeout(() => q('closeResource').focus(), 0);
+  }
+  q('modalBackdrop').classList.toggle('hidden', !open);
+  syncDialogBackground();
+  if (!open && wasOpen) {
+    restoreFocus(resourceUi.returnFocus);
+    resourceUi.returnFocus = null;
+  }
+}
+
+function resourceCapabilities() {
+  return {files: hasCapability('file_browse_v1'), artifacts: hasCapability('artifact_read_v1'), diff: hasCapability('git_diff_v1'), diagnostics: hasCapability('fixed_diagnostics_v1')};
+}
+
+function setResourceTab(tab) {
+  if (!['files', 'diff', 'diagnostics'].includes(tab) || resourceUi.tab === tab) return;
+  resourceUi.tab = tab;
+  resetResourceView();
+  resourceUi.tab = tab;
+  renderResources();
+  if (tab === 'files' && resourceCapabilities().files) void requestResourceList('');
+  if (tab === 'diff' && resourceCapabilities().diff) void requestDiffSummary();
+}
+
+async function submitResource(route, body, context) {
+  if (!state.detail || resourceUi.loading) return;
+  const request = requestId();
+  const threadRef = state.detail.thread_ref;
+  const document = {request_id: request, thread_revision: state.detail.thread_revision, ...body};
+  resourceUi.pending.set(request, context);
+  resourceUi.loading = true;
+  resourceUi.error = '';
+  renderResources();
+  try {
+    const result = await jsonFetch(`${API}/threads/${encodeURIComponent(threadRef)}/${route}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(document)});
+    if (!['pending', 'submitted', 'accepted', 'confirmed'].includes(result.state)) {
+      resourceUi.pending.delete(request);
+      resourceUi.loading = false;
+      resourceUi.error = result.state === 'unknown' ? '结果暂时无法确认；不会自动重发，请重新打开抽屉核对。' : `请求未完成：${result.error_code || result.state || 'unknown'}`;
+      renderResources();
+    }
+  } catch (error) {
+    resourceUi.pending.delete(request);
+    resourceUi.loading = false;
+    resourceUi.error = `${error.message}。不会自动重发。`;
+    renderResources();
+  }
+}
+
+function requestResourceList(path, {append = false} = {}) {
+  if (!resourceCapabilities().files) return;
+  if (!append) {
+    if (resourceUi.file?.objectUrl) URL.revokeObjectURL(resourceUi.file.objectUrl);
+    resourceUi.file = null;
+    resourceUi.chunks = [];
+    resourceUi.entries = [];
+    resourceUi.cursor = null;
+    resourceUi.hasMore = false;
+  }
+  void submitResource('files/list', {relative_path: path, limit: 100, ...(append && resourceUi.cursor ? {cursor: resourceUi.cursor} : {})}, {type: 'list', path, append});
+}
+
+function openResourceEntry(entry) {
+  if (!state.detail || resourceUi.loading) return;
+  const relativePath = resourceUi.path ? `${resourceUi.path}/${entry.name}` : entry.name;
+  if (entry.kind === 'directory') {
+    requestResourceList(relativePath);
+    return;
+  }
+  if (entry.kind !== 'file' || entry.readable !== true) return;
+  const kind = entry.ref_kind === 'artifact' ? 'artifact' : 'file';
+  if (kind === 'artifact' && !resourceCapabilities().artifacts) return;
+  void submitResource('files/open', {relative_path: relativePath, file_kind: kind}, {type: 'open', relativePath, kind});
+}
+
+function requestResourceChunk() {
+  const file = resourceUi.file;
+  if (!file || resourceUi.loading || file.nextOffset === null) return;
+  const limit = file.kind === 'file' ? 32 * 1024 : 64 * 1024;
+  void submitResource('files/read', {file_ref: file.ref, offset: file.nextOffset, limit}, {type: 'read', ref: file.ref});
+}
+
+function runDiagnostic(diagnosticId) {
+  if (!resourceCapabilities().diagnostics || resourceUi.loading) return;
+  resourceUi.diagnostic = null;
+  void submitResource('diagnostics/run', {diagnostic_id: diagnosticId}, {type: 'diagnostic', diagnosticId});
+}
+
+function requestDiffSummary() {
+  if (!resourceCapabilities().diff || resourceUi.loading) return;
+  resourceUi.diffSummary = null;
+  resourceUi.diffFile = null;
+  resourceUi.diffChunks = [];
+  void submitResource('diff/summary', {limit: 100}, {type: 'diff-summary'});
+}
+
+function openDiffEntry(entry) {
+  if (!resourceCapabilities().diff || resourceUi.loading || !entry?.diff_ref) return;
+  resourceUi.diffFile = {...entry, nextCursor: null, complete: false, digest: ''};
+  resourceUi.diffChunks = [];
+  void submitResource('diff/read', {diff_ref: entry.diff_ref, limit: 32 * 1024}, {type: 'diff-read', diffRef: entry.diff_ref});
+}
+
+function requestDiffChunk() {
+  const file = resourceUi.diffFile;
+  if (!file || resourceUi.loading || file.complete || !file.nextCursor) return;
+  void submitResource('diff/read', {diff_ref: file.diff_ref, cursor: file.nextCursor, limit: 32 * 1024}, {type: 'diff-read', diffRef: file.diff_ref});
+}
+
+function applyResourceEvent(event) {
+  const payload = event?.payload || {};
+  const pending = resourceUi.pending.get(payload.request_id);
+  if (!pending) return;
+  resourceUi.pending.delete(payload.request_id);
+  resourceUi.loading = resourceUi.pending.size > 0;
+  const kind = String(event.event_kind || '');
+  if (kind.endsWith('.error')) {
+    resourceUi.error = `读取失败：${payload.error_code || 'unknown'}`;
+    renderResources();
+    return;
+  }
+  if (kind === 'file.list' && pending.type === 'list' && payload.relative_path === pending.path) {
+    resourceUi.path = payload.relative_path || '';
+    resourceUi.entries = pending.append ? resourceUi.entries.concat(payload.entries || []) : (payload.entries || []);
+    resourceUi.cursor = payload.next_cursor || null;
+    resourceUi.hasMore = payload.has_more === true;
+  } else if (kind === 'file.opened' && pending.type === 'open') {
+    if (resourceUi.file?.objectUrl) URL.revokeObjectURL(resourceUi.file.objectUrl);
+    resourceUi.file = {...payload, nextOffset: 0, objectUrl: ''};
+    resourceUi.chunks = [];
+    window.setTimeout(requestResourceChunk, 0);
+  } else if (kind === 'file.chunk' && pending.type === 'read' && resourceUi.file?.ref === payload.ref) {
+    const expectedOffset = resourceUi.chunks.reduce((sum, chunk) => sum + number(chunk.chunk_bytes), 0);
+    if (payload.mime_type !== resourceUi.file.mime_type || payload.offset !== expectedOffset) {
+      resourceUi.error = '读取分块与当前文件不一致；已停止加载，不会自动重试。';
+      renderResources();
+      return;
+    }
+    resourceUi.chunks.push(payload);
+    resourceUi.file.nextOffset = payload.next_offset;
+    if (payload.next_offset === null && resourceUi.file.kind === 'artifact') buildArtifactPreview();
+    else if (payload.next_offset !== null) window.setTimeout(requestResourceChunk, 0);
+  } else if (kind === 'diagnostic.result' && pending.type === 'diagnostic') {
+    resourceUi.diagnostic = payload;
+  } else if (kind === 'diff.summary' && pending.type === 'diff-summary') {
+    resourceUi.diffSummary = payload;
+    resourceUi.diffFile = null;
+    resourceUi.diffChunks = [];
+  } else if (kind === 'diff.chunk' && pending.type === 'diff-read' && pending.diffRef === payload.diff_ref && resourceUi.diffFile?.diff_ref === payload.diff_ref) {
+    if (resourceUi.diffFile.digest && resourceUi.diffFile.digest !== payload.diff_digest) {
+      resourceUi.error = '工作区在读取期间发生变化；请返回并重新加载 Diff 摘要。';
+      renderResources();
+      return;
+    }
+    resourceUi.diffFile = {...resourceUi.diffFile, relative_path: payload.relative_path, status: payload.status, digest: payload.diff_digest, nextCursor: payload.next_cursor || null, complete: payload.complete === true};
+    resourceUi.diffChunks.push(payload.content || '');
+  }
+  renderResources();
+}
+
+function bytesLabel(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size)) return '';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+function buildArtifactPreview() {
+  const file = resourceUi.file;
+  if (!file || file.kind !== 'artifact' || file.nextOffset !== null || file.objectUrl) return;
+  try {
+    const parts = resourceUi.chunks.map(chunk => {
+      const binary = atob(chunk.data_base64 || '');
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    });
+    file.objectUrl = URL.createObjectURL(new Blob(parts, {type: file.mime_type}));
+  } catch (_error) {
+    resourceUi.error = '产物预览生成失败；可关闭后重新打开核对。';
+  }
+}
+
+function renderResources() {
+  const capabilities = resourceCapabilities();
+  q('resourceFilesTab').setAttribute('aria-selected', String(resourceUi.tab === 'files'));
+  q('resourceDiffTab').setAttribute('aria-selected', String(resourceUi.tab === 'diff'));
+  q('resourceDiagnosticsTab').setAttribute('aria-selected', String(resourceUi.tab === 'diagnostics'));
+  q('resourceFilesTab').disabled = !capabilities.files;
+  q('resourceDiffTab').disabled = !capabilities.diff;
+  q('resourceDiagnosticsTab').disabled = !capabilities.diagnostics;
+  q('resourceToolbar').classList.toggle('hidden', resourceUi.tab === 'diagnostics');
+  q('resourcePath').textContent = resourceUi.tab === 'diff' ? resourceUi.diffFile?.relative_path || '工作区变更' : resourceUi.file?.relative_path || resourceUi.path || '项目根目录';
+  q('resourceBack').disabled = resourceUi.loading || (resourceUi.tab === 'diff' ? !resourceUi.diffFile : !resourceUi.file && !resourceUi.path);
+  const root = q('resourceBody');
+  root.replaceChildren();
+  q('resourceMore').classList.add('hidden');
+  q('resourceMore').disabled = resourceUi.loading;
+  if (resourceUi.tab === 'diff') {
+    if (resourceUi.diffFile) {
+      const summary = document.createElement('div'); summary.className = 'resource-summary';
+      const title = document.createElement('strong'); title.textContent = resourceUi.diffFile.relative_path;
+      const meta = document.createElement('span'); meta.textContent = `${resourceUi.diffFile.status || 'modified'} · ${resourceUi.diffFile.digest || '正在计算摘要'}`;
+      summary.append(title, meta);
+      const output = document.createElement('pre'); output.className = 'resource-output'; output.textContent = resourceUi.diffChunks.join('') || '正在读取第一块 Diff…';
+      root.append(summary, output);
+      if (!resourceUi.diffFile.complete && resourceUi.diffFile.nextCursor) { q('resourceMore').classList.remove('hidden'); q('resourceMore').textContent = '继续加载 Diff'; }
+    } else if (resourceUi.diffSummary) {
+      const summary = document.createElement('div'); summary.className = 'resource-summary';
+      const title = document.createElement('strong'); title.textContent = `${number(resourceUi.diffSummary.file_count)} 个变更文件`;
+      const meta = document.createElement('span'); meta.textContent = `${resourceUi.diffSummary.workspace_digest}${resourceUi.diffSummary.has_more ? ' · 仅显示前 100 个' : ''}`;
+      summary.append(title, meta); root.append(summary);
+      const list = document.createElement('div'); list.className = 'resource-list';
+      for (const entry of resourceUi.diffSummary.files || []) { const button = document.createElement('button'); button.type = 'button'; button.className = 'resource-entry'; const copy = document.createElement('div'); const name = document.createElement('div'); name.className = 'resource-entry-title'; name.textContent = entry.relative_path; const details = document.createElement('div'); details.className = 'resource-entry-meta'; const lines = entry.binary ? '二进制文件' : `+${number(entry.added_lines)} / -${number(entry.deleted_lines)}`; details.textContent = `${entry.status} · ${lines}`; copy.append(name, details); const arrow = document.createElement('span'); arrow.textContent = '查看'; button.append(copy, arrow); button.disabled = resourceUi.loading; button.onclick = () => openDiffEntry(entry); list.append(button); }
+      if (!(resourceUi.diffSummary.files || []).length) { const empty = document.createElement('div'); empty.className = 'resource-empty'; empty.textContent = '当前工作区没有可显示的变更。'; list.append(empty); }
+      root.append(list);
+    } else {
+      const empty = document.createElement('div'); empty.className = 'resource-empty'; empty.textContent = resourceUi.loading ? '正在读取变更文件统计…' : '打开后只读取文件统计，不会预先加载 Diff 内容。'; root.append(empty);
+    }
+  } else if (resourceUi.tab === 'diagnostics') {
+    if (resourceUi.diagnostic) {
+      const summary = document.createElement('div'); summary.className = 'resource-summary';
+      const title = document.createElement('strong'); title.textContent = resourceUi.diagnostic.title || resourceUi.diagnostic.diagnostic_id;
+      const meta = document.createElement('span'); meta.textContent = `${statusText(resourceUi.diagnostic.status)} · ${number(resourceUi.diagnostic.duration_ms)} ms${resourceUi.diagnostic.output_truncated ? ' · 已按安全上限截断' : ''}`;
+      summary.append(title, meta);
+      const output = document.createElement('pre'); output.className = 'resource-output'; output.textContent = [resourceUi.diagnostic.stdout, resourceUi.diagnostic.stderr].filter(Boolean).join('\n') || '没有输出';
+      root.append(summary, output);
+    } else {
+      const list = document.createElement('div'); list.className = 'diagnostic-list';
+      const items = [['git_status', 'Git 状态', '分支、已跟踪与未跟踪文件'], ['git_diff_stat', '未提交变更统计', '只显示文件和行数统计'], ['git_diff_check', 'Diff 格式检查', '检查空白与格式错误'], ['git_recent_commits', '最近提交', '最近二十条提交摘要']];
+      for (const [id, titleText, description] of items) { const button = document.createElement('button'); button.type = 'button'; const strong = document.createElement('strong'); strong.textContent = titleText; const meta = document.createElement('div'); meta.className = 'resource-entry-meta'; meta.textContent = description; button.append(strong, meta); button.disabled = resourceUi.loading; button.onclick = () => runDiagnostic(id); list.append(button); }
+      root.append(list);
+    }
+  } else if (resourceUi.file) {
+    const summary = document.createElement('div'); summary.className = 'resource-summary';
+    const title = document.createElement('strong'); title.textContent = resourceUi.file.relative_path;
+    const meta = document.createElement('span'); meta.textContent = `${resourceUi.file.kind === 'artifact' ? '产物' : '文本'} · ${resourceUi.file.mime_type} · ${bytesLabel(resourceUi.file.size)}`;
+    summary.append(title, meta); root.append(summary);
+    if (resourceUi.file.kind === 'file') {
+      const output = document.createElement('pre'); output.className = 'resource-output'; output.textContent = resourceUi.chunks.map(chunk => chunk.text || '').join('') || '正在读取第一块…'; root.append(output);
+    } else if (resourceUi.file.objectUrl) {
+      const preview = document.createElement('div'); preview.className = 'resource-preview';
+      if (resourceUi.file.mime_type.startsWith('image/')) { const image = document.createElement('img'); image.src = resourceUi.file.objectUrl; image.alt = resourceUi.file.relative_path; preview.append(image); }
+      else if (resourceUi.file.mime_type === 'application/pdf') { const object = document.createElement('object'); object.data = resourceUi.file.objectUrl; object.type = 'application/pdf'; object.setAttribute('aria-label', `${resourceUi.file.relative_path} PDF 预览`); preview.append(object); }
+      const download = document.createElement('a'); download.className = 'resource-download'; download.href = resourceUi.file.objectUrl; download.download = resourceUi.file.relative_path.split('/').pop() || 'artifact'; download.textContent = resourceUi.file.mime_type === 'application/pdf' || resourceUi.file.mime_type.startsWith('image/') ? '下载原文件' : '下载产物'; preview.append(download); root.append(preview);
+    } else {
+      const output = document.createElement('pre'); output.className = 'resource-output'; output.textContent = resourceUi.file.nextOffset === null ? `产物已按 ${resourceUi.chunks.length} 个分块读取完成。` : `正在持续加载：${resourceUi.chunks.reduce((sum, chunk) => sum + number(chunk.chunk_bytes), 0)} / ${number(resourceUi.file.size)} 字节。`; root.append(output);
+    }
+  } else {
+    const list = document.createElement('div'); list.className = 'resource-list';
+    for (const entry of resourceUi.entries) { const button = document.createElement('button'); button.type = 'button'; button.className = 'resource-entry'; const copy = document.createElement('div'); const title = document.createElement('div'); title.className = 'resource-entry-title'; title.textContent = `${entry.kind === 'directory' ? '文件夹 · ' : ''}${entry.name}`; const meta = document.createElement('div'); meta.className = 'resource-entry-meta'; meta.textContent = entry.kind === 'file' ? `${entry.ref_kind === 'artifact' ? '产物' : entry.readable ? '文本' : '不可读取'}${Number.isFinite(Number(entry.size)) ? ` · ${bytesLabel(entry.size)}` : ''}` : entry.kind === 'directory' ? '打开文件夹' : '安全策略不允许读取'; copy.append(title, meta); const arrow = document.createElement('span'); arrow.textContent = entry.readable ? '打开' : ''; button.append(copy, arrow); button.disabled = resourceUi.loading || (entry.kind !== 'directory' && entry.readable !== true); button.onclick = () => openResourceEntry(entry); list.append(button); }
+    if (!resourceUi.entries.length) { const empty = document.createElement('div'); empty.className = 'resource-empty'; empty.textContent = resourceUi.loading ? '正在读取目录…' : '这个目录没有可显示的条目。'; list.append(empty); }
+    root.append(list);
+    if (resourceUi.hasMore) { q('resourceMore').classList.remove('hidden'); q('resourceMore').textContent = '加载更多文件'; }
+  }
+  q('resourceStatus').className = `resource-status${resourceUi.error ? ' error' : ''}`;
+  q('resourceStatus').textContent = resourceUi.error || (resourceUi.loading ? '正在通过 SSE 接收结果…' : resourceUi.tab === 'diff' && resourceUi.diffFile && !resourceUi.diffFile.complete ? 'Diff 每次最多加载 32 KiB；点击按钮继续。' : resourceUi.file && resourceUi.file.nextOffset !== null ? '分块间隔加载中，页面会持续更新。' : '所有内容均按需分块读取；不会加载完整项目或运行任意命令。');
 }
 
 function setProjectsOpen(open) {
@@ -447,11 +933,10 @@ function renderProjects() {
 
 function filteredThreads() {
   const status = q('statusFilter').value;
-  const query = q('threadSearch').value.trim().toLocaleLowerCase('zh-CN');
   return state.threads.filter(thread => {
     if (state.selectedProject !== 'all' && thread.project_ref !== state.selectedProject) return false;
     if (status !== 'all' && thread.status !== status) return false;
-    return !query || text(thread.title).toLocaleLowerCase('zh-CN').includes(query);
+    return true;
   });
 }
 
@@ -459,7 +944,8 @@ function renderThreads() {
   const list = q('threadList');
   list.replaceChildren();
   const rank = {active: 0, recovery_required: 1, failed: 1, protocol_degraded: 2, idle: 3, notLoaded: 4, archived: 5};
-  const threads = filteredThreads().sort((left, right) => (rank[left.status] ?? 9) - (rank[right.status] ?? 9) || new Date(right.updated_at || 0) - new Date(left.updated_at || 0));
+  const searching = Boolean(q('threadSearch').value.trim());
+  const threads = filteredThreads().sort((left, right) => number(right.pinned) - number(left.pinned) || (rank[left.status] ?? 9) - (rank[right.status] ?? 9) || new Date(right.updated_at || 0) - new Date(left.updated_at || 0));
   const total = state.projects.reduce((sum, project) => sum + number(project.counts?.total), 0) || state.threads.length;
   q('threadCount').textContent = total > state.threads.length ? `${state.threads.length}/${total}` : `${threads.length}`;
   for (const thread of threads) {
@@ -476,6 +962,7 @@ function renderThreads() {
     status.className = `thread-state ${statusKind(thread.status)}`.trim();
     status.textContent = statusText(thread.status);
     heading.append(title, status);
+    if (thread.pinned === true) heading.append(badge('已置顶'));
     const meta = document.createElement('div');
     meta.className = 'thread-meta';
     const project = state.projects.find(project => project.project_ref === thread.project_ref);
@@ -490,13 +977,13 @@ function renderThreads() {
   if (!threads.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
-    empty.textContent = state.threads.length ? '这里暂时没有符合条件的任务。' : '正在等待 Mac 同步任务。';
+    empty.textContent = searching ? '没有找到匹配的已同步任务。' : state.threads.length ? '这里暂时没有符合条件的任务。' : '正在等待 Mac 同步任务。';
     list.append(empty);
   }
   q('loadMoreThreads').classList.toggle('hidden', !state.threadsHasMore);
   q('loadMoreThreads').disabled = state.threadsLoading;
   q('loadMoreThreads').textContent = state.threadsLoading ? '正在加载…' : '加载更多任务';
-  q('threadListStatus').textContent = state.threadsLoading ? '正在异步加载下一页' : state.threadsHasMore ? `已加载 ${state.threads.length} 个，继续向下按需加载` : `已加载 ${state.threads.length} 个任务`;
+  q('threadListStatus').textContent = state.threadsLoading ? '正在异步加载下一页' : state.threadsHasMore ? `已加载 ${state.threads.length} 个，继续向下按需加载` : searching ? `已搜索 ${state.threads.length} 个匹配任务 · 范围为已同步数据` : `已加载 ${state.threads.length} 个任务`;
 }
 
 function renderDetail() {
@@ -510,11 +997,13 @@ function renderDetail() {
   q('detailPreview').textContent = text(snapshot.preview, detail.status === 'active' ? 'Codex 正在处理这个任务' : '可以继续发送消息');
   const meta = q('detailMeta');
   meta.replaceChildren(badge(statusText(detail.status), statusKind(detail.status)), badge(`更新于 ${formatTime(detail.updated_at)}`));
+  if (detail.pinned === true || snapshot.pinned === true) meta.append(badge('已置顶'));
   const sync = badge('正在同步', 'sync-badge');
   sync.id = 'detailSyncState';
   meta.append(sync);
   if (snapshot.history_incomplete || state.historyHasMore) meta.append(badge('可继续加载较早消息', 'warn'));
   renderNotice(detail);
+  renderPendingRequests();
   renderDeliveryStatus(detail);
   renderActionState(detail);
   renderHistoryControls();
@@ -582,6 +1071,266 @@ function hostCapabilities() { return new Set(currentHost()?.capabilities || []);
 function hasCapability(value) { return hostCapabilities().has(value); }
 function writeAvailable() { return currentHost()?.write_available === true; }
 
+function initPermissionUi() {
+  const makeField = (selectId, metaId, labelText) => {
+    const field = document.createElement('div'); field.className = 'field';
+    const label = document.createElement('label'); label.htmlFor = selectId; label.textContent = labelText;
+    const select = document.createElement('select'); select.id = selectId; select.disabled = true; select.setAttribute('aria-describedby', metaId);
+    const meta = document.createElement('div'); meta.id = metaId; meta.className = 'model-meta';
+    field.append(label, select, meta); return field;
+  };
+  q('advancedControls').querySelector('.advanced-grid').append(makeField('permissionSelect', 'permissionMeta', '权限 / 访问级别'));
+  q('advancedControls').querySelector('.advanced-grid').append(makeField('collaborationModeSelect', 'collaborationModeMeta', '计划模式'));
+  q('newTaskFeedback').before(makeField('newTaskPermission', 'newTaskPermissionMeta', '权限 / 访问级别'));
+  q('newTaskFeedback').before(makeField('newTaskCollaborationMode', 'newTaskCollaborationModeMeta', '计划模式'));
+  renderPermissionSelectors();
+  renderCollaborationModeSelectors();
+}
+
+function appendPermissionOptions(select, profiles) {
+  for (const profile of profiles) {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    option.textContent = profile.label || profile.id;
+    select.append(option);
+  }
+}
+
+function permissionReason(value) {
+  const labels = {
+    permission_profile_state_missing: '当前任务没有可验证的权限状态',
+    permission_profile_unsupported: '当前任务使用自定义权限',
+    permission_profile_state_mismatch: '权限档位与隔离状态不一致',
+    permission_profile_allowlist_missing: 'Runner 未配置可用权限档位',
+  };
+  return labels[value] || '当前权限状态不可编辑';
+}
+
+function renderPermissionSelectors(detail = state.detail) {
+  const supported = hasCapability('permission_profile_selection_v1');
+  const profile = detail?.snapshot?.permission_profile;
+  const currentOptions = Array.isArray(profile?.options) ? profile.options : [];
+  const currentSelect = q('permissionSelect');
+  const currentMeta = q('permissionMeta');
+  if (currentSelect && currentMeta) {
+    if (!supported || profile?.editable !== true || !currentOptions.some(option => option.id === state.selectedPermission)) state.selectedPermission = '';
+    currentSelect.replaceChildren();
+    const inherit = document.createElement('option'); inherit.value = ''; inherit.textContent = profile?.label ? `保持当前：${profile.label}` : '保持 Mac 当前权限'; currentSelect.append(inherit);
+    appendPermissionOptions(currentSelect, currentOptions);
+    currentSelect.value = state.selectedPermission;
+    const action = detail ? composerAction(detail) : null;
+    const safeAction = action === 'continue' || (action === 'steer' && state.mode === 'safe');
+    currentSelect.disabled = !supported || profile?.editable !== true || !safeAction || !writeAvailable();
+    if (!supported) currentMeta.textContent = 'Runner 更新并启用权限档位后可选择。';
+    else if (profile?.editable !== true) currentMeta.textContent = `${profile?.label || '权限状态不可用'}：${permissionReason(profile?.reason)}。`;
+    else if (!safeAction) currentMeta.textContent = '快速调整不允许修改权限；切换到安全调整后可收紧。';
+    else currentMeta.textContent = '仅对本次新 Turn 生效，只能保持或收紧当前权限。';
+  }
+  const createSelect = q('newTaskPermission');
+  const createMeta = q('newTaskPermissionMeta');
+  if (createSelect && createMeta) {
+    const profiles = Array.isArray(currentHost()?.permission_profiles) ? currentHost().permission_profiles : [];
+    const saved = imageState.createFields[state.selectedHost]?.permission || '';
+    const pendingPermission = state.pendingCreate?.body.host_ref === state.selectedHost ? state.pendingCreate.body.permission_profile_id : '';
+    const previous = supported ? pendingPermission || createSelect.value || saved : '';
+    createSelect.replaceChildren();
+    const inherit = document.createElement('option'); inherit.value = ''; inherit.textContent = '使用 Mac 默认权限'; createSelect.append(inherit);
+    appendPermissionOptions(createSelect, profiles);
+    createSelect.value = profiles.some(option => option.id === previous) ? previous : '';
+    const locked = state.pendingCreate?.body.host_ref === state.selectedHost;
+    createSelect.disabled = !supported || !profiles.length || !hostCanCreate() || Boolean(locked);
+    createMeta.textContent = supported && profiles.length ? '只能选择 Runner 预先允许的权限档位。' : 'Runner 未公开可选权限档位，将使用 Mac 默认值。';
+  }
+}
+
+function renderCollaborationModeSelectors(detail = state.detail) {
+  const supported = hasCapability('collaboration_mode_turn_v1') && hasCapability('collaboration_mode_catalog_v1');
+  const currentSelect = q('collaborationModeSelect');
+  const currentMeta = q('collaborationModeMeta');
+  if (currentSelect && currentMeta) {
+    const action = detail ? composerAction(detail) : null;
+    const safeAction = action === 'continue' || (action === 'steer' && state.mode === 'safe');
+    const available = populateCollaborationModes(currentSelect, {value: state.selectedCollaborationMode});
+    state.selectedCollaborationMode = currentSelect.value;
+    currentSelect.disabled = !supported || !available || !safeAction || !writeAvailable();
+    if (!supported || !available) currentMeta.textContent = 'Runner 更新并公开模式目录后可选择。';
+    else if (!safeAction) currentMeta.textContent = '快速调整保持当前 Turn，不能切换计划模式。';
+    else currentMeta.textContent = '仅对本次新 Turn 生效；不选择则沿用任务当前模式。';
+  }
+  const createSelect = q('newTaskCollaborationMode');
+  const createMeta = q('newTaskCollaborationModeMeta');
+  if (createSelect && createMeta) {
+    const saved = imageState.createFields[state.selectedHost]?.collaborationMode || '';
+    const pendingMode = state.pendingCreate?.body.host_ref === state.selectedHost ? state.pendingCreate.body.collaboration_mode_id : '';
+    const previous = supported ? pendingMode || createSelect.value || saved : '';
+    const available = populateCollaborationModes(createSelect, {value: previous});
+    const locked = state.pendingCreate?.body.host_ref === state.selectedHost;
+    createSelect.disabled = !supported || !available || !hostCanCreate() || Boolean(locked);
+    createMeta.textContent = supported && available ? '可直接以计划模式或默认模式开始新任务。' : 'Runner 未公开计划模式目录，将使用 Mac 默认值。';
+  }
+}
+
+function initRequestUi() {
+  const tray = document.createElement('section'); tray.id = 'requestTray'; tray.className = 'request-tray hidden'; tray.setAttribute('aria-live', 'polite');
+  q('detailNotice').insertAdjacentElement('afterend', tray);
+  const sheet = document.createElement('section'); sheet.id = 'requestSheet'; sheet.className = 'request-sheet hidden'; sheet.setAttribute('role', 'dialog'); sheet.setAttribute('aria-modal', 'true'); sheet.setAttribute('aria-labelledby', 'requestSheetTitle');
+  const handle = document.createElement('div'); handle.className = 'sheet-handle';
+  const head = document.createElement('div'); head.className = 'sheet-head';
+  const title = document.createElement('h2'); title.id = 'requestSheetTitle'; title.textContent = '待处理请求';
+  const close = document.createElement('button'); close.id = 'closeRequest'; close.type = 'button'; close.className = 'ghost'; close.textContent = '关闭'; close.onclick = () => setRequestOpen();
+  head.append(title, close);
+  const body = document.createElement('div'); body.id = 'requestSheetBody'; body.className = 'request-detail';
+  sheet.append(handle, head, body); document.body.append(sheet);
+}
+
+function pendingRequests() {
+  const values = state.detail?.snapshot?.pending_requests;
+  return Array.isArray(values) ? values : [];
+}
+
+function requestKindLabel(kind) {
+  return {command_approval: '命令审批', file_approval: '文件更改审批', permissions_approval: '额外权限审批', user_input: '需要你的回答', mcp_elicitation: '工具提问'}[kind] || '待处理请求';
+}
+
+function requestSafeSummary(request) {
+  if (request.kind === 'command_approval') return 'Codex 请求执行一项命令。手机端不展示原始命令、终端路径或隐藏参数，请结合当前任务上下文决定。';
+  if (request.kind === 'permissions_approval') {
+    const permission = request.permission_summary || {};
+    return `${text(request.summary, '请求额外权限')}\n文件访问项：${number(permission.file_entry_count)} · 网络访问：${permission.network_requested ? '请求开启' : '未请求'}`;
+  }
+  if (request.kind === 'user_input') return `共有 ${(request.questions || []).length} 个问题需要回答。`;
+  return text(request.summary, requestKindLabel(request.kind));
+}
+
+function pendingResponseState(requestRef) {
+  const command = state.detail?.latest_command;
+  if (command?.action !== 'respond_request' || command.request_ref !== requestRef) return '';
+  return command.state || '';
+}
+
+function renderPendingRequests() {
+  const tray = q('requestTray'); if (!tray) return;
+  const requests = pendingRequests(); tray.replaceChildren(); tray.classList.toggle('hidden', !requests.length);
+  if (!requests.length) { if (!q('requestSheet').classList.contains('hidden')) setRequestOpen(); return; }
+  const head = document.createElement('div'); head.className = 'request-tray-head';
+  const title = document.createElement('h3'); title.textContent = `需要处理 · ${requests.length}`;
+  const status = badge('实时同步', 'warn'); head.append(title, status); tray.append(head);
+  const list = document.createElement('div'); list.className = 'request-list';
+  for (const request of requests) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'request-card';
+    const commandState = pendingResponseState(request.request_ref);
+    const uncertain = ['unknown', 'recovery_required'].includes(commandState);
+    const waiting = ['pending', 'submitted', 'accepted'].includes(commandState);
+    if (uncertain) button.classList.add('unknown');
+    const name = document.createElement('strong'); name.textContent = text(request.title, requestKindLabel(request.kind));
+    const summary = document.createElement('span'); summary.textContent = uncertain ? '上次响应结果未知，已禁止再次发送；等待 Mac 快照核对。' : waiting ? '响应已送往 Mac，正在等待读回确认。' : requestSafeSummary(request);
+    button.append(name, summary); button.disabled = requestUiState.busy;
+    button.onclick = () => setRequestOpen(request.request_ref);
+    list.append(button);
+  }
+  tray.append(list);
+}
+
+function setRequestOpen(requestRef = '') {
+  const sheet = q('requestSheet'); if (!sheet) return;
+  const open = Boolean(requestRef);
+  const wasOpen = !sheet.classList.contains('hidden');
+  if (open && !wasOpen) requestUiState.returnFocus = document.activeElement;
+  requestUiState.selectedRef = requestRef;
+  sheet.classList.toggle('hidden', !open);
+  if (open) {
+    q('newTaskSheet').classList.add('hidden'); q('connectionSheet').classList.add('hidden'); q('managementSheet').classList.add('hidden'); q('renameSheet').classList.add('hidden');
+    renderRequestSheet(); window.setTimeout(() => q('closeRequest').focus(), 0);
+  }
+  const otherOpen = !q('newTaskSheet').classList.contains('hidden') || !q('connectionSheet').classList.contains('hidden') || !q('managementSheet').classList.contains('hidden') || !q('renameSheet').classList.contains('hidden') || q('projectPanel').classList.contains('open') || !q('imageDialog').classList.contains('hidden');
+  q('modalBackdrop').classList.toggle('hidden', !open && !otherOpen);
+  syncDialogBackground();
+  if (!open && wasOpen) { restoreFocus(requestUiState.returnFocus); requestUiState.returnFocus = null; }
+}
+
+function renderRequestSheet() {
+  const root = q('requestSheetBody'); root.replaceChildren();
+  const request = pendingRequests().find(item => item.request_ref === requestUiState.selectedRef);
+  if (!request) { const message = document.createElement('p'); message.className = 'muted'; message.textContent = '这项请求已经处理或失效。'; root.append(message); return; }
+  q('requestSheetTitle').textContent = text(request.title, requestKindLabel(request.kind));
+  const summary = document.createElement('p'); summary.className = 'request-summary'; summary.textContent = requestSafeSummary(request); root.append(summary);
+  for (const question of request.questions || []) root.append(requestQuestionField(question));
+  const commandState = pendingResponseState(request.request_ref);
+  if (['unknown', 'recovery_required'].includes(commandState)) {
+    const warning = document.createElement('p'); warning.className = 'request-warning'; warning.textContent = '上次响应结果未知。系统不会自动或手动重放，只会等待 Mac 的后续快照确认。'; root.append(warning); return;
+  }
+  if (['pending', 'submitted', 'accepted'].includes(commandState)) {
+    const waiting = document.createElement('p'); waiting.className = 'muted'; waiting.textContent = '响应已送往 Mac，正在等待 SSE 推送读回确认。'; root.append(waiting); return;
+  }
+  const actions = document.createElement('div'); actions.className = 'request-decisions';
+  const labels = {accept: '允许', decline: '拒绝', cancel: '取消请求', submit: '提交答案'};
+  for (const decision of request.decisions || []) {
+    const button = document.createElement('button'); button.type = 'button'; button.textContent = labels[decision] || decision;
+    if (decision === 'accept' || decision === 'submit') button.className = 'primary';
+    if (decision === 'decline') button.className = 'danger';
+    button.disabled = requestUiState.busy || !writeAvailable() || !hasCapability('owner_request_response_v1');
+    button.onclick = () => void respondToPendingRequest(request, decision);
+    actions.append(button);
+  }
+  root.append(actions);
+}
+
+function requestQuestionField(question) {
+  const field = document.createElement('div'); field.className = 'request-question'; field.dataset.questionRef = question.question_ref; field.dataset.valueType = question.value_type || 'string'; field.dataset.required = question.required ? 'true' : 'false';
+  const title = document.createElement('h3'); title.textContent = text(question.header, '问题'); field.append(title);
+  if (question.question) { const copy = document.createElement('p'); copy.textContent = question.question; field.append(copy); }
+  if (question.secret) { const warning = document.createElement('div'); warning.className = 'request-warning'; warning.textContent = '此问题可能包含敏感信息，只能回到 Mac 上回答。'; field.append(warning); return field; }
+  const options = Array.isArray(question.options) ? question.options : [];
+  if (question.value_type === 'array' && options.length) {
+    for (const option of options) {
+      const label = document.createElement('label'); label.className = 'request-option';
+      const input = document.createElement('input'); input.type = 'checkbox'; input.value = option.label;
+      const copy = document.createElement('span'); copy.textContent = option.description ? `${option.label} · ${option.description}` : option.label;
+      label.append(input, copy); field.append(label);
+    }
+  } else if (question.value_type === 'boolean') {
+    const select = document.createElement('select'); select.className = 'request-answer';
+    for (const [value, label] of [['', '请选择'], ['true', '是'], ['false', '否']]) { const option = document.createElement('option'); option.value = value; option.textContent = label; select.append(option); }
+    field.append(select);
+  } else if (options.length) {
+    const select = document.createElement('select'); select.className = 'request-answer';
+    const empty = document.createElement('option'); empty.value = ''; empty.textContent = '请选择'; select.append(empty);
+    for (const option of options) { const node = document.createElement('option'); node.value = option.label; node.textContent = option.description ? `${option.label} · ${option.description}` : option.label; select.append(node); }
+    field.append(select);
+    if (question.allows_other) { const other = document.createElement('input'); other.className = 'request-other'; other.maxLength = 1000; other.placeholder = '或输入其他答案'; field.append(other); }
+  } else {
+    const input = document.createElement('input'); input.className = 'request-answer'; input.maxLength = 1000; input.inputMode = ['number', 'integer'].includes(question.value_type) ? 'decimal' : 'text'; input.placeholder = question.required ? '请输入答案' : '选填'; field.append(input);
+  }
+  return field;
+}
+
+function collectRequestAnswers() {
+  const answers = [];
+  for (const field of q('requestSheetBody').querySelectorAll('.request-question')) {
+    if (field.querySelector('.request-warning')) continue;
+    let values = Array.from(field.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
+    const other = field.querySelector('.request-other')?.value.trim();
+    const single = field.querySelector('.request-answer')?.value.trim();
+    if (other) values = [other]; else if (!values.length && single) values = field.dataset.valueType === 'array' ? single.split(',').map(value => value.trim()).filter(Boolean) : [single];
+    if (!values.length) { if (field.dataset.required === 'true') throw new Error('请完成所有必填问题'); continue; }
+    answers.push({question_ref: field.dataset.questionRef, answers: values});
+  }
+  return answers;
+}
+
+async function respondToPendingRequest(request, decision) {
+  if (requestUiState.busy) return;
+  let answers;
+  if (decision === 'submit') {
+    try { answers = collectRequestAnswers(); } catch (error) { const warning = document.createElement('p'); warning.className = 'request-warning'; warning.textContent = error.message; q('requestSheetBody').prepend(warning); return; }
+  }
+  requestUiState.busy = true; renderRequestSheet(); renderPendingRequests();
+  await submitAction('respond_request', {expected_turn_ref: request.turn_ref, request_ref: request.request_ref, decision, ...(answers ? {answers} : {})});
+  requestUiState.busy = false;
+  if (pendingRequests().some(item => item.request_ref === request.request_ref)) renderRequestSheet(); else setRequestOpen();
+  renderPendingRequests();
+}
+
 function renderActionState(detail) {
   const active = detail.status === 'active' && Boolean(detail.active_turn_ref);
   const blocked = !writeAvailable() || ['recovery_required', 'protocol_degraded'].includes(detail.status) || ['recovery_required', 'refresh_required', 'protocol_degraded'].includes(detail.control_state);
@@ -591,6 +1340,17 @@ function renderActionState(detail) {
   q('archiveButton').disabled = blocked || !hasCapability('archive_control_v1');
   q('unarchiveButton').classList.toggle('hidden', detail.status !== 'archived');
   q('unarchiveButton').disabled = !writeAvailable() || !hasCapability('archive_control_v1');
+  q('renameButton').disabled = !writeAvailable() || !hasCapability('thread_rename_v1');
+  q('renameButton').title = q('renameButton').disabled ? 'Runner 更新后可用' : '';
+  q('pinButton').disabled = !writeAvailable() || !hasCapability('thread_pin_v1');
+  q('pinButton').title = q('pinButton').disabled ? 'Runner 更新后可用' : '';
+  q('pinButton').textContent = detail.pinned === true || detail.snapshot?.pinned === true ? '取消置顶' : '置顶任务';
+  q('forkButton').disabled = blocked || !hasCapability('thread_fork_v1');
+  q('forkButton').title = q('forkButton').disabled ? 'Runner 更新且任务可控制后可用' : '';
+  q('reviewButton').disabled = blocked || active || !hasCapability('review_inline_v1');
+  q('reviewButton').title = q('reviewButton').disabled ? '任务空闲且 Runner 支持时可用' : '';
+  q('resourceButton').disabled = !currentHost()?.online || (!hasCapability('file_browse_v1') && !hasCapability('git_diff_v1') && !hasCapability('fixed_diagnostics_v1'));
+  q('resourceButton').title = q('resourceButton').disabled ? 'Runner 在线并更新后可用' : '';
 }
 
 function resetHistoryState() {
@@ -1172,6 +1932,8 @@ function renderComposer(detail) {
   q('nativeMode').disabled = detail.status !== 'active' || !hasCapability('native_steer_racy');
   q('submitDirection').disabled = !enabled || Boolean(imageState.pending[detail.thread_ref]) || Boolean(imageState.busy[detail.thread_ref]);
   renderModelSelector(action, enabled);
+  renderPermissionSelectors(detail);
+  renderCollaborationModeSelectors(detail);
   q('submitDirection').textContent = '发送';
   q('composerInput').placeholder = action === 'steer' ? '给 Codex 发消息，立即调整当前方向' : '给 Codex 发消息';
   renderAttachments(enabled);
@@ -1179,7 +1941,7 @@ function renderComposer(detail) {
 
 function setMode(mode) {
   state.mode = mode;
-  if (mode === 'native') { state.selectedModel = ''; state.selectedEffort = ''; }
+  if (mode === 'native') { state.selectedModel = ''; state.selectedEffort = ''; state.selectedPermission = ''; state.selectedCollaborationMode = ''; }
   q('safeMode').setAttribute('aria-pressed', mode === 'safe' ? 'true' : 'false');
   q('nativeMode').setAttribute('aria-pressed', mode === 'native' ? 'true' : 'false');
   if (state.detail) renderDetail();
@@ -1189,7 +1951,8 @@ async function loadThreadPage({reset = false} = {}) {
   if ((!reset && state.threadsLoading) || !state.selectedHost || (!reset && !state.threadsHasMore)) return;
   const generation = (state.threadPageGeneration || 0) + 1;
   state.threadPageGeneration = generation;
-  const scope = `${state.selectedHost}:${state.selectedProject}:${q('statusFilter').value}`;
+  const taskQuery = q('threadSearch').value.trim();
+  const scope = `${state.selectedHost}:${state.selectedProject}:${q('statusFilter').value}:${taskQuery}`;
   state.threadsLoading = true;
   if (reset) {
     state.threadsCursor = 0;
@@ -1199,8 +1962,11 @@ async function loadThreadPage({reset = false} = {}) {
   try {
     const project = state.selectedProject !== 'all' ? `&project_ref=${encodeURIComponent(state.selectedProject)}` : '';
     const status = q('statusFilter').value !== 'all' ? `&status=${encodeURIComponent(q('statusFilter').value)}` : '';
-    const document = await jsonFetch(`${API}/threads?host_ref=${encodeURIComponent(state.selectedHost)}${project}${status}&cursor=${state.threadsCursor}&limit=40&order=recent`);
-    if (generation !== state.threadPageGeneration || scope !== `${state.selectedHost}:${state.selectedProject}:${q('statusFilter').value}`) return;
+    const endpoint = taskQuery
+      ? `${API}/search?host_ref=${encodeURIComponent(state.selectedHost)}${project}${status}&query=${encodeURIComponent(taskQuery)}&cursor=${state.threadsCursor}&limit=20`
+      : `${API}/threads?host_ref=${encodeURIComponent(state.selectedHost)}${project}${status}&cursor=${state.threadsCursor}&limit=40&order=recent`;
+    const document = await jsonFetch(endpoint);
+    if (generation !== state.threadPageGeneration || scope !== `${state.selectedHost}:${state.selectedProject}:${q('statusFilter').value}:${q('threadSearch').value.trim()}`) return;
     const retained = reset && state.selectedThread ? state.threads.find(thread => thread.thread_ref === state.selectedThread) : null;
     if (reset) state.threads = [];
     const byRef = new Map(state.threads.map(thread => [thread.thread_ref, thread]));
@@ -1297,6 +2063,8 @@ async function selectThread(threadRef) {
   q('composerInput').value = state.drafts[threadRef] || '';
   state.selectedModel = '';
   state.selectedEffort = '';
+  state.selectedPermission = '';
+  state.selectedCollaborationMode = '';
   state.queueOpen = false;
   state.queueEditing = '';
   state.events = [];
@@ -1319,6 +2087,14 @@ async function loadThread(threadRef, {restartStream = false, throwOnError = fals
     if (state.detail?.thread_ref === threadRef && number(state.detail.thread_revision) > number(detail.thread_revision)) return true;
     const initializeHistory = !state.historyInitialized;
     state.detail = detail;
+    const command = detail.latest_command;
+    const createdRef = command?.action === 'fork' && command?.state === 'confirmed' ? command?.receipt?.created_thread_ref : '';
+    if (createdRef && !state.handledForks.has(command.request_id)) {
+      state.handledForks.add(command.request_id);
+      await loadThreadPage({reset: true});
+      await addUnknownThread(createdRef);
+      if (threadRef === state.selectedThread) window.setTimeout(() => void selectThread(createdRef), 0);
+    }
     if (initializeHistory) {
       state.historyInitialized = true;
       state.historyHasMore = detail.history?.paging_available === true || detail.snapshot?.history_incomplete === true;
@@ -1528,8 +2304,10 @@ function startEventStream() {
     }
     if (event.type === 'desktop' && document.events?.length) {
       const historyEvents = document.events.filter(value => String(value?.event_kind || '').startsWith('history.'));
-      const liveEvents = document.events.filter(value => !String(value?.event_kind || '').startsWith('history.'));
+      const resourceEvents = document.events.filter(value => ['file.', 'diagnostic.', 'diff.'].some(prefix => String(value?.event_kind || '').startsWith(prefix)));
+      const liveEvents = document.events.filter(value => !['history.', 'file.', 'diagnostic.', 'diff.'].some(prefix => String(value?.event_kind || '').startsWith(prefix)));
       for (const historyEvent of historyEvents) applyHistoryEvent(historyEvent);
+      for (const resourceEvent of resourceEvents) applyResourceEvent(resourceEvent);
       state.events.push(...liveEvents);
       state.events = state.events.slice(-500);
       if (liveEvents.length) scheduleDetailReload(threadRef);
@@ -1587,7 +2365,10 @@ async function submitAction(action, extra = {}, retry = null) {
   q('composerFeedback').textContent = action === 'steer' || action === 'continue' ? '正在发送…' : '正在处理…';
   q('submitDirection').disabled = true;
   try {
-    const result = await jsonFetch(`${API}/threads/${encodeURIComponent(detail.thread_ref)}/${action}`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
+    const actionPath = action === 'respond_request'
+      ? `${API}/threads/${encodeURIComponent(detail.thread_ref)}/requests/${encodeURIComponent(body.request_ref)}/respond`
+      : `${API}/threads/${encodeURIComponent(detail.thread_ref)}/${action}`;
+    const result = await jsonFetch(actionPath, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
     const confirmed = result.state === 'confirmed' || result.delivery_stage === 'mac_confirmed';
     const accepted = ['pending', 'submitted', 'accepted', 'confirmed'].includes(result.state);
     if (accepted || ['failed', 'conflict', 'expired', 'recovery_required'].includes(result.state)) delete imageState.pending[ref];
@@ -1601,7 +2382,7 @@ async function submitAction(action, extra = {}, retry = null) {
       imageState.drafts[ref] = currentAttachments(ref).filter(item => !(body.image_refs || []).includes(item.image_ref));
       if (isCurrent()) {
         if (q('composerInput').value.trim() === body.input) q('composerInput').value = '';
-        resizeComposer(); state.following = true; state.selectedModel = ''; state.selectedEffort = '';
+        resizeComposer(); state.following = true; state.selectedModel = ''; state.selectedEffort = ''; state.selectedPermission = ''; state.selectedCollaborationMode = '';
       }
     }
     if (isCurrent()) await loadThread(ref, {restartStream: false});
@@ -1629,6 +2410,8 @@ async function createThread(event) {
   const projectRef = existing?.body.project_ref || q('newTaskProject').value;
   const model = existing?.body.model || q('newTaskModel').value;
   const effort = existing?.body.effort || q('newTaskEffort').value;
+  const permission = existing?.body.permission_profile_id || q('newTaskPermission').value;
+  const collaborationMode = existing?.body.collaboration_mode_id || q('newTaskCollaborationMode').value;
   if (!existing && !hostCanCreate()) {
     q('newTaskFeedback').className = 'feedback warning';
     q('newTaskFeedback').textContent = 'Runner 当前不可创建任务；草稿仍保留，未发送。';
@@ -1642,7 +2425,7 @@ async function createThread(event) {
   if (!existing && !createImagesReady()) { renderCreateAttachments(); q('newTaskFeedback').textContent = '图片尚未就绪或已过期，请完成上传后创建'; return; }
   if (!existing) saveCreateDraftFields();
   const images = attachments.length ? {image_refs: attachments.map(item => item.image_ref)} : {};
-  const body = existing?.body || {request_id: requestId(), host_ref: host.host_ref, project_ref: projectRef, input, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {})};
+  const body = existing?.body || {request_id: requestId(), host_ref: host.host_ref, project_ref: projectRef, input, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {}), ...(permission ? {permission_profile_id: permission} : {}), ...(collaborationMode ? {collaboration_mode_id: collaborationMode} : {})};
   state.pendingCreate = existing || {body, controllerAccepted: false};
   state.createBusy = true;
   renderNewTaskState();
@@ -1713,9 +2496,12 @@ function resizeComposer() {
   input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
 }
 
-q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.selectedEffort = ''; state.detail = null; state.overviewCursor = 0; state.eventCursor = 0; resetHistoryState(); stopEventStream(); stopOverviewStream(); await refreshOverview({preserveDetail: false}); };
+q('hostSelect').onchange = async () => { state.selectedHost = q('hostSelect').value; state.selectedProject = 'all'; state.selectedThread = ''; state.selectedModel = ''; state.selectedEffort = ''; state.selectedPermission = ''; state.selectedCollaborationMode = ''; state.detail = null; state.overviewCursor = 0; state.eventCursor = 0; resetHistoryState(); stopEventStream(); stopOverviewStream(); await refreshOverview({preserveDetail: false}); };
 q('statusFilter').onchange = () => void loadThreadPage({reset: true});
-q('threadSearch').oninput = renderThreads;
+q('threadSearch').oninput = () => {
+  window.clearTimeout(state.taskSearchTimer);
+  state.taskSearchTimer = window.setTimeout(() => void loadThreadPage({reset: true}), 280);
+};
 q('loadMoreThreads').onclick = () => void loadThreadPage();
 q('threadList').addEventListener('scroll', maybeLoadMoreThreads, {passive: true});
 q('checkConnection').onclick = () => { state.overviewError = ''; startOverviewStream(); if (state.selectedThread) startEventStream(); };
@@ -1726,12 +2512,39 @@ q('newTaskButton').onclick = () => setNewTaskOpen(true);
 q('mobileNewTask').onclick = () => setNewTaskOpen(true);
 q('connectionState').onclick = () => setConnectionOpen(true);
 q('mobileConnection').onclick = () => setConnectionOpen(true);
+q('managementButton').onclick = () => void setManagementOpen(true);
+if (q('mobileManagement')) q('mobileManagement').onclick = () => void setManagementOpen(true);
+q('closeManagement').onclick = () => void setManagementOpen(false);
+q('taskSettingsButton').onclick = () => void setTaskSettingsOpen(true);
+q('closeTaskSettings').onclick = () => void setTaskSettingsOpen(false);
+q('cancelTaskSettings').onclick = () => void setTaskSettingsOpen(false);
+q('taskCollaborationMode').onchange = renderTaskSettings;
+q('taskSettingsForm').onsubmit = async event => {
+  event.preventDefault();
+  const settings = state.threadSettings;
+  const collaborationMode = q('taskCollaborationMode').value;
+  if (!settings || state.settingsBusy || !collaborationMode || !settings.features?.update?.available) return;
+  state.settingsBusy = true;
+  renderTaskSettings();
+  q('taskSettingsFeedback').textContent = 'Controller 已接收，正在等待 Mac 确认。';
+  try {
+    const result = await jsonFetch(`${API}/threads/${encodeURIComponent(settings.thread_ref)}/collaboration-mode`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify({request_id: requestId(), thread_revision: settings.thread_revision, collaboration_mode_id: collaborationMode})});
+    q('taskSettingsFeedback').textContent = result.state === 'confirmed' ? 'Mac 已确认任务模式。' : result.state === 'unknown' ? '结果暂时未知；系统不会自动重发，请等待实时状态核对。' : '请求已登记，等待 Mac 精确确认。';
+    await loadThread(settings.thread_ref, {restartStream: false});
+  } catch (error) {
+    q('taskSettingsFeedback').textContent = `${error.message}。不会自动重发。`;
+  } finally {
+    state.settingsBusy = false;
+    try { state.threadSettings = await jsonFetch(`${API}/threads/${encodeURIComponent(settings.thread_ref)}/settings`); } catch (_error) {}
+    renderTaskSettings();
+  }
+};
 q('closeConnection').onclick = () => setConnectionOpen(false);
 q('closeNewTask').onclick = () => setNewTaskOpen(false);
 q('cancelNewTask').onclick = () => setNewTaskOpen(false);
-q('modalBackdrop').onclick = () => { setNewTaskOpen(false); setProjectsOpen(false); setConnectionOpen(false); };
+q('modalBackdrop').onclick = () => { setNewTaskOpen(false); setProjectsOpen(false); setConnectionOpen(false); void setManagementOpen(false); void setTaskSettingsOpen(false); setRenameOpen(false); setReviewOpen(false); setResourceOpen(false); setRequestOpen(); };
 document.addEventListener('keydown', event => {
-  const dialog = !q('imageDialog').classList.contains('hidden') ? q('imageDialog') : q('projectPanel').classList.contains('open') ? q('projectPanel') : !q('newTaskSheet').classList.contains('hidden')
+  const dialog = !q('imageDialog').classList.contains('hidden') ? q('imageDialog') : !q('resourceSheet').classList.contains('hidden') ? q('resourceSheet') : q('requestSheet') && !q('requestSheet').classList.contains('hidden') ? q('requestSheet') : !q('reviewSheet').classList.contains('hidden') ? q('reviewSheet') : !q('renameSheet').classList.contains('hidden') ? q('renameSheet') : !q('taskSettingsSheet').classList.contains('hidden') ? q('taskSettingsSheet') : !q('managementSheet').classList.contains('hidden') ? q('managementSheet') : q('projectPanel').classList.contains('open') ? q('projectPanel') : !q('newTaskSheet').classList.contains('hidden')
     ? q('newTaskSheet')
     : !q('connectionSheet').classList.contains('hidden')
       ? q('connectionSheet')
@@ -1742,6 +2555,12 @@ document.addEventListener('keydown', event => {
     setNewTaskOpen(false);
     setProjectsOpen(false);
     setConnectionOpen(false);
+    void setManagementOpen(false);
+    void setTaskSettingsOpen(false);
+    setRenameOpen(false);
+    setReviewOpen(false);
+    setResourceOpen(false);
+    setRequestOpen();
     return;
   }
   if (event.key !== 'Tab' || !dialog) return;
@@ -1752,18 +2571,74 @@ document.addEventListener('keydown', event => {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
+initPermissionUi();
 q('newTaskForm').onsubmit = createThread;
 q('safeMode').onclick = () => setMode('safe');
 q('nativeMode').onclick = () => setMode('native');
 q('modelSelect').onchange = () => { state.selectedModel = q('modelSelect').value; state.selectedEffort = ''; if (state.detail) renderComposer(state.detail); };
 q('effortSelect').onchange = () => { state.selectedEffort = q('effortSelect').value; };
+q('permissionSelect').onchange = () => { state.selectedPermission = q('permissionSelect').value; };
+q('collaborationModeSelect').onchange = () => { state.selectedCollaborationMode = q('collaborationModeSelect').value; };
 q('newTaskModel').onchange = () => { populateEffortOptions(q('newTaskEffort'), q('newTaskModel').value); saveCreateDraftFields(); };
 q('newTaskEffort').onchange = saveCreateDraftFields;
+q('newTaskPermission').onchange = saveCreateDraftFields;
+q('newTaskCollaborationMode').onchange = saveCreateDraftFields;
 q('newTaskProject').onchange = saveCreateDraftFields;
 q('newTaskInput').oninput = saveCreateDraftFields;
 q('interruptButton').onclick = () => { q('taskMenu').open = false; if (state.detail) void submitAction('interrupt', {expected_turn_ref: state.detail.active_turn_ref}); };
 q('archiveButton').onclick = () => { q('taskMenu').open = false; if (state.detail && confirm(`归档“${state.detail.title}”？任务不会被删除。`)) void submitAction('archive'); };
 q('unarchiveButton').onclick = () => { q('taskMenu').open = false; if (state.detail) void submitAction('unarchive'); };
+q('renameButton').onclick = () => setRenameOpen(true);
+q('forkButton').onclick = () => {
+  q('taskMenu').open = false;
+  if (state.detail && confirm(`从“${state.detail.title}”派生一个新任务？`)) void submitAction('fork');
+};
+q('reviewButton').onclick = () => setReviewOpen(true);
+q('resourceButton').onclick = () => setResourceOpen(true);
+q('closeResource').onclick = () => setResourceOpen(false);
+q('resourceFilesTab').onclick = () => setResourceTab('files');
+q('resourceDiffTab').onclick = () => setResourceTab('diff');
+q('resourceDiagnosticsTab').onclick = () => setResourceTab('diagnostics');
+q('resourceBack').onclick = () => {
+  if (resourceUi.tab === 'diagnostics') { resourceUi.diagnostic = null; renderResources(); return; }
+  if (resourceUi.tab === 'diff') { resourceUi.diffFile = null; resourceUi.diffChunks = []; renderResources(); return; }
+  if (resourceUi.file) {
+    if (resourceUi.file.objectUrl) URL.revokeObjectURL(resourceUi.file.objectUrl);
+    resourceUi.file = null; resourceUi.chunks = []; renderResources(); return;
+  }
+  if (!resourceUi.path) return;
+  const parts = resourceUi.path.split('/'); parts.pop(); requestResourceList(parts.join('/'));
+};
+q('resourceMore').onclick = () => { if (resourceUi.tab === 'diff') requestDiffChunk(); else if (resourceUi.file) requestResourceChunk(); else if (resourceUi.hasMore) requestResourceList(resourceUi.path, {append: true}); };
+q('closeRename').onclick = () => setRenameOpen(false);
+q('cancelRename').onclick = () => setRenameOpen(false);
+q('closeReview').onclick = () => setReviewOpen(false);
+q('cancelReview').onclick = () => setReviewOpen(false);
+q('reviewType').onchange = () => {
+  const branch = q('reviewType').value === 'baseBranch';
+  q('reviewBranchField').classList.toggle('hidden', !branch);
+  if (branch) q('reviewBranch').focus();
+};
+q('reviewForm').onsubmit = event => {
+  event.preventDefault();
+  const type = q('reviewType').value;
+  const branch = q('reviewBranch').value.trim();
+  if (type === 'baseBranch' && !branch) { q('reviewFeedback').textContent = '请输入基准分支名称。'; return; }
+  const review_target = type === 'baseBranch' ? {type, branch} : {type: 'uncommittedChanges'};
+  void submitAction('review', {review_target});
+  setReviewOpen(false);
+};
+q('renameForm').onsubmit = event => {
+  event.preventDefault();
+  const title = q('renameInput').value.trim();
+  if (!state.detail || !title || title.length > 80) { q('renameFeedback').textContent = '请输入 1–80 个字符的任务名称。'; return; }
+  void submitAction('rename', {title});
+  setRenameOpen(false);
+};
+q('pinButton').onclick = () => {
+  q('taskMenu').open = false;
+  if (state.detail) void submitAction('pin', {pinned: !(state.detail.pinned === true || state.detail.snapshot?.pinned === true)});
+};
 q('loadEarlierMessages').onclick = () => void requestHistoryPage();
 q('historySearchForm').onsubmit = event => { event.preventDefault(); void requestHistorySearch(); };
 q('loadMoreSearchResults').onclick = () => void requestHistorySearch({append: true});
@@ -1780,9 +2655,11 @@ q('composer').onsubmit = event => {
   if (!navigator.onLine || !writeAvailable()) { q('composerFeedback').className = 'composer-status warning'; q('composerFeedback').textContent = 'Mac 离线，草稿已保留且没有发送'; return; }
   const model = state.selectedModel && (action === 'continue' || state.mode === 'safe') ? state.selectedModel : '';
   const effort = state.selectedEffort && (action === 'continue' || state.mode === 'safe') ? state.selectedEffort : '';
+  const permission = state.selectedPermission && (action === 'continue' || state.mode === 'safe') ? state.selectedPermission : '';
+  const collaborationMode = state.selectedCollaborationMode && (action === 'continue' || state.mode === 'safe') ? state.selectedCollaborationMode : '';
   const images = attachments.length ? {image_refs: attachments.map(item => item.image_ref)} : {};
-  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
-  else void submitAction('continue', {input, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {})});
+  if (action === 'steer') void submitAction('steer', {expected_turn_ref: detail.active_turn_ref, input, mode: state.mode, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {}), ...(permission ? {permission_profile_id: permission} : {}), ...(collaborationMode ? {collaboration_mode_id: collaborationMode} : {})});
+  else void submitAction('continue', {input, ...images, ...(model ? {model} : {}), ...(effort ? {effort} : {}), ...(permission ? {permission_profile_id: permission} : {}), ...(collaborationMode ? {collaboration_mode_id: collaborationMode} : {})});
 };
 q('composerInput').oninput = () => { if (state.selectedThread) state.drafts[state.selectedThread] = q('composerInput').value; resizeComposer(); };
 q('composerInput').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !window.matchMedia('(pointer: coarse)').matches) { event.preventDefault(); q('composer').requestSubmit(); } };
@@ -1800,6 +2677,7 @@ if (window.visualViewport) {
 }
 
 initImageUi();
+initRequestUi();
 updateViewportHeight();
 void refreshOverview({preserveDetail: false}).then(() => {
   const requested = new URLSearchParams(location.search).get('thread_ref');

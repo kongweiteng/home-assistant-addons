@@ -1,5 +1,20 @@
 # 更新记录
 
+## 0.5.41 — local candidate
+
+- 手机/Web 工作台补齐原生 fork、inline Review、rename/pin、项目文件/产物、固定诊断与受限 Git Diff；资源抽屉首屏只读统计，单文件 patch 每次最多 32 KiB 按需继续加载。
+- 新建、继续、safe redirect 和任务设置支持 Codex App 原生计划/默认模式；目录、Turn 写入、既有任务更新使用三个独立 capability，命令和回执严格绑定项目、Thread 与模式。
+- 增加 App Owner 审批、结构化提问、MCP elicitation 回复和权限档位收紧；继续复用 Mac Codex App 的 ChatGPT 登录，不要求 OpenAI API Key。
+- 错误中心、微信生产格式失败原因、任务列表/详情 SSE、分页搜索、图片输入和断线重连保持同一浅色响应式页面。
+- 内置安装身份提升到 Runner `0.3.28`；配套 Relay `0.2.28` 只增加精确滚动兼容，Gateway 保持 `0.4.10`。
+
+## 0.5.40 — local candidate
+
+- 内置安装身份提升到 Runner `0.3.27`；配套 Relay `0.2.27` 仅新增该版本的精确滚动安装兼容，并完整保留 `0.3.26` 与既有 WSS/ACK 契约。
+- 已知活动任务不再等待全局 `thread/list`：最近任务发现改为独立后台通道，活动 Thread 继续增量刷新，避免大任务库把手机/Web 的实时回复稳定拖慢一分钟以上。
+- 新建图文任务直接按已返回的原生 Thread/Turn ID 做短时有界读取；瞬态 JSON-RPC rejection 不再销毁拥有新 Turn 的 app-server 会话，并分别公开 `create_thread_not_visible`、`create_turn_not_visible`、`create_turn_interrupted` 与 `create_turn_failed`。
+- 错误中心和微信失败回执补充上游 429 重试耗尽、Turn/新建任务失败等稳定中文原因；原始异常、URL、消息正文、身份和凭据仍不进入页面或微信。
+
 ## 0.5.39 — local candidate
 
 - 内置安装身份提升到 Runner `0.3.26`；配套 Relay `0.2.26` 仅增加该版本的精确滚动安装兼容，完整保留 `0.3.25` 和既有 WSS/ACK 契约。

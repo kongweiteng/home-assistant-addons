@@ -45,6 +45,10 @@ NON_WRITABLE_CONTROL_STATES = frozenset(
 LEGACY_SEQUENCE_ENRICHMENT_FIELDS = frozenset(
     {"model", "reasoning_effort", "queued_submissions"}
 )
+SAME_REVISION_METADATA_FIELDS = frozenset({"title", "pinned", "updated_at"})
+SAME_REVISION_REQUEST_FIELDS = frozenset({"pending_requests", "updated_at"})
+SAME_REVISION_PERMISSION_FIELDS = frozenset({"permission_profile", "updated_at"})
+SAME_REVISION_COLLABORATION_FIELDS = frozenset({"collaboration_mode", "updated_at"})
 
 
 class DesktopStore:
@@ -154,7 +158,15 @@ class DesktopStore:
                             )
                     elif snapshot_sequence is not None and snapshot_sequence > existing_sequence:
                         changed_fields = _changed_snapshot_fields(str(existing["snapshot_json"]), body)
-                        if changed_fields == {"queued_submissions"}:
+                        if changed_fields == {"queued_submissions"} or (
+                            changed_fields and changed_fields <= SAME_REVISION_METADATA_FIELDS
+                        ) or (
+                            changed_fields and changed_fields <= SAME_REVISION_REQUEST_FIELDS
+                        ) or (
+                            changed_fields and changed_fields <= SAME_REVISION_PERMISSION_FIELDS
+                        ) or (
+                            changed_fields and changed_fields <= SAME_REVISION_COLLABORATION_FIELDS
+                        ):
                             refresh = "refreshed"
                         else:
                             refresh = _same_revision_refresh(str(existing["snapshot_json"]), body)
@@ -451,6 +463,7 @@ class DesktopStore:
             row = connection.execute(
                 "SELECT * FROM desktop_commands WHERE thread_ref=? "
                 "AND state IN ('pending','submitted','accepted','unknown') "
+                "AND action NOT IN ('file_list','file_open','file_read','diagnostic_run','diff_summary','diff_read') "
                 "ORDER BY created_at DESC LIMIT 1",
                 (thread_ref,),
             ).fetchone()
@@ -483,6 +496,44 @@ class DesktopStore:
                     "UPDATE desktop_commands SET relay_delivered_at=COALESCE(relay_delivered_at,?) "
                     "WHERE request_id=?",
                     (updated_at, request_id),
+                )
+            return self._command_row(
+                connection.execute(
+                    "SELECT * FROM desktop_commands WHERE request_id=?",
+                    (request_id,),
+                ).fetchone()
+            )
+
+    def complete_resource_command(
+        self,
+        request_id: str,
+        *,
+        action: str,
+        state: str,
+        error_code: str | None,
+        updated_at: str,
+    ) -> dict[str, Any]:
+        if action not in {
+            "file_list", "file_open", "file_read", "diagnostic_run", "diff_summary", "diff_read"
+        }:
+            raise StoreError("desktop_action_invalid", "Desktop 资源动作无效", status=409)
+        if state not in {"confirmed", "failed"}:
+            raise StoreError("desktop_receipt_invalid", "Desktop 资源结果状态无效", status=409)
+        with self._lock, self._connect() as connection:
+            current = connection.execute(
+                "SELECT * FROM desktop_commands WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if current is None:
+                raise StoreError("desktop_command_unknown", "Desktop 资源请求不存在", status=404)
+            if current["action"] != action:
+                raise StoreError("desktop_identity_mismatch", "Desktop 资源结果与请求不一致", status=409)
+            if current["state"] in {"pending", "submitted", "unknown"}:
+                connection.execute(
+                    "UPDATE desktop_commands SET state=?,error_code=?,updated_at=?,"
+                    "runner_received_at=COALESCE(runner_received_at,?),"
+                    "mac_confirmed_at=COALESCE(mac_confirmed_at,?) WHERE request_id=?",
+                    (state, error_code, updated_at, updated_at, updated_at, request_id),
                 )
             return self._command_row(
                 connection.execute(
@@ -533,6 +584,21 @@ class DesktopStore:
                         status=409,
                     )
                 command_document = json.loads(command["command_json"])
+                if (
+                    command["action"] == "collaboration_mode_update"
+                    and document.get("project_ref") != command_document.get("project_ref")
+                ):
+                    raise StoreError(
+                        "desktop_receipt_binding_conflict",
+                        "Desktop 计划模式收据与项目绑定不一致",
+                        status=409,
+                    )
+                if document.get("collaboration_mode_id") != command_document.get("collaboration_mode_id"):
+                    raise StoreError(
+                        "desktop_receipt_binding_conflict",
+                        "Desktop 计划模式收据与命令绑定不一致",
+                        status=409,
+                    )
                 expected_queue_ref = command_document.get("queue_ref")
                 receipt_queue_ref = document.get("queue_ref")
                 if (
@@ -542,6 +608,15 @@ class DesktopStore:
                     raise StoreError(
                         "desktop_receipt_binding_conflict",
                         "Desktop 排队收据与命令绑定不一致",
+                        status=409,
+                    )
+                if (
+                    command["action"] == "respond_request"
+                    and document.get("request_ref") != command_document.get("request_ref")
+                ):
+                    raise StoreError(
+                        "desktop_receipt_binding_conflict",
+                        "Desktop 请求响应收据与命令绑定不一致",
                         status=409,
                     )
                 if int(document["thread_revision"]) < int(
@@ -654,6 +729,9 @@ class DesktopStore:
                     "schema_digest": document.get("schema_digest"),
                     "capabilities": list(document.get("capabilities") or []),
                     "models": list(document.get("models") or []),
+                    "settings_catalog": document.get("settings_catalog"),
+                    "permission_profiles": list(document.get("permission_profiles") or []),
+                    "collaboration_modes": list(document.get("collaboration_modes") or []),
                     "synced_at": row["synced_at"],
                     "updated_at": row["updated_at"],
                 }
@@ -740,6 +818,46 @@ class DesktopStore:
             "has_more": has_more,
         }
 
+    def search_threads(
+        self,
+        *,
+        query: str,
+        host_ref: str | None = None,
+        project_ref: str | None = None,
+        status: str | None = None,
+        offset: int = 0,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        conditions = [
+            "(LOWER(t.title) LIKE ? ESCAPE '\\' OR "
+            "LOWER(COALESCE(json_extract(t.snapshot_json,'$.preview'),'')) LIKE ? ESCAPE '\\' OR "
+            "LOWER(p.project_alias) LIKE ? ESCAPE '\\')"
+        ]
+        needle = "%" + _escape_like(query.lower()) + "%"
+        parameters: list[Any] = [needle, needle, needle]
+        for column, value in (("t.host_ref", host_ref), ("t.project_ref", project_ref), ("t.status", status)):
+            if value is not None:
+                conditions.append(f"{column}=?")
+                parameters.append(value)
+        parameters.extend((limit + 1, offset))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT t.* FROM desktop_threads t JOIN desktop_projects p "
+                "ON p.host_ref=t.host_ref AND p.project_ref=t.project_ref WHERE "
+                + " AND ".join(conditions)
+                + " ORDER BY CASE WHEN json_extract(t.snapshot_json,'$.pinned')=1 THEN 0 ELSE 1 END,"
+                "t.source_updated_at DESC,t.id DESC LIMIT ? OFFSET ?",
+                parameters,
+            ).fetchall()
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        return {
+            "coverage": "synced_metadata",
+            "threads": [self._thread_public(row) for row in rows],
+            "next_cursor": offset + len(rows),
+            "has_more": has_more,
+        }
+
     def thread(self, thread_ref: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
@@ -749,7 +867,9 @@ class DesktopStore:
             if row is None:
                 raise StoreError("desktop_thread_not_found", "Desktop Thread 不存在", status=404)
             command = connection.execute(
-                "SELECT * FROM desktop_commands WHERE thread_ref=? ORDER BY created_at DESC LIMIT 1",
+                "SELECT * FROM desktop_commands WHERE thread_ref=? "
+                "AND action NOT IN ('file_list','file_open','file_read','diagnostic_run') "
+                "ORDER BY created_at DESC LIMIT 1",
                 (thread_ref,),
             ).fetchone()
             image_commands = connection.execute(
@@ -1199,6 +1319,7 @@ class DesktopStore:
 
     @staticmethod
     def _thread_public(row: sqlite3.Row, *, include_snapshot: bool = False) -> dict[str, Any]:
+        snapshot = json.loads(row["snapshot_json"])
         result: dict[str, Any] = {
             "cursor": int(row["id"]),
             "host_ref": row["host_ref"],
@@ -1214,9 +1335,12 @@ class DesktopStore:
             "created_at": row["source_created_at"],
             "updated_at": row["source_updated_at"],
             "observed_at": row["observed_at"],
+            "preview": snapshot.get("preview", ""),
         }
+        if isinstance(snapshot.get("pinned"), bool):
+            result["pinned"] = snapshot["pinned"]
         if include_snapshot:
-            result["snapshot"] = json.loads(row["snapshot_json"])
+            result["snapshot"] = snapshot
         return result
 
     @staticmethod
@@ -1233,9 +1357,23 @@ class DesktopStore:
             "mode": command.get("mode"),
             "model": command.get("model"),
             "effort": command.get("effort"),
+            "permission_profile_id": command.get("permission_profile_id"),
+            "collaboration_mode_id": command.get("collaboration_mode_id"),
             "image_refs": command.get("image_refs", []),
             "queue_ref": command.get("queue_ref"),
             "queue_refs": command.get("queue_refs"),
+            "request_ref": command.get("request_ref"),
+            "decision": command.get("decision"),
+            "project_ref": command.get("project_ref"),
+            "relative_path": command.get("relative_path"),
+            "file_kind": command.get("file_kind"),
+            "file_ref": command.get("file_ref"),
+            "offset": command.get("offset"),
+            "cursor": command.get("cursor"),
+            "limit": command.get("limit"),
+            "diagnostic_id": command.get("diagnostic_id"),
+            "review_target": command.get("review_target"),
+            "diff_ref": command.get("diff_ref"),
             "expected_turn_ref": command.get("expected_turn_ref"),
             "expected_thread_revision": command.get("expected_thread_revision"),
             "expected_control_revision": command.get("expected_control_revision"),
@@ -1340,6 +1478,10 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
     if incoming_control_revision == existing_control_revision:
         return None
     return "refreshed"
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _changed_snapshot_fields(existing_json: str, incoming: Mapping[str, Any]) -> set[str]:

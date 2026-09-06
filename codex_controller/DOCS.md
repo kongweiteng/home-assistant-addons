@@ -1,10 +1,12 @@
 # Codex Controller 使用说明
 
-当前候选版本：`0.5.39`。正式运行版本仍须以发布后实时核验为准。
+当前候选版本：`0.5.41`。正式运行版本仍须以发布后实时核验为准。
 
 ## 瞬态 Turn 安全重试
 
-- `0.5.39` 固定 Runner `0.3.26` manifest。原任务的控制前置、写后确认、模型目录、新建和队列操作使用独立保留 reader；可控 App 的控制读取以轻量元数据和 Owner IPC 实时 revision/Turn 为准，不再在大历史任务上先完整加载所有 Turn。IPC 明确未发送或明确拒绝才返回 `failed`；写入可能已发生但无法确认时返回 `unknown` 并禁止自动重放。Relay `0.2.26` 只增加 `0.3.26` 安装兼容。本条是候选说明，不等于已部署或公网验收。
+- `0.5.41` 固定 Runner `0.3.28` manifest，在同一原 Thread/Turn 工作台中增加原生计划/默认模式、fork/Review、受限 Diff、文件/产物、审批/结构化提问和权限收紧。实时链路仍为浏览器 SSE + Mac 持久 WSS，历史与大内容按需分页；配套 Relay `0.2.28`、Gateway `0.4.10`，不要求 OpenAI API Key。
+- `0.5.40` 固定 Runner `0.3.27` manifest。已知活动任务绕过全局最近任务扫描持续刷新；新建图文任务按原生 Thread/Turn ID 有界对账，瞬态读取 rejection 不再终止 owning app-server。错误中心和微信失败回执新增上游 429 重试耗尽、Turn 与新建任务失败的稳定脱敏原因。Relay `0.2.27` 只增加 `0.3.27` 安装兼容。本条是候选说明，不等于已部署或公网验收。
+- `0.5.39` 固定 Runner `0.3.26` manifest。原任务的控制前置、写后确认、模型目录、新建和队列操作使用独立保留 reader；可控 App 的控制读取以轻量元数据和 Owner IPC 实时 revision/Turn 为准，不再在大历史任务上先完整加载所有 Turn。IPC 明确未发送或明确拒绝才返回 `failed`；写入可能已发生但无法确认时返回 `unknown` 并禁止自动重放。Relay `0.2.26` 只增加 `0.3.26` 安装兼容。
 - `0.5.38` 修复活动任务在历史查询往返期间推进 revision 时结果被误丢弃的竞态；只对同一已验证 host/project/thread 绑定的请求关联、只读 `history.*` 事件允许较早 revision，普通实时事件仍需精确快照。首次请求改为收到 SSE `ready` 后提交；发布结果不确定或断线后游标窗口被裁剪时解锁按钮并明确要求手动重试，不自动重放请求。该版本固定 Runner `0.3.25` manifest，并要求 Relay `0.2.25` 的精确滚动安装兼容；Relay 数据面与 ACK 行为不变。
 - `0.5.37` 在状态页增加最近错误摘要与独立错误中心。错误按组件与任务上下文区分，使用稳定错误码、短引用、上海时间和可重试标志；不显示微信用户、消息正文、URL、凭据或原始异常。错误流使用 SSE `error_revision`，变更后仅重取当前分页，不使用浏览器长轮询或全量错误加载。Controller 以既有 Gateway 内部 URL 和 Bearer 读取最小受保护失败目录，浏览器不访问 Gateway 管理 API。Runner `0.3.24`、Relay `0.2.23` 不变。
 - 同版本由 Runner `0.3.25` 使用当前 Mac App 原生 cursor 分页读取较早 Turn 并搜索公开文本；页面每次最多合并 20 Turn，结果只从 Thread SSE 返回。原始 cursor 与搜索执行留在 Mac，Controller 不保存搜索词，也不会让只读历史请求阻塞发送、中断或其他控制。Runner `0.3.24` 未声明对应 capability，旧生产组合不会显示为可用。
@@ -86,8 +88,8 @@
 
 - 无需额外 option 即可使用 Runner 页面、API、Registry 和管理 CRUD；未配置 Relay 时页面明确显示 `relay_configured=false`，任务不会被伪发布。
 - 显式设置 `runner_center_v2_enabled=false` 会关闭 Runner API 和调度，作为快速降级开关；现有 Controller、普通微信、Renovation Hub、通知、Operations 与 Remote Work v1 不受影响。
-- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller 镜像内置与 Runner `0.3.23` 四平台制品完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
-- manifest v2 固定 Runner `0.3.23`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。Runner 的结构化结果 Schema 要求全部属性都在 `required` 中，`error_code` 成功时为 `null`、失败时为稳定错误码。
+- 页面只有在 installer manifest URL、options 固定 SHA-256 和公开 WSS Relay URL 全部可用且校验通过时才启用“生成安装命令”。Controller `0.5.41` 镜像内置与 Runner `0.3.28` 四平台制品完全同字节的 manifest，启动期无需访问 GitHub；服务端仍先核对原始字节 SHA-256、版本、完整平台目录和公网 HTTPS URL，再创建 enrollment。任一不匹配都会 fail closed，不会留下无法安装的 Runner 记录。
+- manifest v2 固定 Runner `0.3.28`、Codex `0.146.0`、Python `3.11.13` 和 `self_contained=true`，并要求 `linux-amd64`、`linux-aarch64`、`macos-amd64`、`macos-aarch64` 四个平台资产及 installer 自身都有 HTTPS URL、SHA-256 和受限文件大小。Runner 的结构化结果 Schema 要求全部属性都在 `required` 中，`error_code` 成功时为 `null`、失败时为稳定错误码。
 - Runner 在 Relay 返回 `controller_unavailable`、`controller_client_not_started` 或连接竞争时保留当前进程，并按配置执行指数退避重连；凭据错误和身份不匹配仍立即退出。已发送未 ACK 的心跳保留在持久 outbox，只替换未发送心跳；过期心跳清理后，其迟到 ACK 会安全忽略。Codex 执行在工作线程内进行，长任务期间 WSS 主循环持续发送 `busy` 心跳。
 - Runner 启动 Codex 前会读取任务 worktree 与本机登记仓库的绝对 Git common dir；只有两者完全相同时，才把该 Git metadata 目录通过 Codex `--add-dir` 加入 `workspace-write`。这使 linked worktree 可以创建 index、object、ref 和 reflog 并完成本地 commit，但不会开放 `danger-full-access`，远端消息仍不能注入路径或修改沙箱策略。
 - 创建 API 返回一次性 HTTPS 安装链接、完整的一行终端命令、平台/版本和过期时间，不返回独立 enrollment 字段。页面可复制链接、打开链接或复制命令；Clipboard API 不可用时使用受限回退。15 分钟倒计时归零、撤销或 enrollment 被领取后，页面立即清除内存中的链接和命令。
@@ -137,7 +139,7 @@
 | `runner_relay_api_token` | 仅供 Controller -> Relay 发布 request/control 的 bearer，至少 32 字符 |
 | `runner_relay_controller_api_token` | 仅供 Relay -> Controller 调用 enroll/authenticate/heartbeat/status/result 的 bearer，至少 32 字符 |
 | `runner_relay_public_url` | Runner 出站连接的公开 `wss://` URL；禁止凭据、query、fragment、内部域名或非公网解析结果 |
-| `runner_installer_manifest_url` | Runner `0.3.23` 自包含安装制品 manifest v2 的公开 HTTPS URL |
+| `runner_installer_manifest_url` | Runner `0.3.28` 自包含安装制品 manifest v2 的公开 HTTPS URL |
 | `runner_installer_manifest_sha256` | 对 manifest 原始字节固定的 64 位小写 SHA-256；不接受浮动 latest |
 | `runner_relay_timeout_seconds` | Relay 发布超时；兼容未内置 manifest 的旧目录读取，范围 2 到 60 秒 |
 

@@ -68,6 +68,15 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
         self.assertIn("@media(min-width:760px)", css)
         self.assertIn("@media(max-width:759px)", css)
 
+    def test_mobile_task_menu_stays_above_conversation_and_targets_are_touch_safe(self):
+        css = DESKTOP_DASHBOARD_HTML.split("<style>", 1)[1].split("</style>", 1)[0]
+        self.assertIn(".detail-head{z-index:40;overflow:visible}", css)
+        self.assertIn(".task-menu[open]{z-index:110}", css)
+        self.assertIn(".task-menu-popover{z-index:111}", css)
+        self.assertIn(".top-actions .connection,.project-trigger,.task-menu summary,.task-menu-popover button", css)
+        self.assertIn(".sheet-actions button,.resource-tabs button", css)
+        self.assertIn("{min-height:44px}", css)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.39.
+Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.41.
 
 ## Comparison target and evidence
 
@@ -23,7 +23,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.39.
 
 ## Patches since preceding QA
 
-- Controller `0.5.39` changes only the Runner control/readback lane and pinned `0.3.26` manifest; HTML, CSS, JavaScript, responsive breakpoints, copy and interaction layout are unchanged from the accepted `0.5.38` surfaces.
+- Controller `0.5.41` adds approval/question cards, rename/pin/fork/Review, paged Diff/resources, fixed diagnostics and task settings to the accepted `0.5.38` responsive shell; the pinned Runner is `0.3.28`.
 - Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
 - Separated management pages with grouped/searchable incremental tools and live status.
 - Added official icons, visible lightbox close contrast and 44px removal targets.
@@ -34,11 +34,13 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.39.
 - Replaced the tools DOM slice with server-paged search/service/risk filters and previous/next navigation.
 - Added native older-turn paging and task search; the browser fixture submitted a real search POST and received one matching occurrence through the Thread SSE before rendering it.
 - Added the mobile/Web error center with a live connection state, component/task grouping, stable public codes, Shanghai time and task-context links.
+- Raised the mobile detail-header/menu stacking context after a real 390px click audit found that the scrolling conversation intercepted six menu actions; all seven actions now hit their own controls at 390 x 500, 390 x 844 and 1440 x 900.
+- Made realtime status, project selection, task-menu actions, sheets and resource controls at least 44px tall on mobile. All three viewports remain free of horizontal overflow.
 
 ## Interaction checks and boundaries
 
 - Local fixture exercised project scope, task selection, text and pure-image task creation, exact mock receipt, paged tools navigation, four service filters, management navigation, image upload/preview/remove, pure-image mock send, lazy history read, task search POST-to-SSE, and the paged error center.
-- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling. Current history UI regression is `5/5`; full Add-on suite is `811/811` with 8 environment-dependent skips.
+- Automated gates cover unknown receipts, SSE-ready ordering, resync recovery, idempotency, capabilities, bounded image payloads and task-switch generations. SSE is not converted to polling. The current full Add-on suite is `852/852` with 8 environment-dependent skips; the focused responsive/management/settings/Diff/resources gate is `38/38`.
 - Physical HA companion app, Mac image interpretation, same-original-task delivery and off-LAN latency remain pending. Mock receipts and screenshots cannot prove these.
 - New-task form accepts up to four images and can create a pure-image task. The local same-origin fixture confirmed the uploaded preview and enabled create action without text; this does not prove Mac interpretation or phone delivery.
 
@@ -49,6 +51,7 @@ Date: 2026-09-06, Asia/Shanghai. Candidate: Controller 0.5.39.
 - [x] Exercise local navigation, creation and conversation-image interactions.
 - [x] Resolve compared visual P0/P1/P2 findings.
 - [x] Verify the 390 x 500 fixed composer, 390 x 844 history search result, and desktop task/error navigation in the Codex in-app browser.
+- [x] Click all seven task-menu actions at 390 x 500, 390 x 844 and 1440 x 900; verify each control is directly hit and no horizontal overflow remains.
 - [ ] Physical-phone keyboard, safe-area and zoom acceptance.
 - [ ] Production release/upgrade and actual off-LAN image/receipt/freshness acceptance.
 

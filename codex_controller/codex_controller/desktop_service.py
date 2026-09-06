@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import datetime as dt
 import json
+import math
 import re
 import sqlite3
 import threading
@@ -13,7 +14,11 @@ from typing import Any, Callable, Iterator, Mapping, Protocol
 from zoneinfo import ZoneInfo
 
 from .desktop_protocol import (
+    COLLABORATION_MODE_ID_RE,
+    DIFF_REF_RE,
+    DIAGNOSTIC_IDS,
     DesktopProtocolError,
+    PERMISSION_PROFILE_ORDER,
     REF_RE,
     REQUEST_RE,
     THREAD_STATUSES,
@@ -22,6 +27,7 @@ from .desktop_protocol import (
     intent_digest,
     validate_desktop_document,
     validate_public_input,
+    validate_request_answers,
 )
 from .desktop_store import DesktopStore
 from .desktop_image_store import DesktopImageStore, journal_command
@@ -38,6 +44,17 @@ DATA_DELAYED_SECONDS = 30
 QUEUE_ACTIONS = frozenset(
     {"queue_add", "queue_update", "queue_delete", "queue_reorder", "queue_start"}
 )
+RESOURCE_ACTIONS = frozenset(
+    {"file_list", "file_open", "file_read", "diagnostic_run", "diff_summary", "diff_read"}
+)
+RESOURCE_EVENT_ACTIONS = {
+    "file.list": "file_list",
+    "file.opened": "file_open",
+    "file.chunk": "file_read",
+    "diagnostic.result": "diagnostic_run",
+    "diff.summary": "diff_summary",
+    "diff.chunk": "diff_read",
+}
 
 
 class DesktopPublisher(Protocol):
@@ -136,7 +153,20 @@ class DesktopControllerService:
         if event_type == "desktop_snapshot":
             result = self.store.ingest_snapshot(document, observed_at=current.isoformat())
         elif event_type == "desktop_event":
+            resource_command = self._resource_event_command(document)
             result = self.store.ingest_event(document)
+            if resource_command is not None:
+                self.store.complete_resource_command(
+                    str(resource_command["request_id"]),
+                    action=str(resource_command["action"]),
+                    state="failed" if str(document["event_kind"]).endswith(".error") else "confirmed",
+                    error_code=(
+                        str(document["payload"]["error_code"])
+                        if str(document["event_kind"]).endswith(".error")
+                        else None
+                    ),
+                    updated_at=current.isoformat(),
+                )
         elif document.get("action") == "create":
             result = self._create_journal.ingest_receipt(document)
         else:
@@ -146,6 +176,55 @@ class DesktopControllerService:
             thread_ref=str(document.get("thread_ref") or "") or None,
         )
         return {"accepted": True, **result}
+
+    def _resource_event_command(self, document: Mapping[str, Any]) -> dict[str, Any] | None:
+        event_kind = str(document.get("event_kind") or "")
+        if event_kind not in {
+            "file.list", "file.opened", "file.chunk", "file.error",
+            "diagnostic.result", "diagnostic.error",
+            "diff.summary", "diff.chunk", "diff.error",
+        }:
+            return None
+        payload = document.get("payload")
+        if not isinstance(payload, Mapping):
+            raise StoreError("desktop_event_invalid", "Desktop 资源事件 payload 无效", status=409)
+        action = RESOURCE_EVENT_ACTIONS.get(event_kind, str(payload.get("action") or ""))
+        if action not in RESOURCE_ACTIONS:
+            raise StoreError("desktop_event_invalid", "Desktop 资源事件动作无效", status=409)
+        command = self.store.command(str(payload.get("request_id") or ""))
+        if (
+            command.get("action") != action
+            or command.get("host_ref") != document.get("host_ref")
+            or command.get("thread_ref") != document.get("thread_ref")
+            or command.get("project_ref") != document.get("project_ref")
+            or command.get("expected_thread_revision") != document.get("thread_revision")
+        ):
+            raise StoreError("desktop_identity_mismatch", "Desktop 资源事件与请求不一致", status=409)
+        binding_mismatch = (
+            event_kind == "file.list"
+            and payload.get("relative_path") != command.get("relative_path")
+        ) or (
+            event_kind == "file.opened"
+            and (
+                payload.get("relative_path") != command.get("relative_path")
+                or payload.get("kind") != command.get("file_kind")
+            )
+        ) or (
+            event_kind == "file.chunk"
+            and (
+                payload.get("ref") != command.get("file_ref")
+                or payload.get("offset") != command.get("offset")
+            )
+        ) or (
+            event_kind == "diagnostic.result"
+            and payload.get("diagnostic_id") != command.get("diagnostic_id")
+        ) or (
+            event_kind == "diff.chunk"
+            and payload.get("diff_ref") != command.get("diff_ref")
+        )
+        if binding_mismatch:
+            raise StoreError("desktop_identity_mismatch", "Desktop 资源结果与请求参数不一致", status=409)
+        return command
 
     def sweep(self) -> int:
         current = self._now().isoformat()
@@ -214,6 +293,143 @@ class DesktopControllerService:
         if host_ref is not None:
             self._ref(host_ref, "HS")
         return {"projects": self.store.list_projects(host_ref=host_ref)}
+
+    def search(
+        self,
+        *,
+        query: str,
+        host_ref: str | None,
+        project_ref: str | None,
+        status: str | None,
+        cursor: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(query, str)
+            or query != query.strip()
+            or not 1 <= len(query) <= 120
+            or any(ord(character) < 32 for character in query)
+        ):
+            raise StoreError("desktop_search_query_invalid", "搜索词需为 1–120 个可见字符", status=400)
+        if host_ref is not None:
+            self._ref(host_ref, "HS")
+        if project_ref is not None:
+            self._ref(project_ref, "PJ")
+        if status is not None and status not in THREAD_STATUSES:
+            raise StoreError("desktop_status_invalid", "Desktop Thread 状态筛选无效", status=400)
+        if cursor < 0 or not 1 <= limit <= 20:
+            raise StoreError("desktop_cursor_invalid", "Desktop 搜索 cursor 或 limit 无效", status=400)
+        return self.store.search_threads(
+            query=query,
+            host_ref=host_ref,
+            project_ref=project_ref,
+            status=status,
+            offset=cursor,
+            limit=limit,
+        )
+
+    def management(self, host_ref: str) -> dict[str, Any]:
+        self._ref(host_ref, "HS")
+        host = next((item for item in self.hosts()["hosts"] if item["host_ref"] == host_ref), None)
+        if host is None:
+            raise StoreError("desktop_host_not_found", "Desktop host 不存在", status=404)
+        capabilities = set(host.get("capabilities") or [])
+
+        def feature(capability: str | None, *, available: bool | None = None) -> dict[str, Any]:
+            enabled = (capability in capabilities) if available is None else available
+            return {
+                "available": bool(enabled),
+                "reason": None if enabled else "runner_update_required",
+            }
+
+        settings_available = "settings_catalog_v1" in capabilities and isinstance(host.get("settings_catalog"), Mapping)
+        permissions_available = (
+            "permission_profile_selection_v1" in capabilities
+            and isinstance(host.get("permission_profiles"), list)
+        )
+        return {
+            "host_ref": host_ref,
+            "features": {
+                "rename": feature("thread_rename_v1"),
+                "pin": feature("thread_pin_v1"),
+                "fork": feature("thread_fork_v1"),
+                "review": feature("review_inline_v1"),
+                "git_diff": feature("git_diff_v1"),
+                "global_search": feature(None, available=True),
+                "settings": feature(None, available=settings_available),
+                "permissions": feature(None, available=permissions_available),
+            },
+            "models": list(host.get("models") or []),
+            "settings": host.get("settings_catalog") if settings_available else None,
+            "permission_profiles": list(host.get("permission_profiles") or []) if permissions_available else None,
+        }
+
+    def thread_settings(self, thread_ref: str) -> dict[str, Any]:
+        """Return only the Runner-sanitized mode catalog and authoritative current state."""
+
+        self._ref(thread_ref, "TH")
+        thread = self.store.thread(thread_ref)
+        host = next(
+            (item for item in self.hosts()["hosts"] if item["host_ref"] == thread["host_ref"]),
+            None,
+        )
+        if host is None:
+            raise StoreError("desktop_host_not_found", "Desktop host 不存在", status=404)
+        capabilities = set(host.get("capabilities") or [])
+        catalog_available = (
+            "collaboration_mode_catalog_v1" in capabilities
+            and isinstance(host.get("collaboration_modes"), list)
+        )
+        current = thread.get("snapshot", {}).get("collaboration_mode")
+        if not isinstance(current, Mapping):
+            current = {
+                "id": None,
+                "label": None,
+                "mode": None,
+                "editable": False,
+                "reason": "current_mode_unavailable",
+            }
+
+        def feature(capability: str, *, extra: bool = True, reason: str = "runner_update_required") -> dict[str, Any]:
+            available = capability in capabilities and extra
+            missing_reason = "runner_update_required" if capability not in capabilities else reason
+            return {"available": available, "reason": None if available else missing_reason}
+
+        update_extra = bool(
+            catalog_available
+            and current.get("editable") is True
+            and thread.get("active_turn_ref") is None
+            and isinstance(thread.get("control_revision"), int)
+            and not isinstance(thread.get("control_revision"), bool)
+            and host.get("write_available") is True
+        )
+        update_reason = "current_mode_not_editable"
+        if not catalog_available:
+            update_reason = "runner_update_required"
+        elif current.get("editable") is not True:
+            update_reason = str(current.get("reason") or "current_mode_not_editable")
+        elif thread.get("active_turn_ref") is not None:
+            update_reason = "active_turn_in_progress"
+        elif not isinstance(thread.get("control_revision"), int):
+            update_reason = "snapshot_refresh_required"
+        elif host.get("write_available") is not True:
+            update_reason = "runner_offline"
+        return {
+            "thread_ref": thread_ref,
+            "thread_revision": thread["thread_revision"],
+            "control_revision": thread.get("control_revision"),
+            "catalog": list(host.get("collaboration_modes") or []) if catalog_available else [],
+            "current": dict(current),
+            "features": {
+                "catalog": feature("collaboration_mode_catalog_v1", extra=catalog_available),
+                "turn": feature("collaboration_mode_turn_v1", extra=catalog_available),
+                "update": feature(
+                    "thread_collaboration_mode_update_v1",
+                    extra=update_extra,
+                    reason=update_reason,
+                ),
+            },
+        }
 
     def threads(
         self,
@@ -374,6 +590,130 @@ class DesktopControllerService:
             }
         return {"request_id": normalized["request_id"], "state": "submitted"}
 
+    def resource_query(
+        self,
+        thread_ref: str,
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Publish one bounded resource read and let Desktop events deliver its result."""
+
+        self._ref(thread_ref, "TH")
+        normalized = self._normalize_resource_query(action, payload)
+        thread = self.store.thread(thread_ref)
+        if thread["thread_revision"] != normalized["thread_revision"]:
+            raise StoreError("desktop_thread_revision_stale", "Desktop Thread revision 已过期", status=409)
+        runner_id = self._runner_id(thread_ref)
+        hosts = {host["host_ref"]: host for host in self.hosts()["hosts"]}
+        host = hosts.get(thread["host_ref"])
+        capability = (
+            "fixed_diagnostics_v1"
+            if action == "diagnostic_run"
+            else "git_diff_v1"
+            if action.startswith("diff_")
+            else "file_browse_v1"
+        )
+        if host is None or not host.get("online"):
+            raise StoreError("desktop_host_stale", "Desktop host 已离线，暂时无法读取资源", status=409)
+        if capability not in set(host.get("capabilities") or []):
+            raise StoreError(
+                "desktop_resource_capability_unavailable",
+                "当前 Runner 版本不支持此资源读取，请先更新 Runner",
+                status=409,
+            )
+        artifact_requested = (
+            action == "file_open" and normalized.get("file_kind") == "artifact"
+        ) or (
+            action == "file_read"
+            and isinstance(normalized.get("file_ref"), str)
+            and str(normalized["file_ref"]).startswith("AR-")
+        )
+        if artifact_requested:
+            if "artifact_read_v1" not in set(host.get("capabilities") or []):
+                raise StoreError(
+                    "desktop_resource_capability_unavailable",
+                    "当前 Runner 版本不支持产物读取，请先更新 Runner",
+                    status=409,
+                )
+        if self.runner_authorizer is None or not self.runner_authorizer(runner_id):
+            raise StoreError(
+                "desktop_runner_not_authorized",
+                "Desktop Runner 未启用或缺少独立 Desktop capability",
+                status=403,
+            )
+        if self.publisher is None:
+            raise StoreError("desktop_relay_unavailable", "Desktop Relay 尚未配置", status=503)
+        intent = intent_digest(
+            {
+                "runner_id": runner_id,
+                "host_ref": thread["host_ref"],
+                "project_ref": thread["project_ref"],
+                "thread_ref": thread_ref,
+                "thread_revision": normalized["thread_revision"],
+                "action": action,
+                "relative_path": normalized.get("relative_path"),
+                "cursor": normalized.get("cursor"),
+                "limit": normalized.get("limit"),
+                "file_kind": normalized.get("file_kind"),
+                "file_ref": normalized.get("file_ref"),
+                "offset": normalized.get("offset"),
+                "diagnostic_id": normalized.get("diagnostic_id"),
+                "diff_ref": normalized.get("diff_ref"),
+            }
+        )
+        replay = self.store.replay_command(str(normalized["request_id"]), intent_digest=intent)
+        if replay is not None:
+            return replay
+        command = build_desktop_command(
+            runner_id=runner_id,
+            request_id=str(normalized["request_id"]),
+            host_ref=str(thread["host_ref"]),
+            project_ref=str(thread["project_ref"]),
+            thread_ref=thread_ref,
+            expected_thread_revision=int(thread["thread_revision"]),
+            expected_control_revision=None,
+            action=action,
+            relative_path=normalized.get("relative_path"),
+            cursor=normalized.get("cursor"),
+            limit=normalized.get("limit"),
+            file_kind=normalized.get("file_kind"),
+            file_ref=normalized.get("file_ref"),
+            offset=normalized.get("offset"),
+            diagnostic_id=normalized.get("diagnostic_id"),
+            diff_ref=normalized.get("diff_ref"),
+            now=self._now(),
+        )
+        stored, created = self.store.prepare_command(command=command, intent_digest=intent)
+        if not created:
+            return stored
+        try:
+            self.publisher.publish_desktop_command(runner_id, command)
+        except RelayPublishError as exc:
+            state = "failed" if exc.definitely_undelivered else "unknown"
+            error = exc.code if exc.definitely_undelivered else "relay_publish_indeterminate"
+            result = self.store.mark_command(
+                str(command["request_id"]),
+                state=state,
+                error_code=error,
+                updated_at=self._now().isoformat(),
+            )
+            if exc.definitely_undelivered:
+                raise StoreError(error, "Desktop Runner 当前离线，资源请求未发送", status=503) from exc
+            return result
+        except Exception:
+            return self.store.mark_command(
+                str(command["request_id"]),
+                state="unknown",
+                error_code="relay_publish_indeterminate",
+                updated_at=self._now().isoformat(),
+            )
+        return self.store.mark_command(
+            str(command["request_id"]),
+            state="submitted",
+            error_code=None,
+            updated_at=self._now().isoformat(),
+        )
+
     def events(
         self,
         thread_ref: str,
@@ -452,6 +792,8 @@ class DesktopControllerService:
                 "input": normalized["input"],
                 "model": normalized.get("model"),
                 "effort": normalized.get("effort"),
+                "permission_profile_id": normalized.get("permission_profile_id"),
+                "collaboration_mode_id": normalized.get("collaboration_mode_id"),
             }
         )
         replay = self._create_journal.replay(str(normalized["request_id"]), intent_digest=intent)
@@ -463,6 +805,8 @@ class DesktopControllerService:
             project_ref=project_ref,
             model=normalized.get("model"),
             effort=normalized.get("effort"),
+            permission_profile_id=normalized.get("permission_profile_id"),
+            collaboration_mode_id=normalized.get("collaboration_mode_id"),
         )
         current = self._now()
         command = build_desktop_command(
@@ -478,6 +822,8 @@ class DesktopControllerService:
             images=self._resolve_images(normalized, host_ref),
             model=normalized.get("model"),
             effort=normalized.get("effort"),
+            permission_profile_id=normalized.get("permission_profile_id"),
+            collaboration_mode_id=normalized.get("collaboration_mode_id"),
             now=current,
         )
         stored, created = self._create_journal.prepare(command=command, intent_digest=intent)
@@ -533,6 +879,11 @@ class DesktopControllerService:
                 "runner_id": runner_id,
                 "host_ref": thread["host_ref"],
                 "thread_ref": thread_ref,
+                **(
+                    {"project_ref": thread["project_ref"]}
+                    if action == "collaboration_mode_update"
+                    else {}
+                ),
                 "expected_thread_revision": normalized["thread_revision"],
                 "expected_turn_ref": normalized.get("expected_turn_ref"),
                 "action": action,
@@ -541,8 +892,16 @@ class DesktopControllerService:
                 "mode": normalized.get("mode"),
                 "model": normalized.get("model"),
                 "effort": normalized.get("effort"),
+                "permission_profile_id": normalized.get("permission_profile_id"),
+                "collaboration_mode_id": normalized.get("collaboration_mode_id"),
                 "queue_ref": normalized.get("queue_ref"),
                 "queue_refs": normalized.get("queue_refs"),
+                "title": normalized.get("title"),
+                "pinned": normalized.get("pinned"),
+                "request_ref": normalized.get("request_ref"),
+                "decision": normalized.get("decision"),
+                "answers": normalized.get("answers"),
+                "review_target": normalized.get("review_target"),
             }
         )
         replay = self.store.replay_command(
@@ -589,8 +948,21 @@ class DesktopControllerService:
             mode=normalized.get("mode"),
             model=normalized.get("model"),
             effort=normalized.get("effort"),
+            permission_profile_id=normalized.get("permission_profile_id"),
+            collaboration_mode_id=normalized.get("collaboration_mode_id"),
+            project_ref=(
+                str(thread["project_ref"])
+                if action == "collaboration_mode_update"
+                else None
+            ),
             queue_ref=normalized.get("queue_ref"),
             queue_refs=normalized.get("queue_refs"),
+            title=normalized.get("title"),
+            pinned=normalized.get("pinned"),
+            request_ref=normalized.get("request_ref"),
+            decision=normalized.get("decision"),
+            answers=normalized.get("answers"),
+            review_target=normalized.get("review_target"),
             now=current,
         )
         stored, created = self.store.prepare_command(command=journal_command(command), intent_digest=intent)
@@ -642,6 +1014,8 @@ class DesktopControllerService:
         capabilities = set(host.get("capabilities") or [])
         model = payload.get("model")
         effort = payload.get("effort")
+        permission_profile_id = payload.get("permission_profile_id")
+        collaboration_mode_id = payload.get("collaboration_mode_id")
         required_capabilities = {
             "steer": (
                 {"native_steer_racy"}
@@ -657,6 +1031,12 @@ class DesktopControllerService:
             "queue_delete": {"thread_queue_v1"},
             "queue_reorder": {"thread_queue_v1"},
             "queue_start": {"thread_queue_v1"},
+            "rename": {"thread_rename_v1"},
+            "pin": {"thread_pin_v1"},
+            "fork": {"thread_fork_v1"},
+            "review": {"review_inline_v1"},
+            "respond_request": {"owner_request_response_v1"},
+            "collaboration_mode_update": {"thread_collaboration_mode_update_v1"},
         }
         if not required_capabilities.get(action, set()).issubset(capabilities):
             raise StoreError(
@@ -710,6 +1090,42 @@ class DesktopControllerService:
             }
             if effort not in available_efforts:
                 raise StoreError("desktop_effort_unavailable", "所选推理强度不适用于当前模型", status=409)
+        if permission_profile_id is not None:
+            if "permission_profile_selection_v1" not in capabilities:
+                raise StoreError(
+                    "desktop_permission_profile_unavailable",
+                    "Desktop host 不支持权限档位选择",
+                    status=409,
+                )
+            profile = thread.get("snapshot", {}).get("permission_profile")
+            options = profile.get("options") if isinstance(profile, Mapping) else None
+            if not isinstance(profile, Mapping) or profile.get("editable") is not True:
+                raise StoreError(
+                    "desktop_permission_profile_not_editable",
+                    "当前任务权限档位不可编辑",
+                    status=409,
+                )
+            if not isinstance(options, list) or permission_profile_id not in {
+                item.get("id") for item in options if isinstance(item, Mapping)
+            }:
+                raise StoreError(
+                    "desktop_permission_profile_not_allowed",
+                    "所选权限档位不在当前任务可用范围内",
+                    status=409,
+                )
+        if collaboration_mode_id is not None:
+            required_mode_capability = (
+                "thread_collaboration_mode_update_v1"
+                if action == "collaboration_mode_update"
+                else "collaboration_mode_turn_v1"
+            )
+            if required_mode_capability not in capabilities:
+                raise StoreError(
+                    "desktop_collaboration_mode_unavailable",
+                    "Desktop host 不支持当前计划模式操作",
+                    status=409,
+                )
+            self._require_collaboration_mode(host, collaboration_mode_id)
         status = thread["status"]
         active_turn = thread["active_turn_ref"]
         expected_turn = payload.get("expected_turn_ref")
@@ -726,6 +1142,12 @@ class DesktopControllerService:
             "queue_delete": {"ready"},
             "queue_reorder": {"ready"},
             "queue_start": {"ready"},
+            "rename": {"ready", "load_required", "read_only"},
+            "pin": {"ready", "load_required", "read_only"},
+            "fork": {"ready", "load_required", "read_only"},
+            "review": {"ready", "load_required"},
+            "respond_request": {"ready"},
+            "collaboration_mode_update": {"ready"},
         }
         if control_state not in allowed_control_states.get(action, set()):
             raise StoreError(
@@ -734,7 +1156,7 @@ class DesktopControllerService:
                 status=409,
             )
         if (
-            action in {"steer", "interrupt"}
+            action in {"steer", "interrupt", "respond_request", "collaboration_mode_update"}
             or (action == "continue" and control_state == "ready")
         ):
             if not isinstance(control_revision, int) or isinstance(control_revision, bool):
@@ -810,6 +1232,29 @@ class DesktopControllerService:
                         "包含非文本内容的排队消息不能在手机端编辑",
                         status=409,
                     )
+        elif action in {"rename", "pin", "fork"}:
+            pass
+        elif action == "review":
+            if active_turn is not None or status not in {"idle", "notLoaded", "failed"}:
+                raise StoreError("desktop_review_conflict", "Desktop 任务运行中，暂时不能开始代码审查", status=409)
+        elif action == "respond_request":
+            if status != "active" or active_turn is None or active_turn != expected_turn:
+                raise StoreError("desktop_turn_conflict", "Desktop 待办所属 Turn 已变化", status=409)
+            self._request_response_preconditions(thread, payload)
+        elif action == "collaboration_mode_update":
+            current_mode = thread.get("snapshot", {}).get("collaboration_mode")
+            if active_turn is not None or status not in {"idle", "notLoaded", "failed"}:
+                raise StoreError(
+                    "desktop_collaboration_mode_conflict",
+                    "任务运行中不能修改计划模式",
+                    status=409,
+                )
+            if not isinstance(current_mode, Mapping) or current_mode.get("editable") is not True:
+                raise StoreError(
+                    "desktop_collaboration_mode_not_editable",
+                    "当前任务的计划模式不可编辑",
+                    status=409,
+                )
         else:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
 
@@ -821,6 +1266,8 @@ class DesktopControllerService:
         project_ref: str,
         model: Any,
         effort: Any = None,
+        permission_profile_id: Any = None,
+        collaboration_mode_id: Any = None,
     ) -> None:
         projects = self.store.list_projects(host_ref=host_ref)
         if not any(project.get("project_ref") == project_ref for project in projects):
@@ -875,6 +1322,32 @@ class DesktopControllerService:
             }
             if effort not in supported:
                 raise StoreError("desktop_effort_unavailable", "所选推理强度不适用于当前模型", status=409)
+        if permission_profile_id is not None:
+            if "permission_profile_selection_v1" not in capabilities:
+                raise StoreError(
+                    "desktop_permission_profile_unavailable",
+                    "Desktop host 不支持权限档位选择",
+                    status=409,
+                )
+            allowed = {
+                item.get("id")
+                for item in host.get("permission_profiles") or []
+                if isinstance(item, Mapping)
+            }
+            if permission_profile_id not in allowed:
+                raise StoreError(
+                    "desktop_permission_profile_not_allowed",
+                    "所选权限档位不在 Runner 允许范围内",
+                    status=409,
+                )
+        if collaboration_mode_id is not None:
+            if "collaboration_mode_turn_v1" not in capabilities:
+                raise StoreError(
+                    "desktop_collaboration_mode_unavailable",
+                    "Desktop host 不支持为新任务选择计划模式",
+                    status=409,
+                )
+            self._require_collaboration_mode(host, collaboration_mode_id)
         if self.runner_authorizer is None or not self.runner_authorizer(runner_id):
             raise StoreError(
                 "desktop_runner_not_authorized",
@@ -898,13 +1371,37 @@ class DesktopControllerService:
             "queue_delete": {"request_id", "thread_revision", "queue_ref"},
             "queue_reorder": {"request_id", "thread_revision", "queue_refs"},
             "queue_start": {"request_id", "thread_revision", "queue_ref"},
+            "rename": {"request_id", "thread_revision", "title"},
+            "pin": {"request_id", "thread_revision", "pinned"},
+            "fork": {"request_id", "thread_revision"},
+            "review": {"request_id", "thread_revision", "review_target"},
+            "collaboration_mode_update": {
+                "request_id",
+                "thread_revision",
+                "collaboration_mode_id",
+            },
+            "respond_request": {
+                "request_id",
+                "expected_turn_ref",
+                "thread_revision",
+                "request_ref",
+                "decision",
+            },
         }
         required = fields.get(action)
         if required is None:
             raise StoreError("desktop_action_invalid", "Desktop API 动作无效", status=400)
-        allowed = required | ({"mode", "model", "effort"} if action == "steer" else {"model", "effort"} if action == "continue" else set())
+        allowed = required | (
+            {"mode", "model", "effort", "permission_profile_id", "collaboration_mode_id"}
+            if action == "steer"
+            else {"model", "effort", "permission_profile_id", "collaboration_mode_id"}
+            if action == "continue"
+            else set()
+        )
         if action in {"continue", "steer"}:
             allowed |= {"image_refs"}
+        if action == "respond_request":
+            allowed |= {"answers"}
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop API 字段无效", status=400)
         result = dict(payload)
@@ -942,6 +1439,30 @@ class DesktopControllerService:
                 raise StoreError("desktop_effort_invalid", "Desktop 推理强度无效", status=400)
             if action == "steer" and result.get("mode") != "safe":
                 raise StoreError("desktop_effort_invalid", "原生快速调整不允许覆盖推理强度", status=400)
+        permission_profile_id = result.get("permission_profile_id")
+        if permission_profile_id is not None:
+            if not isinstance(permission_profile_id, str) or permission_profile_id not in PERMISSION_PROFILE_ORDER:
+                raise StoreError("desktop_permission_profile_invalid", "Desktop 权限档位无效", status=400)
+            if action == "steer" and result.get("mode") != "safe":
+                raise StoreError(
+                    "desktop_permission_profile_invalid",
+                    "原生快速调整不允许选择权限档位",
+                    status=400,
+                )
+        collaboration_mode_id = result.get("collaboration_mode_id")
+        if collaboration_mode_id is not None:
+            if not isinstance(collaboration_mode_id, str) or not COLLABORATION_MODE_ID_RE.fullmatch(collaboration_mode_id):
+                raise StoreError(
+                    "desktop_collaboration_mode_invalid",
+                    "Desktop 计划模式无效",
+                    status=400,
+                )
+            if action == "steer" and result.get("mode") != "safe":
+                raise StoreError(
+                    "desktop_collaboration_mode_invalid",
+                    "原生快速调整保持同一 Turn，不允许切换计划模式",
+                    status=400,
+                )
         queue_ref = result.get("queue_ref")
         if queue_ref is not None:
             self._ref(queue_ref, "QS")
@@ -956,6 +1477,218 @@ class DesktopControllerService:
                 raise StoreError("desktop_queue_invalid", "Desktop 排队顺序无效", status=400)
             for item in queue_refs:
                 self._ref(item, "QS")
+        if action == "rename":
+            title = result.get("title")
+            if (
+                not isinstance(title, str)
+                or title != title.strip()
+                or not 1 <= len(title) <= 80
+                or any(not character.isprintable() for character in title)
+            ):
+                raise StoreError("desktop_title_invalid", "任务标题需为 1–80 个可见字符", status=400)
+        if action == "pin" and not isinstance(result.get("pinned"), bool):
+            raise StoreError("desktop_pinned_invalid", "任务置顶状态无效", status=400)
+        if action == "review":
+            self._validate_review_target(result.get("review_target"))
+        if action == "respond_request":
+            self._ref(result.get("request_ref"), "RQ")
+            decision = result.get("decision")
+            if decision not in {"accept", "decline", "cancel", "submit"}:
+                raise StoreError("desktop_request_decision_invalid", "待办响应决定无效", status=400)
+            answers = result.get("answers")
+            try:
+                validate_request_answers(answers, required=decision == "submit")
+            except DesktopProtocolError as exc:
+                raise StoreError(exc.code, str(exc), status=400) from exc
+        return result
+
+    @staticmethod
+    def _validate_review_target(value: Any) -> None:
+        if not isinstance(value, Mapping):
+            raise StoreError("desktop_review_target_invalid", "代码审查目标无效", status=400)
+        kind = value.get("type")
+        if kind == "uncommittedChanges" and set(value) == {"type"}:
+            return
+        branch = value.get("branch")
+        if (
+            kind != "baseBranch"
+            or set(value) != {"type", "branch"}
+            or not isinstance(branch, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", branch)
+            or branch.startswith(("/", "."))
+            or branch.endswith(("/", ".", ".lock"))
+            or ".." in branch
+            or "//" in branch
+            or "@{" in branch
+        ):
+            raise StoreError("desktop_review_target_invalid", "代码审查分支名称无效", status=400)
+
+    def _request_response_preconditions(
+        self,
+        thread: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
+        pending = thread.get("snapshot", {}).get("pending_requests")
+        if not isinstance(pending, list):
+            raise StoreError("desktop_snapshot_refresh_required", "Desktop 待办快照不可用", status=409)
+        matches = [
+            item
+            for item in pending
+            if isinstance(item, Mapping) and item.get("request_ref") == payload.get("request_ref")
+        ]
+        if len(matches) != 1:
+            raise StoreError("desktop_request_ref_stale", "待办已处理或已变化，请刷新", status=409)
+        request = matches[0]
+        if request.get("turn_ref") != payload.get("expected_turn_ref"):
+            raise StoreError("desktop_request_turn_conflict", "待办所属 Turn 已变化", status=409)
+        decision = payload.get("decision")
+        if decision not in request.get("decisions", []):
+            raise StoreError("desktop_request_decision_invalid", "当前待办不允许此响应", status=409)
+        if decision != "submit":
+            return
+        questions = request.get("questions")
+        answers = payload.get("answers")
+        if not isinstance(questions, list) or not isinstance(answers, list):
+            raise StoreError("desktop_request_answers_invalid", "待办答案不完整", status=409)
+        if any(question.get("secret") is True for question in questions if isinstance(question, Mapping)):
+            raise StoreError("desktop_secret_input_unsupported", "敏感问题只能在 Mac 上回答", status=409)
+        by_ref = {
+            item.get("question_ref"): item
+            for item in questions
+            if isinstance(item, Mapping) and isinstance(item.get("question_ref"), str)
+        }
+        answer_map = {
+            item.get("question_ref"): item.get("answers")
+            for item in answers
+            if isinstance(item, Mapping)
+        }
+        required_refs = {
+            ref
+            for ref, question in by_ref.items()
+            if request.get("kind") == "user_input" or question.get("required") is True
+        }
+        if not required_refs.issubset(answer_map) or not set(answer_map).issubset(by_ref):
+            raise StoreError("desktop_request_answers_invalid", "待办答案与问题不匹配", status=409)
+        for ref, values in answer_map.items():
+            question = by_ref[ref]
+            value_type = question.get("value_type")
+            if value_type != "array" and len(values) != 1:
+                raise StoreError("desktop_request_answers_invalid", "该问题只能提交一个答案", status=409)
+            if value_type == "boolean" and values[0].lower() not in {"true", "false"}:
+                raise StoreError("desktop_request_answers_invalid", "布尔答案无效", status=409)
+            if value_type == "integer":
+                try:
+                    int(values[0], 10)
+                except ValueError as exc:
+                    raise StoreError("desktop_request_answers_invalid", "整数答案无效", status=409) from exc
+            if value_type == "number":
+                try:
+                    numeric = float(values[0])
+                except ValueError as exc:
+                    raise StoreError("desktop_request_answers_invalid", "数字答案无效", status=409) from exc
+                if not math.isfinite(numeric):
+                    raise StoreError("desktop_request_answers_invalid", "数字答案无效", status=409)
+            options = {
+                option.get("label")
+                for option in question.get("options", [])
+                if isinstance(option, Mapping) and isinstance(option.get("label"), str)
+            }
+            if options and question.get("allows_other") is not True and any(value not in options for value in values):
+                raise StoreError("desktop_request_answer_not_allowed", "待办答案不在允许选项中", status=409)
+
+    def _normalize_resource_query(self, action: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if action not in RESOURCE_ACTIONS or not isinstance(payload, Mapping):
+            raise StoreError("desktop_resource_query_invalid", "Desktop 资源请求无效", status=400)
+        fields = {
+            "file_list": {"request_id", "thread_revision", "relative_path"},
+            "file_open": {"request_id", "thread_revision", "relative_path", "file_kind"},
+            "file_read": {"request_id", "thread_revision", "file_ref", "offset"},
+            "diagnostic_run": {"request_id", "thread_revision", "diagnostic_id"},
+            "diff_summary": {"request_id", "thread_revision"},
+            "diff_read": {"request_id", "thread_revision", "diff_ref"},
+        }
+        required = fields[action]
+        allowed = required | (
+            {"cursor", "limit"}
+            if action in {"file_list", "diff_read"}
+            else {"limit"}
+            if action in {"file_read", "diff_summary"}
+            else set()
+        )
+        if required - set(payload) or set(payload) - allowed:
+            raise StoreError("desktop_fields_invalid", "Desktop 资源请求字段无效", status=400)
+        result = dict(payload)
+        request_id = result.get("request_id")
+        if not isinstance(request_id, str) or not REQUEST_RE.fullmatch(request_id):
+            raise StoreError("desktop_request_id_invalid", "Desktop request_id 无效", status=400)
+        revision = result.get("thread_revision")
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise StoreError("desktop_revision_invalid", "Desktop thread_revision 无效", status=400)
+        if action in {"file_list", "file_open"}:
+            relative_path = result.get("relative_path")
+            try:
+                # Reuse the protocol's strict path contract via a command-shaped validation later;
+                # these early checks keep API failures local and readable.
+                if not isinstance(relative_path, str) or "\x00" in relative_path or "\\" in relative_path:
+                    raise ValueError
+                path = relative_path.split("/")
+                if (
+                    (action == "file_open" and not relative_path)
+                    or relative_path.startswith("/")
+                    or relative_path.endswith("/")
+                    or any(part in {"", ".", ".."} for part in path if relative_path)
+                    or len(path) > 128
+                    or len(relative_path.encode("utf-8")) > 4096
+                ):
+                    raise ValueError
+            except (TypeError, ValueError) as exc:
+                raise StoreError("desktop_file_path_invalid", "Desktop 相对路径无效", status=400) from exc
+        if action == "file_list":
+            cursor = result.get("cursor")
+            if cursor is not None:
+                self._ref(cursor, "FD")
+            limit = result.get("limit", 100)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+                raise StoreError("desktop_file_limit_invalid", "Desktop 目录分页大小无效", status=400)
+            result["limit"] = limit
+        elif action == "file_open":
+            if result.get("file_kind") not in {"file", "artifact"}:
+                raise StoreError("desktop_file_kind_invalid", "Desktop 文件类型无效", status=400)
+        elif action == "file_read":
+            file_ref = result.get("file_ref")
+            if not isinstance(file_ref, str) or not file_ref.startswith(("FL-", "AR-")):
+                raise StoreError("desktop_file_ref_invalid", "Desktop 文件引用无效", status=400)
+            self._ref(file_ref, file_ref[:2])
+            offset = result.get("offset")
+            if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+                raise StoreError("desktop_file_range_invalid", "Desktop 文件偏移无效", status=400)
+            maximum = 32 * 1024 if file_ref.startswith("FL-") else 64 * 1024
+            limit = result.get("limit", maximum)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= maximum:
+                raise StoreError("desktop_file_limit_invalid", "Desktop 文件分块大小无效", status=400)
+            result["limit"] = limit
+        elif action == "diagnostic_run" and result.get("diagnostic_id") not in DIAGNOSTIC_IDS:
+            raise StoreError("desktop_diagnostic_not_allowed", "Desktop 诊断未在允许列表", status=400)
+        elif action == "diff_summary":
+            limit = result.get("limit", 100)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+                raise StoreError("desktop_diff_limit_invalid", "Desktop Diff 摘要大小无效", status=400)
+            result["limit"] = limit
+        elif action == "diff_read":
+            diff_ref = result.get("diff_ref")
+            if not isinstance(diff_ref, str) or not DIFF_REF_RE.fullmatch(diff_ref) or not diff_ref.startswith("DF-"):
+                raise StoreError("desktop_diff_ref_invalid", "Desktop Diff 文件引用无效", status=400)
+            cursor = result.get("cursor")
+            if cursor is not None and (
+                not isinstance(cursor, str)
+                or not DIFF_REF_RE.fullmatch(cursor)
+                or not cursor.startswith("DC-")
+            ):
+                raise StoreError("desktop_diff_ref_invalid", "Desktop Diff 分页引用无效", status=400)
+            limit = result.get("limit", 32 * 1024)
+            if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 32 * 1024:
+                raise StoreError("desktop_diff_limit_invalid", "Desktop Diff 分块大小无效", status=400)
+            result["limit"] = limit
         return result
 
     def _normalize_history_query(self, kind: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -988,7 +1721,13 @@ class DesktopControllerService:
         if not isinstance(payload, Mapping):
             raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
         required = {"request_id", "host_ref", "project_ref", "input"}
-        allowed = required | {"model", "effort", "image_refs"}
+        allowed = required | {
+            "model",
+            "effort",
+            "permission_profile_id",
+            "collaboration_mode_id",
+            "image_refs",
+        }
         if required - set(payload) or set(payload) - allowed:
             raise StoreError("desktop_fields_invalid", "Desktop 新任务字段无效", status=400)
         result = dict(payload)
@@ -1017,7 +1756,39 @@ class DesktopControllerService:
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}", effort)
         ):
             raise StoreError("desktop_effort_invalid", "Desktop 推理强度无效", status=400)
+        permission_profile_id = result.get("permission_profile_id")
+        if permission_profile_id is not None and (
+            not isinstance(permission_profile_id, str)
+            or permission_profile_id not in PERMISSION_PROFILE_ORDER
+        ):
+            raise StoreError("desktop_permission_profile_invalid", "Desktop 权限档位无效", status=400)
+        collaboration_mode_id = result.get("collaboration_mode_id")
+        if collaboration_mode_id is not None and (
+            not isinstance(collaboration_mode_id, str)
+            or not COLLABORATION_MODE_ID_RE.fullmatch(collaboration_mode_id)
+        ):
+            raise StoreError("desktop_collaboration_mode_invalid", "Desktop 计划模式无效", status=400)
         return result
+
+    @staticmethod
+    def _require_collaboration_mode(host: Mapping[str, Any], collaboration_mode_id: Any) -> None:
+        if "collaboration_mode_catalog_v1" not in set(host.get("capabilities") or []):
+            raise StoreError(
+                "desktop_collaboration_mode_unavailable",
+                "Desktop host 未提供计划模式目录",
+                status=409,
+            )
+        available = {
+            item.get("id")
+            for item in host.get("collaboration_modes") or []
+            if isinstance(item, Mapping)
+        }
+        if collaboration_mode_id not in available:
+            raise StoreError(
+                "desktop_collaboration_mode_unavailable",
+                "所选计划模式已不在当前 App 目录",
+                status=409,
+            )
 
     def _runner_id(self, thread_ref: str) -> str:
         # runner_id remains internal and is intentionally absent from the public Thread DTO.
@@ -1474,6 +2245,14 @@ class _DesktopCreateJournal:
                     "Desktop 新任务 receipt 与请求绑定不一致",
                     status=409,
                 )
+            if row["command_json"] is not None:
+                command_document = json.loads(str(row["command_json"]))
+                if document.get("collaboration_mode_id") != command_document.get("collaboration_mode_id"):
+                    raise StoreError(
+                        "desktop_receipt_binding_conflict",
+                        "Desktop 新任务计划模式收据与请求绑定不一致",
+                        status=409,
+                    )
             if row["receipt_json"] is not None:
                 if row["receipt_json"] == encoded_receipt:
                     return {"status": "duplicate", "orphan": bool(row["orphan"]), "command": self._row(row)}

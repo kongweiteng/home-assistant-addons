@@ -24,6 +24,17 @@ LAYOUT_CSS += r"""
 .history-results{display:grid;gap:6px;min-width:0}.history-result{min-width:0;border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:var(--surface-3)}
 .history-result strong{display:block;margin-bottom:3px;color:var(--muted);font:10px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history-result span{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.history-more{justify-self:start}
 @media(max-width:759px){.history-panel{margin-bottom:15px;padding:9px}.history-toolbar{grid-template-columns:1fr}.history-search{grid-template-columns:minmax(0,1fr) auto}.history-search input{min-width:0;font-size:16px}.history-search button{padding-inline:12px}.history-panel>button{width:100%}}
+.task-settings-state{margin:0;padding:10px 11px;border:1px solid var(--line);border-radius:11px;background:var(--surface-3);color:var(--muted);font-size:12px}.task-settings-state.warning{color:var(--amber);background:var(--amber-soft)}
+"""
+
+# Keep the task action menu above the independently scrolling conversation and
+# make every primary mobile interaction meet the 44px touch-target contract.
+LAYOUT_CSS += r"""
+@media(max-width:759px){
+.detail-head{z-index:40;overflow:visible}.task-menu{z-index:41}.task-menu[open]{z-index:110}.task-menu-popover{z-index:111}
+.top-actions .connection,.project-trigger,.task-menu summary,.task-menu-popover button,.sheet-head button,.sheet-actions button,.resource-tabs button,.resource-toolbar button,.resource-footer button,.advanced summary{min-height:44px}
+.project-trigger{padding-block:8px}.task-menu summary{width:44px;height:44px}.task-menu-popover button{padding-block:10px}
+}
 """
 
 
@@ -41,6 +52,9 @@ def task_first_html(html: str) -> str:
     html = html[:start] + '<nav class="mobile-nav" aria-label="移动端导航"><a href="./" aria-current="page">任务</a><a href="../?view=tools">工具</a><button id="mobileNewTask" class="primary-nav" type="button">新建</button><button id="mobileConnection" type="button">状态</button><a href="../?view=overview">设置</a></nav>' + html[end:]
     html = html.replace('<details id="advancedControls"', '<div id="attachmentTray" class="attachments hidden"></div><input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden><div id="imageHelp" class="image-help">图片能力正在检查</div><details id="advancedControls"', 1)
     html = html.replace('<div class="composer-bar">', '<div class="composer-bar"><button id="addImage" class="attachment-add" type="button" aria-label="添加图片" disabled>图片</button>', 1)
+    html = html.replace('<button id="resourceButton" type="button">文件、Diff 与诊断</button>', '<button id="resourceButton" type="button">文件、Diff 与诊断</button><button id="taskSettingsButton" type="button">任务设置</button>', 1)
+    task_settings = '<section id="taskSettingsSheet" class="rename-sheet hidden" role="dialog" aria-modal="true" aria-labelledby="taskSettingsTitle"><div class="sheet-handle"></div><div class="sheet-head"><h2 id="taskSettingsTitle">任务设置</h2><button id="closeTaskSettings" class="ghost" type="button">关闭</button></div><p class="sheet-copy">当前模式只能以 Mac Runner 的实时确认结果为准。</p><form id="taskSettingsForm" class="rename-form"><div class="field"><label for="taskCollaborationMode">计划模式</label><select id="taskCollaborationMode"></select></div><p id="taskSettingsState" class="task-settings-state">正在读取当前模式。</p><div id="taskSettingsFeedback" class="feedback" role="status"></div><div class="sheet-actions"><button id="cancelTaskSettings" type="button">取消</button><button id="saveTaskSettings" class="primary" type="submit" disabled>保存</button></div></form></section>'
+    html = html.replace('<section id="renameSheet"', task_settings + '<section id="renameSheet"', 1)
     html = html.replace('<div id="conversationInner" class="conversation-inner"></div>', '<section id="historyPanel" class="history-panel" aria-label="较早消息与任务内搜索"><div class="history-toolbar"><button id="loadEarlierMessages" type="button">加载较早消息</button><form id="historySearchForm" class="history-search" role="search"><label class="sr-only" for="historySearchInput">搜索当前任务的公开文本</label><input id="historySearchInput" maxlength="120" placeholder="搜索当前任务"><button id="historySearchButton" type="submit">搜索</button></form></div><p id="historyStatus" class="history-status" role="status">正在检查较早消息</p><div id="historySearchResults" class="history-results hidden"></div><button id="loadMoreSearchResults" class="history-more hidden" type="button">加载更多搜索结果</button></section><div id="conversationInner" class="conversation-inner"></div>', 1)
     html = html.replace('<textarea id="newTaskInput" maxlength="12000" required', '<textarea id="newTaskInput" maxlength="12000"', 1)
     html = html.replace('<div class="field"><label for="newTaskModel">模型</label>', '<div class="create-image-controls"><button id="addCreateImage" class="attachment-add" type="button" aria-label="为新任务添加图片" disabled>' + icon('ImageSquare') + '添加图片</button><div id="createImageHelp" class="image-help">可以添加图片创建任务</div><div id="createAttachmentTray" class="attachments hidden"></div><input id="createImageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden></div><div class="field"><label for="newTaskModel">模型</label>', 1)

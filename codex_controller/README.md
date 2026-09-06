@@ -15,6 +15,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 ## 当前阶段
 
+- `0.5.41` 将内置 manifest 固定到 Runner `0.3.28`，补齐原生 fork/Review、受限 Diff、文件与产物、审批/结构化提问、权限收紧和计划/默认模式；移动与 Web 公用聊天优先的浅色响应式页面，实时数据继续只用 SSE/WSS 增量推送。配套 Relay `0.2.28`、Gateway `0.4.10`，不要求 OpenAI API Key。本节为发布前候选，不代表 HAOS、Mac Runner 或公网入口已升级。
+- `0.5.40` 固定 Runner `0.3.27`：活动任务刷新与全局最近任务发现分离，新建 Thread/Turn 使用原生 ID 有界对账，瞬态 read rejection 不再终止 owning app-server；错误中心同时显示 429 重试耗尽与新建/Turn 的稳定脱敏原因。配套 Relay `0.2.27` 只增加精确安装兼容；实时页面继续使用 SSE，Mac 数据面继续使用持久 WSS，不要求 OpenAI API Key。本节为发布前候选，不代表 HAOS、Mac Runner 或公网入口已经升级。
 - `0.5.39` 将内置 manifest 固定到 Runner `0.3.26`。Runner 的控制前置与写后确认使用独立保留 reader、轻量 app-server 元数据和 Owner IPC 实时状态，避免大历史任务被活动同步池阻塞；只有明确未发送或 App 明确拒绝才允许确定性失败，发送结果不明继续 `unknown` 且禁止重放。配套 Relay `0.2.26` 只增加精确安装兼容。本节为发布前候选，不代表 HAOS、Mac Runner 或公网入口已经升级。
 - `0.5.38` 收紧历史分页的实时交付：活动任务 revision 在查询期间推进不再丢弃同绑定的只读结果，首次请求等待 SSE `ready`，不确定发布或重连后事件窗口裁剪会明确解锁手动重试。历史请求仍不自动重放，普通实时事件的精确 revision 快照门禁不变。内置 manifest 固定 Runner `0.3.25`，配套 Relay `0.2.25` 只增加精确安装兼容，不改变 WSS 与 ACK 契约。
 - `0.5.37` 新增移动端/Web 共用错误中心：状态页展示最近错误并可进入独立、分页的错误列表，明确区分组件错误和 Mac 任务上下文。错误通过 SSE `error_revision` 即时刷新；浏览器只看到稳定错误码、短引用、上海时间和是否可重试，不会看到微信身份、消息正文、URL、凭据或原始异常。Controller 使用既有 Gateway 内部地址与 Bearer 读取最小受保护失败目录，页面不访问 Gateway 管理 API。Runner `0.3.24`/Relay `0.2.23` 保持不变。

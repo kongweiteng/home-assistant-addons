@@ -23,6 +23,7 @@ Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输�
 - `0.4.6` 修复首次 `dispatched` 回复与后台 watch 的并发重复发送：同一 watch 代次复用同一持久出站作业和微信 client ID，只有实际发送成功后才更新通知指纹，失败重试与 continue/cancel 新代次保持可用。
 - `0.4.7` 为 Controller 的 context、额度、认证、请求、sandbox 与瞬态上游失败增加简洁中文提示。Gateway 只根据有界内部错误码选择文案，不发送 app-server raw message、`additionalDetails`、URL、prompt 或 token；瞬态错误只在 Controller 自动重试耗尽后通知用户。
 - `0.4.9` 保留稳定错误码和脱敏失败目录，并将 Ingress 管理状态改为事件驱动 SSE：首帧立即可用、12 秒心跳、Last-Event-ID、指数退避以及网络/前台恢复重连。用户与会话详情只在详情修订变化时各读取一次，不再周期轮询。
+- `0.4.10` 让升级前已绑定 Controller 作业的旧失败记录继续显示 Controller 稳定错误码，不再被误标为微信投递失败；实时 SSE、单 Poller 与唯一 notification consumer 边界不变。
 - `0.4.3` 修复多身份页面变量覆盖导致的 `document.createElement is not a function`，并新增不改长期 desired state 的有界维护暂停/恢复接口；维护超时或 Gateway 重启后会按原状态自动恢复。
 - 新成员由 Owner 在 Ingress 生成独立二维码和一次性接入码；扫码微信与发送接入码的微信必须一致，绑定消息不会进入 Controller。
 - 重新扫码可能使旧 iLink 凭据失效；也可以继续通过私有迁移包导入仍然有效的既有身份。

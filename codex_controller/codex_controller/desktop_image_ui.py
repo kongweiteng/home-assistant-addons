@@ -8,7 +8,7 @@ function createAttachmentsLocked(host = state.selectedHost) { return state.pendi
 function saveCreateDraftFields() {
   const host = imageState.createHost || state.selectedHost;
   if (!host || createAttachmentsLocked(host)) return;
-  imageState.createFields[host] = {input: q('newTaskInput').value, project: q('newTaskProject').value, model: q('newTaskModel').value, effort: q('newTaskEffort').value};
+  imageState.createFields[host] = {input: q('newTaskInput').value, project: q('newTaskProject').value, model: q('newTaskModel').value, effort: q('newTaskEffort').value, permission: q('newTaskPermission')?.value || '', collaborationMode: q('newTaskCollaborationMode')?.value || ''};
 }
 function syncCreateDraftHost() {
   if (imageState.createHost === state.selectedHost) return;
@@ -19,6 +19,8 @@ function syncCreateDraftHost() {
   q('newTaskProject').value = fields.project || '';
   q('newTaskModel').value = fields.model || '';
   q('newTaskEffort').value = fields.effort || '';
+  if (q('newTaskPermission')) q('newTaskPermission').value = fields.permission || '';
+  if (q('newTaskCollaborationMode')) q('newTaskCollaborationMode').value = fields.collaborationMode || '';
 }
 function createImagesReady(host = state.selectedHost) {
   const items = currentCreateAttachments(host);

@@ -32,6 +32,8 @@ SUPPORTED_RUNNER_VERSIONS = frozenset(
         "0.3.24",
         "0.3.25",
         "0.3.26",
+        "0.3.27",
+        "0.3.28",
     }
 )
 EXPECTED_FIELDS = {

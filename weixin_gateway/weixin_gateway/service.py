@@ -2867,11 +2867,19 @@ class GatewayService:
             delivery_code = failure.get("error_code")
             if not isinstance(delivery_code, str) or not PUBLIC_ERROR_CODE_RE.fullmatch(delivery_code):
                 delivery_code = "gateway_delivery_failed"
-            source = "controller" if controller_state else "gateway"
+            # Rows written before the structured failure columns were added
+            # still retain the bound Controller job and its stable terminal
+            # error in ``error_code``.  Treat that durable job binding as the
+            # source-of-truth marker instead of relabelling an old Controller
+            # failure as a Weixin delivery failure after an upgrade.
+            controller_bound = bool(controller_state or failure.get("job_short"))
+            source = "controller" if controller_bound else "gateway"
+            effective_controller_state = str(controller_state or "failed")
+            effective_controller_code = controller_code or delivery_code
             details = (
                 controller_failure_details(
-                    str(controller_state),
-                    controller_code or failure.get("error_code"),
+                    effective_controller_state,
+                    effective_controller_code,
                 )
                 if source == "controller"
                 else gateway_failure_details(delivery_code)
@@ -2881,7 +2889,7 @@ class GatewayService:
                     "failure_short": failure["failure_short"],
                     "job_short": failure.get("job_short"),
                     "source": source,
-                    "state": controller_state or "failed",
+                    "state": effective_controller_state if controller_bound else "failed",
                     "occurred_at": failure["occurred_at"],
                     "error": details,
                     "delivery_error_code": (
@@ -3089,7 +3097,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.9",
+            "version": "0.4.10",
             "details_revision": self._status_details_revision,
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,

@@ -13,8 +13,12 @@ from .desktop_images import IMAGE_REF_RE
 
 THREAD_PATH_RE = re.compile(r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})$")
 EVENTS_PATH_RE = re.compile(r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/events$")
+SETTINGS_PATH_RE = re.compile(r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/settings$")
+COLLABORATION_MODE_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/collaboration-mode$"
+)
 ACTION_PATH_RE = re.compile(
-    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/(steer|interrupt|continue|archive|unarchive)$"
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/(steer|interrupt|continue|archive|unarchive|rename|pin|fork|review)$"
 )
 HISTORY_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/history/(page|search)$"
@@ -28,6 +32,14 @@ QUEUE_ITEM_PATH_RE = re.compile(
 )
 QUEUE_REORDER_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/queue/reorder$"
+)
+REQUEST_RESPONSE_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/requests/"
+    r"(RQ-[A-Z2-7]{20,52})/respond$"
+)
+RESOURCE_PATH_RE = re.compile(
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/"
+    r"(files/list|files/open|files/read|diagnostics/run|diff/summary|diff/read)$"
 )
 
 
@@ -49,14 +61,34 @@ def get_desktop_api(
     if path == "/api/desktop/v1/projects":
         _only(parameters, {"host_ref"})
         return service.projects(host_ref=_one(parameters, "host_ref"))
+    if path == "/api/desktop/v1/management":
+        _only(parameters, {"host_ref"})
+        host_ref = _one(parameters, "host_ref")
+        if host_ref is None:
+            raise StoreError("desktop_query_invalid", "Desktop API host_ref 不能为空", status=400)
+        return service.management(host_ref)
+    if path == "/api/desktop/v1/search":
+        _only(parameters, {"host_ref", "project_ref", "status", "query", "cursor", "limit"})
+        search_query = _one(parameters, "query")
+        if search_query is None:
+            raise StoreError("desktop_query_invalid", "Desktop API query 不能为空", status=400)
+        return service.search(
+            query=search_query,
+            host_ref=_one(parameters, "host_ref"),
+            project_ref=_one(parameters, "project_ref"),
+            status=_one(parameters, "status"),
+            cursor=_integer(parameters, "cursor", default=0, minimum=0, maximum=2**63 - 1),
+            limit=_integer(parameters, "limit", default=20, minimum=1, maximum=20),
+        )
     if path == "/api/desktop/v1/threads":
-        _only(parameters, {"host_ref", "project_ref", "status", "cursor", "limit"})
+        _only(parameters, {"host_ref", "project_ref", "status", "cursor", "limit", "order"})
         return service.threads(
             host_ref=_one(parameters, "host_ref"),
             project_ref=_one(parameters, "project_ref"),
             status=_one(parameters, "status"),
             after_cursor=_integer(parameters, "cursor", default=0, minimum=0, maximum=2**63 - 1),
             limit=_integer(parameters, "limit", default=100, minimum=1, maximum=200),
+            order=_one(parameters, "order"),
         )
     if path == "/api/desktop/v1/events":
         _only(parameters, {"host_ref", "after_cursor", "limit", "wait_seconds"})
@@ -84,6 +116,10 @@ def get_desktop_api(
             limit=_integer(parameters, "limit", default=100, minimum=1, maximum=500),
             wait_seconds=_number(parameters, "wait_seconds", default=0.0, minimum=0.0, maximum=25.0),
         )
+    settings_match = SETTINGS_PATH_RE.fullmatch(path)
+    if settings_match:
+        _only(parameters, set())
+        return service.thread_settings(settings_match.group(1))
     raise StoreError("not_found", "Desktop API 路由不存在", status=404)
 
 
@@ -96,6 +132,33 @@ def post_desktop_api(
         return service.upload_image(payload)
     if path == "/api/desktop/v1/threads":
         return service.create(payload)
+    collaboration_mode = COLLABORATION_MODE_PATH_RE.fullmatch(path)
+    if collaboration_mode is not None:
+        return service.submit(
+            collaboration_mode.group(1),
+            "collaboration_mode_update",
+            payload,
+        )
+    resource = RESOURCE_PATH_RE.fullmatch(path)
+    if resource is not None:
+        thread_ref, route = resource.groups()
+        action = {
+            "files/list": "file_list",
+            "files/open": "file_open",
+            "files/read": "file_read",
+            "diagnostics/run": "diagnostic_run",
+            "diff/summary": "diff_summary",
+            "diff/read": "diff_read",
+        }[route]
+        return service.resource_query(thread_ref, action, payload)
+    request_response = REQUEST_RESPONSE_PATH_RE.fullmatch(path)
+    if request_response is not None:
+        thread_ref, request_ref = request_response.groups()
+        return service.submit(
+            thread_ref,
+            "respond_request",
+            {**payload, "request_ref": request_ref},
+        )
     history = HISTORY_PATH_RE.fullmatch(path)
     if history is not None:
         return service.history_query(history.group(1), history.group(2), payload)
@@ -183,11 +246,15 @@ def _number(
 
 __all__ = [
     "ACTION_PATH_RE",
+    "COLLABORATION_MODE_PATH_RE",
     "EVENTS_PATH_RE",
     "HISTORY_PATH_RE",
     "QUEUE_ADD_PATH_RE",
     "QUEUE_ITEM_PATH_RE",
     "QUEUE_REORDER_PATH_RE",
+    "REQUEST_RESPONSE_PATH_RE",
+    "RESOURCE_PATH_RE",
+    "SETTINGS_PATH_RE",
     "THREAD_PATH_RE",
     "get_desktop_api",
     "post_desktop_api",

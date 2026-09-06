@@ -243,7 +243,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.9"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.10"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -2323,6 +2323,34 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(failure["error"]["title"], "微信消息链路失败")
         self.assertFalse(failure["error"]["retryable"])
 
+    def test_legacy_controller_failure_keeps_controller_source_and_error(self) -> None:
+        message = self.store.store_message(
+            message_id="fixture-legacy-controller-failure",
+            sender_id="fixture-owner",
+            conversation_key="sha256:fixture-conversation",
+            text="不会进入错误中心正文",
+            media=[],
+        )
+        self.store.mark_submitted(message["message_id"], "fixture-controller-job")
+        # This is the durable shape written before controller_state and
+        # controller_error_code were introduced.
+        self.store.mark_finished(
+            message["message_id"],
+            success=False,
+            error_code="response_too_many_failed_attempts",
+        )
+
+        failure = self.service().failures()["items"][0]
+        self.assertEqual(failure["source"], "controller")
+        self.assertEqual(failure["state"], "failed")
+        self.assertRegex(failure["job_short"], r"^JB-[A-Z2-7]{10}$")
+        self.assertEqual(
+            failure["error"]["code"],
+            "response_too_many_failed_attempts",
+        )
+        self.assertTrue(failure["error"]["retryable"])
+        self.assertIn("上游连续失败", failure["error"]["message"])
+
     def test_session_expired_keeps_completed_result_pending_without_weixin_retry(self) -> None:
         message = self.store.store_message(
             message_id="fixture-session-expired",
@@ -3441,7 +3469,7 @@ class AdminApiTests(unittest.TestCase):
                 frame = json.loads(fields["data"])
                 self.assertEqual(fields["event"], "status")
                 self.assertEqual(fields["id"], str(frame["revision"]))
-                self.assertEqual(frame["status"]["version"], "0.4.9")
+                self.assertEqual(frame["status"]["version"], "0.4.10")
                 self.assertIn("csrf_token", frame["status"])
                 self.assertNotIn("fixture-owner", json.dumps(frame, ensure_ascii=False))
             finally:

@@ -1,6 +1,12 @@
 # 更新记录
 
-## 0.5.42 — local candidate
+## 0.5.43 — local candidate
+
+- 内置安装身份提升到 Runner `0.3.30`；App-owned Bridge 在大型任务库全量清单之前探测，并由活动通道异步周期重试。
+- 没有活动任务时以一个最近任务承载 Host 能力变化，使 rename、pin、fork 和 Review 在启动或网络恢复后快速可用。
+- 保留 `0.5.42` 的第一方 `read_thread` 校验、浅色移动/Web 工作台、SSE/WSS、图文、新建/继续、审批/提问、Diff/资源、模式与权限边界；Gateway 保持 `0.4.10`，Relay `0.2.30` 只增加 Runner `0.3.30` 精确滚动兼容。
+
+## 0.5.42 — released
 
 - 内置安装身份提升到 Runner `0.3.29`；App-owned bridge 改用第一方 `read_thread` 校验未加载的锚点与目标任务，使 rename/pin/fork/Review 在真实 Mac Codex App 任务库中可用。
 - 授权仍精确绑定本机 host、原 Thread、`kind=codex` 和项目真实路径；畸形、跨主机、跨项目或不可解析结果在任何写动作前失败关闭。

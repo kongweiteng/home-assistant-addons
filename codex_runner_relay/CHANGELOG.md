@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.29 — local candidate
+
+- 安装目录精确接受 Runner `0.3.29`，并完整保留 `0.3.28` 与全部原有回滚版本。
+- WSS envelope、存储、连接绑定和 ACK 语义不变；业务能力修复只发生在 Runner App-owned bridge，Relay 不解析或扩大其权限。
+
 ## 0.2.28 — local candidate
 
 - 安装目录精确接受 Runner `0.3.28`，并完整保留 `0.3.27` 与全部原有回滚版本。

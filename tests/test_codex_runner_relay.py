@@ -34,8 +34,8 @@ class RelayProtocolUnitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "codex_runner_relay"
         config = (root / "config.yaml").read_text(encoding="utf-8")
         run_script = (root / "run.sh").read_text(encoding="utf-8")
-        self.assertEqual(__version__, "0.2.23")
-        self.assertIn('version: "0.2.23"', config)
+        self.assertEqual(__version__, "0.2.24")
+        self.assertIn('version: "0.2.24"', config)
         self.assertEqual(
             SUPPORTED_RUNNER_VERSIONS,
             frozenset(
@@ -379,6 +379,37 @@ class RelayIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await ws.receive_json(timeout=2),
             {"type": "error", "code": "desktop_event_sequence_stale"},
         )
+        await ws.close()
+
+    async def test_conflicting_stale_snapshot_is_transport_acked_without_blocking_runner(self) -> None:
+        self.controller.event_error_code = "desktop_revision_conflict"
+        ws = await self.enroll()
+        snapshot = {
+            "message_type": "desktop_snapshot",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "2" * 64,
+        }
+        await ws.send_json(
+            {"type": "event", "event_type": "desktop_snapshot", "document": snapshot}
+        )
+        self.assertEqual(
+            await ws.receive_json(timeout=2),
+            {
+                "type": "ack",
+                "event_type": "desktop_snapshot",
+                "body_digest": snapshot["body_digest"],
+            },
+        )
+        self.controller.event_error_code = None
+        heartbeat = {
+            "message_type": "heartbeat",
+            "runner_id": RUNNER_ID,
+            "body_digest": "sha256:" + "3" * 64,
+        }
+        await ws.send_json(
+            {"type": "event", "event_type": "heartbeat", "document": heartbeat}
+        )
+        self.assertEqual((await ws.receive_json(timeout=2))["event_type"], "heartbeat")
         await ws.close()
 
     async def test_non_terminal_controller_rejection_still_closes_runner(self) -> None:

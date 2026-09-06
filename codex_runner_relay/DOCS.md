@@ -1,6 +1,6 @@
 # Codex Runner Relay 使用说明
 
-`0.2.23` 的安装目录新增精确 Runner `0.3.24`，保留既有版本。图片字节只作为已有 Desktop 命令中的有界输入转发；Relay 不保存图片副本，不修改图片 TTL、任务身份或业务控制权限。
+`0.2.24` 的安装目录保留精确 Runner `0.3.24`，并对 Controller 明确拒绝为 `desktop_revision_conflict` 的旧快照返回传输 ACK，使后续心跳和实时事件继续流动。图片字节只作为已有 Desktop 命令中的有界输入转发；Relay 不保存图片副本，不修改图片 TTL、任务身份或业务控制权限。
 
 ## 内部配置
 

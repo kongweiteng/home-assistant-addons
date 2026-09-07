@@ -261,6 +261,11 @@ class CollaborationModeTests(unittest.TestCase):
 
         self.assertEqual(validated["host"]["collaboration_modes"], MODES)
         self.assertEqual(validated["body_digest"], body_digest(validated))
+        first = self.service.receive("desktop_host", document)
+        duplicate = self.service.receive("desktop_host", document)
+        self.assertEqual(first["status"], "stored")
+        self.assertEqual(duplicate["status"], "duplicate")
+        self.assertEqual(self.store.list_hosts()[0]["collaboration_modes"], MODES)
 
     def test_capabilities_are_independent_but_require_catalog_contract(self) -> None:
         for capability in ("collaboration_mode_turn_v1", "thread_collaboration_mode_update_v1"):

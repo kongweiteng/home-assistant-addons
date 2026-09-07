@@ -1263,7 +1263,7 @@ class DesktopStore:
                             "同一 Desktop host sequence 出现不同状态",
                             status=409,
                         )
-                    if _host_time(host.get("synced_at")) >= _host_time(existing["synced_at"]):
+                    if _host_time(host.get("synced_at")) > _host_time(existing["synced_at"]):
                         connection.execute(
                             "UPDATE desktop_hosts SET state=?,control_enabled=?,document_json=?,"
                             "host_digest=?,synced_at=?,data_synced_at=?,updated_at=? WHERE host_ref=?",

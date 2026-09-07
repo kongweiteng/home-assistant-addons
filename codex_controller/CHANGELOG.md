@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.48 — released
+
+- 内置安装身份提升到 Runner `0.3.35`。Controller 仅对旧 Runner 的完整五字段 `collaboration_modes` 目录验签并规范化为三字段公开目录，再执行现有完整 Host/任务快照校验；规范化后的状态以新摘要持久化，Relay 仍用原始摘要 ACK。
+- Runner 修复独立实时 Host 发布误用内部模式设置的问题，不在本机删除历史 outbox；其他畸形内容、绑定冲突和未知写结果继续失败关闭。Relay `0.2.35` 只增加 Runner `0.3.35` 精确滚动兼容，Gateway 保持 `0.4.10`。
+
 ## 0.5.47 — released
 
 - 内置安装身份提升到 Runner `0.3.34`，在 Host 队头恢复基础上同时清理已有唯一更高版本替代的旧 `desktop_snapshot` 状态投影，避免旧格式快照继续阻塞实时任务、事件与心跳。

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 OPTIONS_FILE="${CONTROLLER_OPTIONS_FILE:-/data/options.json}"
-CONTROLLER_VERSION="0.5.47"
+CONTROLLER_VERSION="0.5.48"
 if [ ! -f "$OPTIONS_FILE" ]; then
     bashio::log.fatal "缺少 Add-on options 文件"
     exit 1

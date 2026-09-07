@@ -198,6 +198,7 @@ def intent_digest(value: Mapping[str, Any]) -> str:
 
 
 def validate_desktop_document(message_type: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    value = _normalize_legacy_collaboration_catalog(message_type, value)
     if message_type == "desktop_host":
         return _validate_host(value)
     if message_type == "desktop_snapshot":
@@ -207,6 +208,53 @@ def validate_desktop_document(message_type: str, value: Mapping[str, Any]) -> di
     if message_type == "desktop_receipt":
         return _validate_receipt(value)
     raise DesktopProtocolError("desktop_message_type_invalid", "Desktop 消息类型无效")
+
+
+def _normalize_legacy_collaboration_catalog(
+    message_type: str,
+    value: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Accept only the previous five-field catalog, then validate as current."""
+
+    if message_type not in {"desktop_host", "desktop_snapshot"}:
+        return value
+    if not isinstance(value, Mapping):
+        return value
+    host = value.get("host")
+    if not isinstance(host, Mapping):
+        return value
+    modes = host.get("collaboration_modes")
+    legacy_fields = {"id", "label", "mode", "model", "reasoning_effort"}
+    if (
+        not isinstance(modes, list)
+        or not modes
+        or any(not isinstance(item, Mapping) or set(item) != legacy_fields for item in modes)
+    ):
+        return value
+
+    # Verify the immutable Runner envelope before changing its public shape.
+    # The normalized copy then goes through the complete current validator,
+    # including every nested Host and snapshot contract.
+    _base(value, message_type)
+    _digest(value)
+    _public(value)
+    for item in modes:
+        model = item.get("model")
+        effort = item.get("reasoning_effort")
+        if model is not None:
+            _model_id(model)
+        if effort is not None:
+            _effort(effort)
+
+    normalized = dict(value)
+    normalized_host = dict(host)
+    normalized_host["collaboration_modes"] = [
+        {"id": item["id"], "label": item["label"], "mode": item["mode"]}
+        for item in modes
+    ]
+    normalized["host"] = normalized_host
+    normalized["body_digest"] = body_digest(normalized)
+    return normalized
 
 
 def build_desktop_command(

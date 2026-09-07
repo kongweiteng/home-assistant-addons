@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import datetime as dt
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -133,6 +135,132 @@ class CollaborationModeTests(unittest.TestCase):
             invalid["body_digest"] = body_digest(invalid)
             with self.assertRaises(DesktopProtocolError):
                 validate_desktop_document("desktop_snapshot", invalid)
+
+    def test_legacy_catalog_is_verified_normalized_and_fully_validated(self) -> None:
+        legacy = snapshot()
+        for mode in legacy["host"]["collaboration_modes"]:
+            mode["model"] = None
+            mode["reasoning_effort"] = "medium" if mode["mode"] == "plan" else None
+        original_digest = body_digest(legacy)
+        legacy["body_digest"] = original_digest
+        original = copy.deepcopy(legacy)
+
+        validated = validate_desktop_document("desktop_snapshot", legacy)
+
+        self.assertEqual(legacy, original)
+        self.assertEqual(validated["host"]["collaboration_modes"], MODES)
+        self.assertNotEqual(validated["body_digest"], original_digest)
+        self.assertEqual(validated["body_digest"], body_digest(validated))
+
+        first = self.service.receive("desktop_snapshot", legacy)
+        duplicate = self.service.receive("desktop_snapshot", legacy)
+        self.assertEqual(first["status"], "stored")
+        self.assertEqual(duplicate["status"], "duplicate")
+        self.assertEqual(self.store.list_hosts()[0]["collaboration_modes"], MODES)
+        with self.store._connect() as connection:
+            stored_host = connection.execute(
+                "SELECT document_json FROM desktop_hosts WHERE host_ref=?",
+                (HOST_REF,),
+            ).fetchone()
+            stored = connection.execute(
+                "SELECT body_digest,document_json FROM desktop_snapshots "
+                "WHERE thread_ref=? AND thread_revision=?",
+                (THREAD_REF, 7),
+            ).fetchone()
+        self.assertIsNotNone(stored)
+        self.assertIsNotNone(stored_host)
+        self.assertEqual(
+            json.loads(stored_host["document_json"])["collaboration_modes"],
+            MODES,
+        )
+        stored_document = json.loads(stored["document_json"])
+        self.assertEqual(stored["body_digest"], validated["body_digest"])
+        self.assertEqual(stored_document, validated)
+
+        invalid_digest = snapshot()
+        for mode in invalid_digest["host"]["collaboration_modes"]:
+            mode.update({"model": None, "reasoning_effort": None})
+        with self.assertRaises(DesktopProtocolError) as context:
+            validate_desktop_document("desktop_snapshot", invalid_digest)
+        self.assertEqual(context.exception.code, "desktop_digest_invalid")
+
+        malformed_nested = snapshot()
+        for mode in malformed_nested["host"]["collaboration_modes"]:
+            mode.update({"model": None, "reasoning_effort": None})
+        malformed_nested["host"]["models"] = "not-a-catalog"
+        malformed_nested["body_digest"] = body_digest(malformed_nested)
+        with self.assertRaises(DesktopProtocolError) as context:
+            validate_desktop_document("desktop_snapshot", malformed_nested)
+        self.assertEqual(context.exception.code, "desktop_host_invalid")
+
+        mixed_shape = snapshot()
+        mixed_shape["host"]["collaboration_modes"][0].update(
+            {"model": None, "reasoning_effort": "medium"}
+        )
+        mixed_shape["body_digest"] = body_digest(mixed_shape)
+        with self.assertRaises(DesktopProtocolError):
+            validate_desktop_document("desktop_snapshot", mixed_shape)
+
+        def legacy_document() -> dict:
+            document = snapshot()
+            for mode in document["host"]["collaboration_modes"]:
+                mode.update({"model": None, "reasoning_effort": None})
+            return document
+
+        malformed_nested_fields = (
+            ("models", lambda item: item["host"].__setitem__("models", "invalid")),
+            ("settings_catalog", lambda item: item["host"].__setitem__("settings_catalog", {})),
+            ("permission_profiles", lambda item: item["host"].__setitem__("permission_profiles", "invalid")),
+            ("sync_health", lambda item: item["host"].__setitem__("sync_health", {})),
+            ("app_bridge", lambda item: item["host"].__setitem__("app_bridge", {})),
+            ("status", lambda item: item["snapshot"].__setitem__("status", "invalid")),
+            ("turns", lambda item: item["snapshot"].__setitem__("turns", "invalid")),
+            ("permission_profile", lambda item: item["snapshot"].__setitem__("permission_profile", {})),
+            ("collaboration_mode", lambda item: item["snapshot"].__setitem__("collaboration_mode", {})),
+            ("queued_submissions", lambda item: item["snapshot"].__setitem__("queued_submissions", "invalid")),
+            ("pending_requests", lambda item: item["snapshot"].__setitem__("pending_requests", "invalid")),
+        )
+        for name, mutate in malformed_nested_fields:
+            with self.subTest(malformed=name):
+                invalid = legacy_document()
+                mutate(invalid)
+                invalid["body_digest"] = body_digest(invalid)
+                with self.assertRaises(DesktopProtocolError):
+                    validate_desktop_document("desktop_snapshot", invalid)
+
+    def test_legacy_standalone_host_is_normalized(self) -> None:
+        source = snapshot()
+        host = source["host"]
+        for mode in host["collaboration_modes"]:
+            mode.update({"model": None, "reasoning_effort": None})
+        host["capabilities"].append("desktop_host_v1")
+        host["sync_health"] = {
+            "lane": "host",
+            "timings_ms": {"total": 1},
+            "last_success": NOW.isoformat(),
+            "data_age_ms": 1,
+            "consecutive_failures": 0,
+        }
+        host["app_bridge"] = {
+            "ready": False,
+            "last_success": None,
+            "last_error_code": "bridge_unavailable",
+        }
+        document = {
+            "version": 1,
+            "message_type": "desktop_host",
+            "runner_id": RUNNER_ID,
+            "created_at": NOW.isoformat(),
+            "host_ref": HOST_REF,
+            "host_sequence": 1,
+            "host": host,
+        }
+        document["body_digest"] = body_digest(document)
+
+        validated = validate_desktop_document("desktop_host", document)
+
+        self.assertEqual(validated["host"]["collaboration_modes"], MODES)
+        self.assertEqual(validated["body_digest"], body_digest(validated))
 
     def test_capabilities_are_independent_but_require_catalog_contract(self) -> None:
         for capability in ("collaboration_mode_turn_v1", "thread_collaboration_mode_update_v1"):

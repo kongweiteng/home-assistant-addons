@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.5.47 — released
+
+- 内置安装身份提升到 Runner `0.3.34`，在 Host 队头恢复基础上同时清理已有唯一更高版本替代的旧 `desktop_snapshot` 状态投影，避免旧格式快照继续阻塞实时任务、事件与心跳。
+- snapshot 仅按同 topic 严格递增的 `(thread_revision, snapshot_sequence)` 压缩；合法 `thread_revision=0` 与缺省旧序号兼容，畸形序号和最高序号分叉失败关闭。`desktop_event`、命令、回执、任务结果和 unknown 写入保持不变。Relay `0.2.34` 只增加 Runner `0.3.34` 精确滚动安装兼容，Gateway 保持 `0.4.10`。
+
 ## 0.5.46 — released
 
 - 内置安装身份提升到 Runner `0.3.33`，修复升级后已尝试的旧 `desktop_host` 协议信封永久阻塞新 Host、任务快照、实时事件与心跳的问题。

@@ -22,7 +22,7 @@ def private_resolver(_host: str, port: int, **_kwargs: object) -> list[tuple]:
 def manifest_document() -> dict:
     return {
         "version": 2,
-        "runner_version": "0.3.33",
+        "runner_version": "0.3.34",
         "codex_version": "0.146.0",
         "python_version": "3.11.13",
         "self_contained": True,
@@ -133,7 +133,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
         self.assertIn("sudo sh", linux["command"])
         self.assertNotIn("CODEX_RUNNER_ENROLLMENT_TOKEN", linux["command"])
         self.assertNotIn("--asset-sha256", linux["command"])
-        self.assertEqual(linux["runner_version"], "0.3.33")
+        self.assertEqual(linux["runner_version"], "0.3.34")
         self.assertTrue(linux["self_contained"])
 
         macos = catalog.command(
@@ -170,7 +170,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             {
                 "ready": False,
                 "error_code": "installer_manifest_digest_mismatch",
-                "runner_version": "0.3.33",
+                "runner_version": "0.3.34",
             },
         )
 
@@ -195,7 +195,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
         status = catalog.status()
 
         self.assertEqual(status["ready"], True)
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
 
     def test_pinned_manifest_body_digest_mismatch_fails_closed(self) -> None:
         catalog = RunnerInstallerCatalog(
@@ -212,7 +212,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             {
                 "ready": False,
                 "error_code": "installer_manifest_digest_mismatch",
-                "runner_version": "0.3.33",
+                "runner_version": "0.3.34",
             },
         )
 
@@ -238,7 +238,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
             {
                 "ready": False,
                 "error_code": "installer_manifest_version_mismatch",
-                "runner_version": "0.3.33",
+                "runner_version": "0.3.34",
             },
         )
 
@@ -262,7 +262,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
 
         self.assertEqual(status["ready"], False)
         self.assertEqual(status["error_code"], "installer_manifest_version_mismatch")
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
 
     def test_packaged_runner_0325_manifest_matches_frozen_candidate_digest(self) -> None:
         package_root = Path(codex_controller.__file__).parent
@@ -284,7 +284,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
 
         self.assertEqual(status["ready"], False)
         self.assertEqual(status["error_code"], "installer_manifest_version_mismatch")
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
 
     def test_packaged_runner_0328_manifest_matches_frozen_candidate_digest(self) -> None:
         package_root = Path(codex_controller.__file__).parent
@@ -306,7 +306,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
 
         self.assertEqual(status["ready"], False)
         self.assertEqual(status["error_code"], "installer_manifest_version_mismatch")
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
 
     def test_packaged_runner_0329_manifest_matches_frozen_candidate_digest(self) -> None:
         package_root = Path(codex_controller.__file__).parent
@@ -328,7 +328,7 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
 
         self.assertEqual(status["ready"], False)
         self.assertEqual(status["error_code"], "installer_manifest_version_mismatch")
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
 
     def test_packaged_runner_0331_manifest_matches_frozen_candidate_digest(self) -> None:
         package_root = Path(codex_controller.__file__).parent
@@ -350,17 +350,17 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
 
         self.assertEqual(status["ready"], False)
         self.assertEqual(status["error_code"], "installer_manifest_version_mismatch")
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
 
-    def test_packaged_runner_0333_manifest_matches_frozen_release_digest(self) -> None:
+    def test_packaged_runner_0334_manifest_matches_frozen_release_digest(self) -> None:
         package_root = Path(codex_controller.__file__).parent
-        body = (package_root / "runner_manifest_v0333.json").read_bytes()
+        body = (package_root / "runner_manifest_v0334.json").read_bytes()
         self.assertEqual(
             hashlib.sha256(body).hexdigest(),
-            "0864ef4c495eda8bd20fa53c3fb39e9a1d5c741f7bb292b1aab537efce60779e",
+            "204c3f44949ad865e7fbf3d50367b0d7216ccc87ec4226fa8867cf040f205674",
         )
         catalog = RunnerInstallerCatalog(
-            "https://github.com/kongweiteng/home-assistant-addons/releases/download/codex-runner-v0.3.33/manifest.json",
+            "https://github.com/kongweiteng/home-assistant-addons/releases/download/codex-runner-v0.3.34/manifest.json",
             hashlib.sha256(body).hexdigest(),
             "wss://runner.example.com/v1/connect",
             pinned_manifest_body=body,
@@ -372,9 +372,9 @@ class RunnerInstallerCatalogTests(unittest.TestCase):
 
         self.assertEqual(status["ready"], True)
         self.assertIsNone(status["error_code"])
-        self.assertEqual(status["runner_version"], "0.3.33")
+        self.assertEqual(status["runner_version"], "0.3.34")
         main_source = (package_root / "main.py").read_text(encoding="utf-8")
-        self.assertIn('with_name("runner_manifest_v0333.json")', main_source)
+        self.assertIn('with_name("runner_manifest_v0334.json")', main_source)
 
     def test_manifest_requires_all_four_assets_and_public_https_urls(self) -> None:
         incomplete = manifest_document()

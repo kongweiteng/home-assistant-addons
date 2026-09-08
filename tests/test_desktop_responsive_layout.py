@@ -80,7 +80,7 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
         for target in ("mobileProjects", "projectScope", "projectPanel", "closeProjects",
                        "mobileNewTask", "mobileConnection", "composer", "composerInput",
                        "conversationView", "connectionState", "taskMenu", "threadList",
-                       "connectionBridgeHealth", "connectionErrorPanel",
+                       "connectionBridgeRecovery", "connectionBridgeHealth", "connectionErrorPanel",
                        "connectionErrorCode", "copyConnectionError"):
             self.assertIn(target, self.nodes.attributes)
         self.assertEqual(len(self.nodes.mobile_navigation), 5)
@@ -89,11 +89,13 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
         self.assertIn("../?view=runners", DESKTOP_DASHBOARD_HTML)
         self.assertIn('href="../?view=errors#errors"', DESKTOP_DASHBOARD_HTML)
 
-    def test_connection_sheet_distinguishes_activation_from_health(self):
-        self.assertIn("最近激活尝试", DESKTOP_DASHBOARD_HTML)
-        self.assertIn("最近交给系统", DESKTOP_DASHBOARD_HTML)
+    def test_connection_sheet_explains_passive_bridge_recovery(self):
+        self.assertIn("Bridge 恢复", DESKTOP_DASHBOARD_HTML)
+        self.assertIn("被动重连", DESKTOP_DASHBOARD_HTML)
+        self.assertIn("不会切换桌面窗口", DESKTOP_DASHBOARD_JS)
         self.assertIn("最近健康确认", DESKTOP_DASHBOARD_HTML)
-        self.assertNotIn("Bridge 最近成功", DESKTOP_DASHBOARD_HTML)
+        self.assertNotIn("最近激活尝试", DESKTOP_DASHBOARD_HTML)
+        self.assertNotIn("最近交给系统", DESKTOP_DASHBOARD_HTML)
 
     def test_bridge_error_code_is_visible_and_copyable(self):
         script = "\n".join(
@@ -112,7 +114,7 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
                 javascript_function(DESKTOP_DASHBOARD_JS, "freshness"),
                 javascript_function(DESKTOP_DASHBOARD_JS, "renderFreshness"),
                 javascript_function(DESKTOP_DASHBOARD_JS, "copyConnectionError"),
-                "(async () => { renderFreshness(); await copyConnectionError(); process.stdout.write(JSON.stringify({bridge: nodes.connectionBridge.textContent, panel: nodes.connectionErrorPanel.className, code: nodes.connectionErrorCode.textContent, copied: globalThis.copied, activation: nodes.connectionBridgeSuccess.textContent, health: nodes.connectionBridgeHealth.textContent, copyState: nodes.connectionErrorCopyState.textContent})); })();",
+                "(async () => { renderFreshness(); await copyConnectionError(); process.stdout.write(JSON.stringify({bridge: nodes.connectionBridge.textContent, panel: nodes.connectionErrorPanel.className, code: nodes.connectionErrorCode.textContent, copied: globalThis.copied, recovery: nodes.connectionBridgeRecovery.textContent, health: nodes.connectionBridgeHealth.textContent, copyState: nodes.connectionErrorCopyState.textContent})); })();",
             )
         )
         completed = subprocess.run(
@@ -122,7 +124,7 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
             text=True,
         )
         result = json.loads(completed.stdout)
-        self.assertIn("激活尝试 2 次", result["bridge"])
+        self.assertEqual(result["bridge"], "不可用 · 后台连接探测中")
         self.assertNotIn("已恢复", result["bridge"])
         self.assertEqual(result["panel"], "connection-error")
         self.assertEqual(
@@ -130,7 +132,7 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
             "bridge_unavailable\nbridge_activation_failed",
         )
         self.assertEqual(result["copied"], result["code"])
-        self.assertEqual(result["activation"], "已记录")
+        self.assertEqual(result["recovery"], "被动重连 · 不会切换桌面窗口")
         self.assertEqual(result["health"], "时间未知")
         self.assertEqual(result["copyState"], "错误码已复制。")
 

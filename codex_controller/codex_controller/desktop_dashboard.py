@@ -203,16 +203,13 @@ function renderFreshness() {
       host?.last_error_code,
       host?.sync_health?.last_error_code,
     ].filter(item => typeof item === 'string' && /^[a-z][a-z0-9_]{1,63}$/.test(item)))];
-    const bridgeAttempts = bridge?.recovery_attempt_count ?? bridge?.restart_count ?? 0;
-    const bridgeRetry = bridge?.retry_seconds ?? 0;
     q('connectionBridge').textContent = bridge?.ready
       ? '健康检查通过'
       : bridge
-        ? `不可用 · 激活尝试 ${bridgeAttempts} 次 · ${bridgeRetry > 0 ? `${bridgeRetry} 秒后重试` : '等待再次探测'}`
+        ? '不可用 · 后台连接探测中'
         : '等待 Bridge 探测';
     q('connectionBridge').title = '';
-    q('connectionBridgeAttempt').textContent = formatTime(bridge?.last_attempt);
-    q('connectionBridgeSuccess').textContent = formatTime(bridge?.last_activation_success);
+    q('connectionBridgeRecovery').textContent = '被动重连 · 不会切换桌面窗口';
     q('connectionBridgeHealth').textContent = formatTime(bridge?.last_success);
     q('connectionErrorPanel').className = `connection-error ${diagnosticCodes.length ? '' : 'hidden'}`.trim();
     q('connectionErrorCode').textContent = diagnosticCodes.join('\n');

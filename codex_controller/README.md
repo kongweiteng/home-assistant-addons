@@ -15,6 +15,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 ## 当前阶段
 
+- `0.5.51` 将内置 manifest 固定到 Runner `0.3.38`。Runner 标准运行和 Bridge 健康探测只做被动 Socket 重试，绝不调用 `open` 或 `codex://`，因此不会自动启动 Codex App、切换任务或抢占当前窗口；Bridge 自行恢复后管理能力会在下一次探测中恢复。实时连接页同步显示这一安全边界。配套 Relay `0.2.38`，Gateway 保持 `0.4.10`；WSS/SSE、Runner/LaunchAgent 自动恢复、原 Thread/Turn、图文和无 OpenAI API Key 行为不变。
 - `0.5.50` 将内置 manifest 固定到 Runner `0.3.37`。Runner 的全量任务目录只走 App state database 分页，并把 App-owned 管理目录改为后台可选增强，避免数百任务目录继续等待逐任务历史或慢 App-tool 响应。浅色移动/Web 工作台、Host SSE、原 Thread/Turn、图文、实时增量链路与无 OpenAI API Key 边界不变。配套 Relay `0.2.37`，Gateway 保持 `0.4.10`。源码发布不代表 HAOS、Mac Runner 或公网入口已完成升级验收。
 - `0.5.49` 将内置 manifest 固定到 Runner `0.3.36`。Runner 精确适配当前 App runtime；首轮完整目录不再逐项加载历史任务队列和 Owner 历史，同项目重复投影只在更新时间严格可排序时选取最新项。Bridge 慢响应使用连续失败阈值、最近成功保鲜与后台唤醒安静期，避免桌面 Codex 窗口反复跳转。浅色移动/Web 工作台、Host SSE、原 Thread/Turn、图文、实时增量链路与无 OpenAI API Key 边界不变。配套 Relay `0.2.36`，Gateway 保持 `0.4.10`。源码发布不代表 HAOS、Mac Runner 或公网入口已完成升级验收。
 - `0.5.44` 将内置 manifest 固定到 Runner `0.3.31`。Runner 会在 329 个任务的全量清单与队列读取之前探测 App-owned Bridge，并由活动通道周期重试；管理能力待发布时，在既有 worker 限额（默认 4、上限 8）内为一个非活动最近任务保留承载槽位，避免超长活动任务占满通道。任一快速承载任务的快照原子进入 durable outbox 后即可发布 rename/pin/fork/Review，入队失败会继续重试；没有活动任务时也会使用最近任务承载。校验继续绑定本机 host、原 Thread、`kind=codex` 和项目真实路径；配套 Relay `0.2.31` 只增加精确安装兼容，Gateway 保持 `0.4.10`。页面、实时 SSE/WSS、图文、新建/继续、审批/提问、Diff/资源、模式和权限边界不变，不要求 OpenAI API Key。本节为发布前候选，不代表 HAOS、Mac Runner 或公网入口已升级。

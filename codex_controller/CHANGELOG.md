@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.51 — released
+
+- 内置安装身份升级到 Runner `0.3.38`：标准运行和 Bridge 健康探测完全被动，不再调用 `open` 或 `codex://`，不会自动启动 Codex App、切换任务或抢占桌面窗口。
+- 实时连接页明确显示“被动重连 · 不会切换桌面窗口”，Bridge 不可用时保留稳定脱敏错误码和最近健康确认；Bridge 自行恢复后，Runner 会在下一次探测中恢复管理能力。
+- 配套 Relay `0.2.38` 仅新增 Runner `0.3.38` 精确安装兼容；Gateway 保持 `0.4.10`，WSS/SSE、Runner/LaunchAgent 自动恢复、原 Thread/Turn、图文和无 OpenAI API Key 边界不变。
+
 ## 0.5.50 — released
 
 - 内置安装身份升级到 Runner `0.3.37`；固定四平台自包含制品 manifest 与摘要，安装目录继续精确失败关闭。

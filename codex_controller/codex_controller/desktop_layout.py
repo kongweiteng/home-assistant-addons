@@ -53,9 +53,11 @@ def task_first_html(html: str) -> str:
     html = html.replace("</style>", LAYOUT_CSS + '.create-image-controls{display:grid;gap:7px;min-width:0}.create-image-controls>.attachment-add{justify-self:start;min-height:44px;flex-direction:row;font-size:13px;gap:7px}.create-image-controls .attachments{min-width:0;max-width:100%;padding-right:10px}.create-image-controls .image-help{padding:0}.new-task-sheet{max-height:calc(var(--app-height,100dvh) - 24px)}' + "</style>", 1)
     html = html.replace('<div class="top-actions">', '<nav class="app-nav" aria-label="应用导航"><a href="./" aria-current="page">任务</a><a href="../?view=tools">工具</a><a href="../?view=runners">状态</a><a href="../?view=overview">设置</a></nav><div class="top-actions">', 1)
     html = html.replace('<a href="../" class="settings-link">设置</a>', "")
-    html = html.replace('<span>Bridge 最近尝试</span>', '<span>最近激活尝试</span>', 1)
-    html = html.replace('<span>Bridge 最近成功</span>', '<span>最近交给系统</span>', 1)
-    html = html.replace('<strong id="connectionBridgeSuccess">尚未记录</strong></div>', '<strong id="connectionBridgeSuccess">尚未记录</strong></div><div class="connection-row"><span>最近健康确认</span><strong id="connectionBridgeHealth">尚未确认</strong></div>', 1)
+    html = html.replace(
+        '<div class="connection-row"><span>Bridge 最近尝试</span><strong id="connectionBridgeAttempt">尚未记录</strong></div><div class="connection-row"><span>Bridge 最近成功</span><strong id="connectionBridgeSuccess">尚未记录</strong></div>',
+        '<div class="connection-row"><span>Bridge 恢复</span><strong id="connectionBridgeRecovery">被动重连</strong></div><div class="connection-row"><span>最近健康确认</span><strong id="connectionBridgeHealth">尚未确认</strong></div>',
+        1,
+    )
     connection_diagnostics = '<section id="connectionErrorPanel" class="connection-error hidden" aria-labelledby="connectionErrorTitle"><div class="connection-error-head"><span id="connectionErrorTitle">当前诊断代码</span><button id="copyConnectionError" type="button" disabled>复制错误码</button></div><code id="connectionErrorCode" class="connection-error-code" tabindex="0"></code><p id="connectionErrorCopyState" class="connection-error-copy-state" role="status">错误码仅包含脱敏后的稳定标识。</p></section><div class="connection-actions"><a href="../?view=errors#errors" class="button-link primary-link">打开错误中心</a><a href="../?view=runners#runners" class="button-link">管理运行设备</a></div>'
     html = html.replace('<p id="connectionNote"', connection_diagnostics + '<p id="connectionNote"', 1)
     html = html.replace('<div class="filters">', '<button id="mobileProjects" class="project-trigger" type="button" aria-haspopup="dialog"><span id="projectScope">全部项目</span><b>选择项目</b></button><div class="filters">', 1)

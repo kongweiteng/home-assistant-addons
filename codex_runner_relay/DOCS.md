@@ -1,6 +1,6 @@
 # Codex Runner Relay 使用说明
 
-`0.2.36` 的安装目录新增精确 Runner `0.3.36`，并保留 `0.3.35` 与全部原有回滚版本。WSS envelope、ACK、连接绑定和权限边界不变；Runner 的 Codex App runtime 兼容、Bridge 稳定性与库存同步逻辑均不在 Relay 解析或所有权范围内。源码发布不代表 HAOS Relay 或 Mac Runner 已完成升级验收。
+`0.2.37` 的安装目录新增精确 Runner `0.3.37`，并保留 `0.3.36` 与全部原有回滚版本。WSS envelope、ACK、连接绑定和权限边界不变；任务目录分页和 App-owned 管理后台增强均不在 Relay 解析或所有权范围内。正式运行版本仍须以部署后实时核验为准。
 
 ## 内部配置
 
@@ -28,7 +28,7 @@
 
 - ticket 与 Controller enrollment 使用同一短期 bearer 值，只能出现在 URL 路径和返回给请求方的安装脚本中，不得进入普通日志、健康状态或持久存储。
 - Relay 调用 Controller 的 `install-bootstrap` 只检查 pending、有效期、撤销/领取状态、Runner 平台和项目白名单，不消费 enrollment。
-- 返回脚本下载固定 installer，核对字节大小和 SHA-256，再下载并核对固定平台 bundle。Relay `0.2.36` 的滚动目录精确接受 Python `3.11.13`、Codex `0.146.0` 与 Runner `0.3.36`，同时保留安装目录中已冻结的全部旧版本 bootstrap；其他 Runner 版本仍拒绝。
+- 返回脚本下载固定 installer，核对字节大小和 SHA-256，再下载并核对固定平台 bundle。Relay `0.2.37` 的滚动目录精确接受 Python `3.11.13`、Codex `0.146.0` 与 Runner `0.3.37`，同时保留安装目录中已冻结的全部旧版本 bootstrap；其他 Runner 版本仍拒绝。Controller 仍需对固定 `0.3.37` manifest 原始字节摘要做精确校验后才生成正式安装入口。
 - Controller 返回的 Registry `labels` 与 `policy_revision` 只作为摘要固定安装参数透传；Relay 不扩大、不缓存，也不据此拥有调度策略。
 - ticket 过期、撤销、领取、Runner 状态不允许或 Controller 拒绝时，对外统一返回不可用，不泄露具体票据内容。
 

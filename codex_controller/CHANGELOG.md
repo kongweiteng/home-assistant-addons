@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.5.50 — released
+
+- 内置安装身份升级到 Runner `0.3.37`；固定四平台自包含制品 manifest 与摘要，安装目录继续精确失败关闭。
+- Runner 将 App 原生任务目录限制为 state database 分页读取，并让 App-owned 管理目录作为后台可选增强，不再让数百任务目录等待逐任务历史或慢 App-tool 响应。
+- 配套 Relay `0.2.37` 仅新增 Runner `0.3.37` 精确滚动安装兼容并保留全部旧版本；Gateway 保持 `0.4.10`，WSS、SSE、原 Thread/Turn、图片和无 OpenAI API Key 边界不变。
+
 ## 0.5.49 — released
 
 - 内置安装身份提升到 Runner `0.3.36`。当前 Codex App `26.901.51231 / 8109 / CLI 0.153.4` 只在签名、Schema 与 Owner IPC 协议精确匹配时恢复控制；未知组合继续只读失败关闭。

@@ -1,6 +1,6 @@
 # Controller scheme 1 responsive design QA
 
-Date: 2026-09-07, Asia/Shanghai. Candidate: Controller 0.5.49.
+Date: 2026-09-08, Asia/Shanghai. Candidate: Controller 0.5.50 with fixed Runner 0.3.37 manifest.
 
 ## Comparison target and evidence
 
@@ -23,7 +23,7 @@ Date: 2026-09-07, Asia/Shanghai. Candidate: Controller 0.5.49.
 
 ## Patches since preceding QA
 
-- Controller `0.5.49` retains the approved scheme 1 responsive shell and advanced controls while pinning Runner `0.3.36`. The Runner adds the exact current App runtime profile, bounded inventory hydration, deterministic same-project duplicate projection resolution, and Bridge anti-jitter recovery; the connection sheet, stable error codes, existing SSE/WSS behavior, and 390px layout remain unchanged.
+- Controller `0.5.50` retains the approved scheme 1 responsive shell and advanced controls while pinning Runner `0.3.37`. The Runner limits complete inventory to state-database pagination and moves App-owned management enrichment to the background; the connection sheet, stable error codes, existing SSE/WSS behavior, and 390px layout remain unchanged. The final four-platform manifest is content-addressed and fixed; source release still does not prove HAOS deployment or handset acceptance.
 - Host-only SSE frames update connection health without reloading projects and the first task page. The page treats the server-provided task-inventory watermark as authoritative, so a live heartbeat cannot make stale or unknown task data look green.
 - Replaced three-column layout with scheme 1 desktop two-column/mobile navigation.
 - Separated management pages with grouped/searchable incremental tools and live status.

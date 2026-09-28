@@ -412,11 +412,38 @@ AITO_PREPARE_CAR_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 
+M8_CHARGE_DEFINITIONS: tuple[ToolDefinition, ...] = (
+    ToolDefinition('m8_charge_status', '查询问界充电与提醒', 'm8_charge_planner', 'read_only',
+        '查询真实电量、插枪/预约/充电状态、功率、车辆剩余充电时间、习惯预测、提醒暂停时间、默认目标与当月慢充100%记录。返回当前北京时间供解析相对时间。不得靠旧聊天回答当前状态。仅owner。',
+        ('车还有多少电','为什么没提醒我充电','本月充满过吗','下次什么时候提醒'),
+        {'type':'object','properties':{},'additionalProperties':False}, requires_job_context=True),
+    ToolDefinition('m8_charge_forecast', '预测用车与快慢充时长', 'm8_charge_planner', 'read_only',
+        '只读预测，不改变车辆或真实计划。支持总行程公里数、带时区出发时间、目标百分比、快充/慢充/对比/当前实际功率。往返100公里直接填100；单程100且返回则200。快充桩峰值不等于持续功率，区分历史标定与假设区间；车辆上报剩余时间的目标未知，不能冒称是指定目标的时长。缺少快充功率且无有效历史时追问。沿用会话中明确条件处理“那充到八成呢”。',
+        ('明早七点出发往返100公里电量够吗','慢充到95要多久','60千瓦快充到90呢'),
+        {'type':'object','properties':{'distance_km':{'type':'number','minimum':0,'maximum':3000},'departure_at':{'type':'string','description':'带时区的ISO8601时间，先查询当前北京时间；未来30天内'},'target_soc_percent':{'type':'number','minimum':1,'maximum':100},'charging_mode':{'type':'string','enum':['slow','fast','compare','current']},'charger_power_kw':{'type':'number','minimum':.5,'maximum':1000}},'additionalProperties':False}, requires_job_context=True),
+    ToolDefinition('m8_charge_reminder', '调整本轮充电提醒', 'm8_charge_planner', 'write',
+        '清楚要求延后/忽略/恢复充电提醒时直接执行。action=defer需remind_at（带时区，未来24小时，08:00至23:00前）；ignore暂停本轮最晚次日08:00；resume恢复正常规则。先查询当前时间和偏好再解析“晚两个小时”。不得把充电相关提醒转为普通备忘录。假设、引用、询问规则不作修改；缺关键时间时只问时间。成功以服务回读为准；不控制车辆。',
+        ('晚两个小时再叫我','今晚不充了别催','还是正常提醒吧'),
+        {'type':'object','properties':{'action':{'type':'string','enum':['defer','ignore','resume']},'remind_at':{'type':'string'}},'required':['action'],'additionalProperties':False}, requires_job_context=True, idempotent_write=True),
+    ToolDefinition('m8_charge_reminder_policy', '设置充电提醒偏好', 'm8_charge_planner', 'write',
+        '用户明确要求时调整晚间低电量阈值和重复间隔，持久生效；至少一个字段。低电量阈值5至60%，间隔15至240分钟。预约静默及23点截止保持。不是车辆充电上限设置；不要将“充到90%”填到提醒阈值。',
+        ('低于25再提醒我','每半小时提醒一次'),
+        {'type':'object','properties':{'low_soc_percent':{'type':'number','minimum':5,'maximum':60},'repeat_minutes':{'type':'number','minimum':15,'maximum':240}},'minProperties':1,'additionalProperties':False}, requires_job_context=True, idempotent_write=True),
+    ToolDefinition('m8_charge_monthly_record', '记录月度慢充满电情况', 'm8_charge_planner', 'write',
+        '仅当用户明确报告本月慢充已达到100%或明确尚未完成时，记录用户报告。completed=true表示本月已慢充满电，false为尚未完成；不得把快充100%、计划、假设或单纯当前SOC=100当作慢充完成。记录不代表车端验证，不改变车端目标。',
+        ('这个月已经慢充到100了','本月还没慢充满过'),
+        {'type':'object','properties':{'completed':{'type':'boolean'}},'required':['completed'],'additionalProperties':False}, requires_job_context=True, idempotent_write=True),
+
+)
+M8_CHARGE_TOOLS = frozenset(definition.name for definition in M8_CHARGE_DEFINITIONS)
+
+
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     BOOTSTRAP_HUB_DEFINITIONS
     + MEMO_DEFINITIONS
     + OPERATION_DEFINITIONS
     + AITO_PREPARE_CAR_DEFINITIONS
+    + M8_CHARGE_DEFINITIONS
 )
 
 

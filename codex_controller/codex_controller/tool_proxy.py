@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import hashlib
 import http.client
 import json
@@ -35,6 +36,8 @@ from .prepare_car import (
 )
 from .tool_catalog import (
     AITO_PREPARE_CAR_DEFINITIONS,
+    M8_CHARGE_DEFINITIONS,
+    M8_CHARGE_TOOLS,
     MEMBER_ALLOWED_TOOL_NAMES,
     MEMO_DEFINITIONS,
     MEMO_TOOLS,
@@ -143,6 +146,7 @@ class ToolRouter:
         memo_http_password: str = "",
         memo_api_token: str = "",
         home_assistant_token: str = "",
+        m8_reminder_reply_token: str = "",
         request_json: Callable[..., dict[str, Any]] | None = None,
         request_memo_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
@@ -164,6 +168,7 @@ class ToolRouter:
         self.memo_http_password = memo_http_password
         self.memo_api_token = memo_api_token
         self.home_assistant_token = home_assistant_token
+        self.m8_reminder_reply_token = m8_reminder_reply_token
         self.request_json = request_json or _request_json
         self.request_memo_json = request_memo_json or _request_memo_json
         self.request_bytes = request_bytes or _request_bytes
@@ -247,7 +252,7 @@ class ToolRouter:
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         with self._definition_lock:
             hub_definitions = self._hub_manifest.definitions
-        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS
+        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS
 
     def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
         return {definition.name: definition for definition in self.tool_definitions()}
@@ -257,7 +262,7 @@ class ToolRouter:
             for definition in self._hub_manifest.definitions:
                 if definition.name == name:
                     return definition
-        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS:
+        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS:
             if definition.name == name:
                 return definition
         return None
@@ -303,6 +308,8 @@ class ToolRouter:
                     tools.add(definition.name)
             elif definition.service == "family_memo" and self._memo_configured():
                 tools.add(definition.name)
+            elif definition.service == "m8_charge_planner" and len(self.m8_reminder_reply_token) >= 32:
+                tools.add(definition.name)
             elif definition.service == "home_assistant_prepare_car" and self._prepare_car_configured():
                 tools.add(definition.name)
         return frozenset(tools)
@@ -333,7 +340,7 @@ class ToolRouter:
         if capability_profile == "member_read_only":
             configured &= set(MEMBER_ALLOWED_TOOL_NAMES)
         elif capability_profile == "owner_legacy":
-            configured -= set(PREPARE_CAR_TOOL_NAMES)
+            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS)
         elif capability_profile not in {None, "owner"}:
             return []
         if media_archive_authorized is False:
@@ -606,7 +613,7 @@ class ToolRouter:
         with self._context_lock:
             context = None if self._active_context is None else dict(self._active_context)
         profile = None if context is None else context.get("capability_profile")
-        if name in PREPARE_CAR_TOOL_NAMES and profile != "owner":
+        if name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS) and profile != "owner":
             raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
         if profile == "member_read_only" and name not in MEMBER_ALLOWED_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
@@ -673,6 +680,8 @@ class ToolRouter:
                 self.ledger_token,
                 {"name": name, "arguments": ledger_arguments, "actor_hash": "sha256:codex-controller"},
             )
+        if definition.service == "m8_charge_planner":
+            return self._m8_charge_call(name, arguments)
         if definition.service == "family_memo":
             return self._memo_call(name, arguments)
         if definition.service == "home_assistant_prepare_car":
@@ -735,6 +744,31 @@ class ToolRouter:
             return self.store.cancel_prepare_car_pending(conversation_key, message_id)
         except StoreError as exc:
             raise ToolProxyError(exc.code, str(exc)) from exc
+
+    def _m8_charge_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        with self._context_lock:
+            context = dict(self._active_context or {})
+        if context.get('capability_profile') != 'owner' or not context.get('message_id'):
+            raise ToolProxyError('tool_not_allowed_for_profile', '仅owner可查询车辆及修改充电提醒')
+        command = {'m8_charge_status':'query_charge','m8_charge_forecast':'forecast_charge','m8_charge_reminder_policy':'set_reminder_policy','m8_charge_monthly_record':'record_monthly_slow_full'}.get(name)
+        fields = {'arguments': arguments}
+        if name == 'm8_charge_reminder':
+            action = arguments.get('action')
+            expected = {'action','remind_at'} if action == 'defer' else {'action'}
+            if set(arguments) != expected or action not in {'defer','ignore','resume'}:
+                raise ToolProxyError('invalid_arguments','请明确延后时间、忽略本轮或恢复提醒')
+            command = {'defer':'defer_current_charge','ignore':'ignore_current_charge','resume':'resume_reminders'}[action]
+            fields = {'remind_at':arguments['remind_at']} if action == 'defer' else ({'arguments':{}} if action == 'resume' else {})
+        if command is None:
+            raise ToolProxyError('unknown_tool','充电操作不可用')
+        request_id = hashlib.sha256(json.dumps([context.get('conversation_key'),context['message_id'],name,arguments],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        payload = {'command':command,'request_id':request_id,'issued_at':datetime.now(timezone.utc).isoformat(),**fields}
+        try:
+            return self.request_json('POST','http://local-m8-charge-planner:8099/api/reminders/command',self.m8_reminder_reply_token,payload)
+        except ToolProxyError as error:
+            if error.code == 'upstream_rejected':
+                raise ToolProxyError('charge_request_rejected','时间或参数不符合充电规则，请查询当前状态后澄清；未确认任何修改。') from None
+            raise
 
     def _prepare_car_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name not in PREPARE_CAR_TOOL_NAMES:

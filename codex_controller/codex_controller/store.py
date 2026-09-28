@@ -18,6 +18,8 @@ from zoneinfo import ZoneInfo
 
 from .tool_catalog import (
     AITO_PREPARE_CAR_DEFINITIONS,
+    M8_CHARGE_DEFINITIONS,
+    M8_CHARGE_TOOLS,
     BOOTSTRAP_HUB_DEFINITIONS,
     MEMO_DEFINITIONS,
     OPERATION_DEFINITIONS,
@@ -1324,6 +1326,7 @@ class ControllerStore:
             hub_names
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
+            | M8_CHARGE_TOOLS
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 
@@ -1338,6 +1341,7 @@ class ControllerStore:
             frozenset(hub_names)
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
+            | M8_CHARGE_TOOLS
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 

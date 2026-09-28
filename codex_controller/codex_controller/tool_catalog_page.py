@@ -15,6 +15,7 @@ SERVICE_LABELS = {
     "renovation_hub": "Renovation Hub",
     "ha_operations_broker": "Operations Broker",
     "family_memo": "家庭备忘录",
+    "m8_charge_planner": "充电查询与提醒",
     "home_assistant_prepare_car": "用车准备",
 }
 SERVICES = frozenset({"all", *SERVICE_LABELS})

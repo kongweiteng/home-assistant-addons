@@ -2,7 +2,7 @@
 set -euo pipefail
 
 OPTIONS_FILE="${CONTROLLER_OPTIONS_FILE:-/data/options.json}"
-CONTROLLER_VERSION="0.5.52"
+CONTROLLER_VERSION="0.5.53"
 if [ ! -f "$OPTIONS_FILE" ]; then
     bashio::log.fatal "缺少 Add-on options 文件"
     exit 1
@@ -41,6 +41,7 @@ export CONTROLLER_OPERATIONS_API_TOKEN=$(jq -r '.operations_api_token // ""' "$O
 export CONTROLLER_MEMO_BASE_URL=$(jq -r '.memo_base_url // ""' "$OPTIONS_FILE")
 export CONTROLLER_MEMO_HTTP_USERNAME=$(jq -r '.memo_http_username // ""' "$OPTIONS_FILE")
 export CONTROLLER_MEMO_HTTP_PASSWORD=$(jq -r '.memo_http_password // ""' "$OPTIONS_FILE")
+export CONTROLLER_M8_REMINDER_REPLY_TOKEN=$(jq -r '.m8_reminder_reply_token // ""' "$OPTIONS_FILE")
 export CONTROLLER_MEMO_API_TOKEN=$(jq -r '.memo_api_token // ""' "$OPTIONS_FILE")
 export CONTROLLER_MAX_REQUEST_BYTES=$(jq -r '.max_request_bytes // 1048576' "$OPTIONS_FILE")
 export CONTROLLER_MAX_QUEUE=$(jq -r '.max_queue // 200' "$OPTIONS_FILE")

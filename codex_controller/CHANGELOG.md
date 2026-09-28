@@ -1,8 +1,16 @@
-# 0.5.52
+# 更新记录
+
+## 0.5.53
 
 - Distinguish a disconnected Runner from an incompatible Codex runtime, disabled control, and stale task data in the mobile banner and task composer. Preserve all write gates and drafts.
 
-# 更新记录
+
+## 0.5.52
+
+- 为 owner 微信自然对话增加五个充电工具：状态、用车与快慢充预测、延后/忽略/恢复提醒、提醒阈值/间隔和月度慢充满电记录。
+- 复用当前模型和会话上下文，不要求固定语句；相对时间按实时北京时间解释，数据、预测、假设和车辆目标控制能力分别说明。
+- 独立机器凭据仅由工具代理使用；仅固定 Planner 内网接口，默认未配置时关闭，member/legacy 不能查询或修改车辆提醒。
+- 保持现有 Runner manifest、Relay 和车辆控制表面。
 
 ## 0.5.51 — released
 

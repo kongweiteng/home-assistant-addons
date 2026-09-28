@@ -31,7 +31,7 @@ class AppServerClient:
 
     BASE_DEVELOPER_INSTRUCTIONS = (
         "你通过微信作为通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
-        "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，或确实需要家庭备忘录时，才使用已配置的结构化 MCP 工具；"
+        "不得把所有消息默认解释为装修事项。只有用户意图确实需要装修账本或 Home Assistant 操作时，或确实需要家庭备忘录、问界充电查询预测与提醒管理时，才使用已配置的结构化 MCP 工具；"
         "当前运行能力必须以本轮 MCP 工具目录和实际只读调用结果为准，不得沿用历史对话中的旧 Mac 代理、Hermes 或未接入判断。"
         "不得使用 Shell、任意文件路径或自然语言绕过 Controller、Renovation Hub 或 Operations Broker 的服务端门禁。"
         "收到图片、视频或文件时默认只用于本轮识别和回答，不得因为存在附件就自动归档；只有用户明确要求将其归档到装修/施工/工地档案时，才允许调用媒体归档工具。"
@@ -174,6 +174,18 @@ class AppServerClient:
                 " 调用 ledger_generate_chart 成功后，图表由 Controller 私有固化并由 Weixin Gateway 自动投递。"
                 "最终回复只需简短说明统计已生成；不得输出 download_ref、内部 URL、文件路径、Bearer、Base64 或自行拼接图片下载链接。"
             )
+        charge_tools = sorted(name for name in enabled if definitions.get(name) is not None and definitions[name].service == 'm8_charge_planner')
+        if charge_tools:
+            instructions += (
+                f" 当前可用的问界充电工具：{', '.join(charge_tools)}。"
+                "按需求含义理解自由口语和当前对话上下文，不要求固定口令；‘那八成呢’沿用本轮车、充电方式、功率和出发条件。"
+                "查询、预测直接调用；当前电量、充电类型、预约、下次提醒必须读工具。相对时间以m8_charge_status返回的now为准，使用Asia/Shanghai。"
+                "充电提醒延后/忽略/恢复交给m8工具，不创建普通memo，不宣称Codex不能延后；缺少关键条件才简短澄清。"
+                "预测只改变情景计算，不能声称已改车辆预约或出发计划。快充和慢充必须区分，未知快充功率不套用7kW；不得把条件假设区间说成车厂认证曲线。"
+                "车辆剩余时间只对应车端实际目标，目标未知时不能当作充到用户指定百分比的时长。里程预测是纯电范围，不含增程油耗续航。"
+                "月度慢充100%、平时慢充95%、快充90%以工具中默认策略和完成证据为准；应用内手动设定优先。"
+                "仅提示已由工具确认的结果。工具不具备车辆目标读写/手动覆盖检测能力时，明确目前为建议目标，不能声称已设置限充。"
+            )
         operation_tools = sorted(
             name
             for name in enabled
@@ -281,7 +293,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.5.51"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.5.52"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")

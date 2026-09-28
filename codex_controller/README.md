@@ -116,3 +116,8 @@ PYTHONPATH=codex_controller PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discov
 ```
 
 配置、队列、认证和恢复说明见 [DOCS.md](DOCS.md)。
+
+
+## 0.5.52 connection states
+
+An online host with an unsupported Codex runtime remains read-only and displays a compatibility explanation. Connection retry never bypasses the runtime gate. Task creation reports its independent App bridge availability.

@@ -259,3 +259,8 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 从 `0.2.4` 回退到 `0.2.3` 不需要数据库迁移；先关闭 intake 并排空活动作业，确认没有正在流式读取或等待 ACK 的装修媒体。回退后普通附件仍可用于识别，但旧版没有“明确装修档案意图后才暴露工具”的服务端门禁，也没有 Hub 成功后再消费 Gateway 引用的链路。
 
 从 `0.2.3` 回退到 `0.2.2` 不需要数据库迁移；回退会恢复 Goals 可用和通用 Hub HTTP 错误语义，因此应先关闭 intake、排空活动作业并确认没有依赖持续监控的请求。若继续回退到 `0.2.1`，旧版本会忽略 additive `result_summary`、`job_artifacts` 表和私有 artifact 文件；不要删除 `/data/job-artifacts`，待确认没有未发送或仍需下载的图片后再单独清理。
+
+
+## 0.5.52 connection states
+
+An online host with an unsupported Codex runtime remains read-only and displays a compatibility explanation. Connection retry never bypasses the runtime gate. Task creation reports its independent App bridge availability.

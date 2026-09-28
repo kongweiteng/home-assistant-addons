@@ -249,26 +249,29 @@ function hostCanCreate() {
   return Boolean(navigator.onLine && host?.online && host?.control_enabled === true && host?.write_available && (host.capabilities || []).includes('create_thread_v1'));
 }
 
+function hostControlBlocker() {
+  const host = currentHost();
+  if (!navigator.onLine) return {title: '手机网络当前离线', text: '网络恢复后重试；草稿会保留，当前不会发送任务。'};
+  if (!host) return {title: 'Mac Runner 尚未连接', text: '可浏览已同步内容；连接恢复前不会发送任务。'};
+  if (!host.online) return {title: 'Mac Runner 当前离线', text: '请确认 Mac 和 Runner 已运行并联网，然后重试连接；草稿会保留。'};
+  if (host.state === 'protocol_degraded') return {title: 'Mac 已连接 · Codex 版本暂不兼容', text: '可查看已同步任务，暂时不能发送或控制。请更新 Mac Runner 的版本适配；重试连接不会解除此限制。'};
+  if (host.control_enabled !== true) return {title: 'Mac 已连接 · 控制暂不可用', text: '可查看已同步任务。请在状态页检查桌面连接与控制能力；草稿会保留。'};
+  if (!host.write_available) {
+    if (['stale', 'unknown'].includes(host.data_freshness_state)) return {title: 'Mac 已连接 · 等待任务同步', text: '任务数据尚未就绪，发送已暂停；同步恢复后自动启用，草稿会保留。'};
+    return {title: 'Mac 已连接 · 暂时只读', text: '发送暂不可用，请在状态页检查 Runner 授权与控制链路；草稿会保留。'};
+  }
+  return null;
+}
+
 function renderRunnerBanner() {
   const host = currentHost();
   const banner = q('runnerBanner');
+  const blocker = hostControlBlocker();
   banner.className = 'runner-banner';
-  if (!navigator.onLine) {
+  if (blocker) {
     banner.classList.add('bad');
-    q('runnerBannerTitle').textContent = '手机网络当前离线';
-    q('runnerBannerText').textContent = '草稿会保留，网络恢复前不会发送任何任务或方向调整。';
-    return;
-  }
-  if (!host) {
-    banner.classList.add('bad');
-    q('runnerBannerTitle').textContent = 'Mac Runner 尚未连接';
-    q('runnerBannerText').textContent = '可浏览已同步内容；草稿会保留，连接恢复前不会发送。';
-    return;
-  }
-  if (!host.online || !host.write_available) {
-    banner.classList.add('bad');
-    q('runnerBannerTitle').textContent = 'Mac Runner 当前离线';
-    q('runnerBannerText').textContent = '草稿会保留，恢复连接前不会发送任何任务或方向调整。';
+    q('runnerBannerTitle').textContent = blocker.title;
+    q('runnerBannerText').textContent = blocker.text;
     return;
   }
   banner.classList.add('ready');
@@ -381,8 +384,8 @@ function renderNewTaskState() {
   if (state.createBusy) q('newTaskFeedback').textContent = 'Controller 已接收 · WSS 送往 Runner · 等待 Mac 确认';
   else if (pending) q('newTaskFeedback').textContent = '只会用同一 request ID 检查结果；Controller 持久幂等日志保证不会重复创建。';
   else if (allowed) q('newTaskFeedback').textContent = '创建完成后才会打开新任务；等待或未知状态不会伪装为已发送。';
-  else if (!currentHost()?.online || !currentHost()?.write_available) q('newTaskFeedback').textContent = 'Runner 离线：提交已禁用，草稿只保留在当前页面内存中。';
-  else if (!hasCapability('create_thread_v1')) q('newTaskFeedback').textContent = '当前 Runner 尚未提供 create_thread_v1，不能远程新建任务。';
+  else if (hostControlBlocker()) q('newTaskFeedback').textContent = `${hostControlBlocker().title}。${hostControlBlocker().text}`;
+  else if (!hasCapability('create_thread_v1')) q('newTaskFeedback').textContent = '新建任务连接暂不可用，请在状态页检查 Mac 任务桥；现有任务仍可按各自能力操作。';
   else q('newTaskFeedback').textContent = '当前主机没有可选项目，不能创建任务。';
   if (otherPending) q('newTaskFeedback').textContent = '另一台 Mac 的新建结果待确认，请切回原主机查看；当前草稿已保留。';
   renderPermissionSelectors();

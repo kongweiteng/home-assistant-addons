@@ -89,6 +89,25 @@ class DesktopResponsiveLayoutTests(unittest.TestCase):
         self.assertIn("../?view=runners", DESKTOP_DASHBOARD_HTML)
         self.assertIn('href="../?view=errors#errors"', DESKTOP_DASHBOARD_HTML)
 
+    def test_control_blocker_distinguishes_connection_compatibility_and_freshness(self):
+        script = "\n".join((
+            "Object.defineProperty(globalThis, 'navigator', {value: {onLine: true}, configurable: true});",
+            "let host = null; function currentHost() { return host; }",
+            javascript_function(DESKTOP_DASHBOARD_JS, "hostControlBlocker"),
+            "const cases = [null, {online:false}, {online:true,state:'protocol_degraded',control_enabled:false}, {online:true,control_enabled:false}, {online:true,control_enabled:true,write_available:false,data_freshness_state:'stale'}, {online:true,control_enabled:true,write_available:false,data_freshness_state:'fresh'}, {online:true,control_enabled:true,write_available:true}];",
+            "const result = cases.map(value => {host=value;return hostControlBlocker();}); navigator.onLine=false;result.push(hostControlBlocker());process.stdout.write(JSON.stringify(result));",
+        ))
+        result = json.loads(subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout)
+        self.assertIn("尚未连接", result[0]["title"])
+        self.assertIn("当前离线", result[1]["title"])
+        self.assertIn("版本暂不兼容", result[2]["title"])
+        self.assertIn("重试连接不会", result[2]["text"])
+        self.assertIn("控制暂不可用", result[3]["title"])
+        self.assertIn("等待任务同步", result[4]["title"])
+        self.assertIn("暂时只读", result[5]["title"])
+        self.assertIsNone(result[6])
+        self.assertIn("手机网络", result[7]["title"])
+
     def test_connection_sheet_explains_passive_bridge_recovery(self):
         self.assertIn("Bridge 恢复", DESKTOP_DASHBOARD_HTML)
         self.assertIn("被动重连", DESKTOP_DASHBOARD_HTML)

@@ -1,3 +1,7 @@
+# 0.5.52
+
+- Distinguish a disconnected Runner from an incompatible Codex runtime, disabled control, and stale task data in the mobile banner and task composer. Preserve all write gates and drafts.
+
 # 更新记录
 
 ## 0.5.51 — released

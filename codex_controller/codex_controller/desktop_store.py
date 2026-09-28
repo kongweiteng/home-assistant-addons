@@ -1671,7 +1671,7 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
     ):
         # A live Owner read enriches control, permissions and collaboration
         # together. Keep business fields immutable at the same thread revision.
-        allowed_fields = allowed_fields | {"permission_profile", "collaboration_mode"}
+        allowed_fields = allowed_fields | {"permission_profile", "collaboration_mode", "pinned"}
     if not changed <= allowed_fields:
         return None
     if not changed:

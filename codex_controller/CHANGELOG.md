@@ -1,5 +1,9 @@
 # 更新记录
 
+## 0.5.55
+
+- Include the independently read pinned flag in monotonic Owner hydration so combined real snapshots are accepted atomically.
+
 ## 0.5.54
 
 - Accept a monotonic live Owner snapshot that jointly enriches control revision, permission state and collaboration mode; retain strict task identity, business-field and revision checks.

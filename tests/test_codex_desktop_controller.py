@@ -461,7 +461,7 @@ class DesktopStoreServiceTests(unittest.TestCase):
         old = {"status": "notLoaded", "control_state": "load_required", "control_revision": None,
                "title": "Fixture", "permission_profile": {"id": None}, "collaboration_mode": {"editable": False}}
         fresh = {**old, "status": "idle", "control_state": "ready", "control_revision": 44,
-                 "permission_profile": {"id": ":workspace"}, "collaboration_mode": {"editable": True}}
+                 "permission_profile": {"id": ":workspace"}, "collaboration_mode": {"editable": True}, "pinned": False}
         self.assertEqual(_same_revision_refresh(json.dumps(old), fresh), "refreshed")
         self.assertIsNone(_same_revision_refresh(json.dumps(old), {**fresh, "title": "Unrelated change"}))
         self.assertIsNone(_same_revision_refresh(json.dumps({**old, "control_revision": 45}), fresh))

@@ -1,5 +1,9 @@
 # 更新记录
 
+## 0.5.54
+
+- Accept a monotonic live Owner snapshot that jointly enriches control revision, permission state and collaboration mode; retain strict task identity, business-field and revision checks.
+
 ## 0.5.53
 
 - Distinguish a disconnected Runner from an incompatible Codex runtime, disabled control, and stale task data in the mobile banner and task composer. Preserve all write gates and drafts.

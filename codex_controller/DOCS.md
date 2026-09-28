@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前发布版本：`0.5.53`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
+当前发布版本：`0.5.54`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
 
 ## 瞬态 Turn 安全重试
 
@@ -261,7 +261,7 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 从 `0.2.3` 回退到 `0.2.2` 不需要数据库迁移；回退会恢复 Goals 可用和通用 Hub HTTP 错误语义，因此应先关闭 intake、排空活动作业并确认没有依赖持续监控的请求。若继续回退到 `0.2.1`，旧版本会忽略 additive `result_summary`、`job_artifacts` 表和私有 artifact 文件；不要删除 `/data/job-artifacts`，待确认没有未发送或仍需下载的图片后再单独清理。
 
 
-## 0.5.53 connection states
+## 0.5.54 connection states
 
 An online host with an unsupported Codex runtime remains read-only and displays a compatibility explanation. Connection retry never bypasses the runtime gate. Task creation reports its independent App bridge availability.
 ## M8 自然对话

@@ -19,7 +19,7 @@ from codex_controller.desktop_protocol import (
 )
 from codex_controller.desktop_dashboard import DESKTOP_DASHBOARD_HTML, DESKTOP_DASHBOARD_JS
 from codex_controller.desktop_service import DesktopControllerService
-from codex_controller.desktop_store import DesktopStore
+from codex_controller.desktop_store import DesktopStore, _same_revision_refresh
 from codex_controller.runner_relay import RelayPublishError
 from codex_controller.runner_service import RunnerManagerService, desktop_runner_authorized
 from codex_controller.runner_store import RunnerStore
@@ -457,6 +457,17 @@ class DesktopProtocolTests(unittest.TestCase):
 
 
 class DesktopStoreServiceTests(unittest.TestCase):
+    def test_owner_hydration_combines_control_permission_and_mode_without_business_changes(self) -> None:
+        old = {"status": "notLoaded", "control_state": "load_required", "control_revision": None,
+               "title": "Fixture", "permission_profile": {"id": None}, "collaboration_mode": {"editable": False}}
+        fresh = {**old, "status": "idle", "control_state": "ready", "control_revision": 44,
+                 "permission_profile": {"id": ":workspace"}, "collaboration_mode": {"editable": True}}
+        self.assertEqual(_same_revision_refresh(json.dumps(old), fresh), "refreshed")
+        self.assertIsNone(_same_revision_refresh(json.dumps(old), {**fresh, "title": "Unrelated change"}))
+        self.assertIsNone(_same_revision_refresh(json.dumps({**old, "control_revision": 45}), fresh))
+        self.assertIsNone(_same_revision_refresh(json.dumps(old), {**fresh, "control_revision": None}))
+        self.assertIsNone(_same_revision_refresh(json.dumps(old), {**fresh, "control_revision": True}))
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.path = Path(self.temporary.name) / "controller.sqlite3"

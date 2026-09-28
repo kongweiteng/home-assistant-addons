@@ -1652,12 +1652,30 @@ def _same_revision_refresh(existing_json: str, incoming: Mapping[str, Any]) -> s
         for field in set(existing) | set(incoming)
         if existing.get(field) != incoming.get(field)
     }
-    if not changed <= SAME_REVISION_CONTROL_FIELDS:
+    incoming_control_revision = incoming.get("control_revision")
+    existing_control_revision = existing.get("control_revision")
+    allowed_fields = SAME_REVISION_CONTROL_FIELDS
+    if (
+        incoming.get("control_state") == "ready"
+        and isinstance(incoming_control_revision, int)
+        and not isinstance(incoming_control_revision, bool)
+        and incoming_control_revision >= 0
+        and (
+            existing_control_revision is None
+            or (
+                isinstance(existing_control_revision, int)
+                and not isinstance(existing_control_revision, bool)
+                and incoming_control_revision > existing_control_revision
+            )
+        )
+    ):
+        # A live Owner read enriches control, permissions and collaboration
+        # together. Keep business fields immutable at the same thread revision.
+        allowed_fields = allowed_fields | {"permission_profile", "collaboration_mode"}
+    if not changed <= allowed_fields:
         return None
     if not changed:
         return "refreshed"
-    incoming_control_revision = incoming.get("control_revision")
-    existing_control_revision = existing.get("control_revision")
     if incoming_control_revision is None:
         if (
             "control_revision" in existing

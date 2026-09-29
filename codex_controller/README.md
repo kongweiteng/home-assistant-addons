@@ -15,7 +15,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 ## 当前阶段
 
-- `0.5.56` 为 owner 微信会话接入 M8 充电状态、快慢充情景预测及提醒管理。自由口语通过既有模型映射结构化工具，不使用固定命令作为唯一入口。车辆上限设置能力由工具明确报告，不能把推荐目标声称为已控制车辆。
+- `0.5.57` 为 owner 微信会话接入 M8 充电状态、快慢充情景预测及提醒管理。自由口语通过既有模型映射结构化工具，不使用固定命令作为唯一入口。车辆上限设置能力由工具明确报告，不能把推荐目标声称为已控制车辆。
 
 - `0.5.51` 将内置 manifest 固定到 Runner `0.3.38`。Runner 标准运行和 Bridge 健康探测只做被动 Socket 重试，绝不调用 `open` 或 `codex://`，因此不会自动启动 Codex App、切换任务或抢占当前窗口；Bridge 自行恢复后管理能力会在下一次探测中恢复。实时连接页同步显示这一安全边界。配套 Relay `0.2.38`，Gateway 保持 `0.4.10`；WSS/SSE、Runner/LaunchAgent 自动恢复、原 Thread/Turn、图文和无 OpenAI API Key 行为不变。
 - `0.5.50` 将内置 manifest 固定到 Runner `0.3.37`。Runner 的全量任务目录只走 App state database 分页，并把 App-owned 管理目录改为后台可选增强，避免数百任务目录继续等待逐任务历史或慢 App-tool 响应。浅色移动/Web 工作台、Host SSE、原 Thread/Turn、图文、实时增量链路与无 OpenAI API Key 边界不变。配套 Relay `0.2.37`，Gateway 保持 `0.4.10`。源码发布不代表 HAOS、Mac Runner 或公网入口已完成升级验收。
@@ -120,6 +120,6 @@ PYTHONPATH=codex_controller PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discov
 配置、队列、认证和恢复说明见 [DOCS.md](DOCS.md)。
 
 
-## 0.5.56 connection states
+## 0.5.57 connection states
 
 An online host with an unsupported Codex runtime remains read-only and displays a compatibility explanation. Connection retry never bypasses the runtime gate. Task creation reports its independent App bridge availability.

@@ -24,7 +24,7 @@ const resizeComposer = () => {}; const renderComposer = () => {}; const API = '/
 let nextId=0; const requestId = () => 'request-' + ++nextId;
 const window = {setTimeout: callback => callback()};
 '''
-        script += '\n'.join(function(name) for name in ['prepareSend','commandFeedback','reconcileComposerReceipt','submitAction'])
+        script += '\n'.join(function(name) for name in ['prepareSend','commandFeedback','reconcileComposerReceipt','restoreCommandDraft','submitAction'])
         script += '\n(async()=>{'+body+'})().catch(error=>{console.error(error);process.exit(1)});'
         subprocess.run(['node','-e',script],check=True,capture_output=True,text=True)
 
@@ -59,3 +59,12 @@ global.loadThread = async () => {};
 await submitAction('continue',{input:'hello'});
 assert.equal(writes,0);assert.equal(imageState.pending['TH-test'],undefined);assert.equal(q('composerInput').value,'hello');assert.match(q('composerFeedback').textContent,/任务状态已变化/);
 ''')
+
+    def test_restore_expired_image_retains_blocking_attachment_instead_of_dropping_it(self):
+        self.run_js("""
+q('composerInput').value='';imageState.drafts['TH-test']=[];
+global.jsonFetch=async()=>{throw new Error('expired')};
+await restoreCommandDraft({input:'restore me',image_refs:['IM-old']});
+assert.equal(q('composerInput').value,'restore me');
+assert.equal(currentAttachments().length,1);assert.match(currentAttachments()[0].error,/重新添加/);
+""")

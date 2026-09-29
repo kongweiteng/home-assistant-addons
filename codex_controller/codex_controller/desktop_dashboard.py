@@ -2466,14 +2466,14 @@ async function restoreCommandDraft(command) {
     q('composerFeedback').textContent = '请先处理当前草稿，再恢复这条消息'; return;
   }
   const attachments = [];
-  try {
-    for (const imageRef of command.image_refs || []) {
+  for (const imageRef of command.image_refs || []) {
+    try {
       const image = await jsonFetch(`${API}/images/${imageRef}`, {headers: {'X-CSRF-Token': state.csrf}});
       if (!['image/png', 'image/jpeg', 'image/webp'].includes(image.mime_type) || image.data_base64.length > 87384 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data_base64)) throw new Error('图片数据无效');
       attachments.push({image_ref: imageRef, expires_at: image.expires_at, url: `data:${image.mime_type};base64,${image.data_base64}`, name: '恢复的图片'});
+    } catch (_error) {
+      attachments.push({image_ref: imageRef, name: '原图片', error: '图片已过期或无法读取，请移除后重新添加'});
     }
-  } catch (_error) {
-    if (ref === state.selectedThread) q('composerFeedback').textContent = '原图片已过期或无法读取，请重新添加图片；文字已恢复';
   }
   if (ref !== state.selectedThread || q('composerInput').value.trim() || currentAttachments(ref).length) return;
   state.drafts[ref] = command.input || '';

@@ -165,7 +165,7 @@ function renderImageHistory(root, messages = state.detail?.image_messages || [])
     if (!refs.length) continue;
     const confirmed = message.state === 'confirmed' || message.receipt?.delivery_stage === 'mac_confirmed';
     const group = messageNode('user', message.input || '图片消息', {label: confirmed ? 'Mac 已确认图文消息' : '图文消息 · 待核对回执'});
-    const info = document.createElement('small'); info.textContent = `${formatTime(message.created_at)} · ${confirmed ? 'Mac 已确认' : statusText(message.state)}`; group.append(info);
+    const info = document.createElement('small'); info.textContent = `${formatTime(message.created_at)} · ${confirmed ? 'Mac 已确认' : ({conflict: '未发送：任务状态已变化', failed: '发送失败', expired: '发送已过期', unknown: '送达结果待核对', recovery_required: '送达结果待核对'}[message.state] || statusText(message.state))}`; group.append(info);
     const tray = document.createElement('div'); tray.className = 'image-history';
     for (const ref of refs) {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = '加载图片';

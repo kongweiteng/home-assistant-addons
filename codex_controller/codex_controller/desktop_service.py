@@ -1029,6 +1029,8 @@ class DesktopControllerService:
             raise StoreError("desktop_host_stale", "Desktop host 状态已过期", status=409)
         if host.get("control_enabled") is not True:
             raise StoreError("desktop_protocol_degraded", "Desktop host 当前只读", status=409)
+        if action == "read":
+            return
         capabilities = set(host.get("capabilities") or [])
         model = payload.get("model")
         effort = payload.get("effort")
@@ -1379,6 +1381,7 @@ class DesktopControllerService:
         if not isinstance(payload, Mapping):
             raise StoreError("desktop_payload_invalid", "Desktop API payload 无效", status=400)
         fields: dict[str, set[str]] = {
+            "read": {"request_id", "thread_revision"},
             "steer": {"request_id", "expected_turn_ref", "thread_revision", "input"},
             "interrupt": {"request_id", "expected_turn_ref", "thread_revision"},
             "continue": {"request_id", "thread_revision", "input"},

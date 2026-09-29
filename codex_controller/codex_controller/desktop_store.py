@@ -1503,6 +1503,7 @@ class DesktopStore:
             "review_target": command.get("review_target"),
             "diff_ref": command.get("diff_ref"),
             "expected_turn_ref": command.get("expected_turn_ref"),
+            "input": command.get("input", "") if command.get("action") in {"continue", "steer"} else "",
             "expected_thread_revision": command.get("expected_thread_revision"),
             "expected_control_revision": command.get("expected_control_revision"),
             "state": row["state"],

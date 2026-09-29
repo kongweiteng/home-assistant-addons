@@ -457,6 +457,17 @@ class DesktopProtocolTests(unittest.TestCase):
 
 
 class DesktopStoreServiceTests(unittest.TestCase):
+    def test_targeted_refresh_is_journaled_without_message_or_control_state_requirement(self) -> None:
+        detail = self.service.thread(THREAD_REF)
+        result = self.service.submit(THREAD_REF, "read", {"request_id": "refresh-mobile-1", "thread_revision": detail["thread_revision"]})
+        self.assertEqual(result["state"], "submitted")
+        command = self.publisher.desktop_commands[-1][1]
+        self.assertEqual(command["action"], "read")
+        self.assertFalse(command.get("input"))
+        self.assertEqual(command["thread_ref"], THREAD_REF)
+        with self.assertRaises(StoreError):
+            self.service.submit(THREAD_REF, "read", {"request_id": "refresh-mobile-2", "thread_revision": detail["thread_revision"], "input": "must never execute"})
+
     def test_owner_hydration_combines_control_permission_and_mode_without_business_changes(self) -> None:
         old = {"status": "notLoaded", "control_state": "load_required", "control_revision": None,
                "title": "Fixture", "permission_profile": {"id": None}, "collaboration_mode": {"editable": False}}

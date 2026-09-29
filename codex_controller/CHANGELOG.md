@@ -1,5 +1,9 @@
 # 更新记录
 
+## 0.5.56
+
+- 发送前定向刷新当前 Mac 状态，只有任务与轮次未变化才发送一次；最终回执驱动输入区，确认前保留文字和图片，冲突明确提示未发送并支持恢复历史失败消息。
+
 ## 0.5.55
 
 - Include the independently read pinned flag in monotonic Owner hydration so combined real snapshots are accepted atomically.

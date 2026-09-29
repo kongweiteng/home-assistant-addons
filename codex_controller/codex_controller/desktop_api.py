@@ -18,7 +18,7 @@ COLLABORATION_MODE_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/collaboration-mode$"
 )
 ACTION_PATH_RE = re.compile(
-    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/(steer|interrupt|continue|archive|unarchive|rename|pin|fork|review)$"
+    r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/(read|steer|interrupt|continue|archive|unarchive|rename|pin|fork|review)$"
 )
 HISTORY_PATH_RE = re.compile(
     r"^/api/desktop/v1/threads/(TH-[A-Z2-7]{20,52})/history/(page|search)$"

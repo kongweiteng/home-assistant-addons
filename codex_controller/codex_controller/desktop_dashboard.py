@@ -1056,6 +1056,7 @@ function renderDetail() {
   if (snapshot.history_incomplete || state.historyHasMore) meta.append(badge('可继续加载较早消息', 'warn'));
   renderNotice(detail);
   renderPendingRequests();
+  reconcileComposerReceipt(detail);
   renderDeliveryStatus(detail);
   renderActionState(detail);
   renderHistoryControls();
@@ -1078,7 +1079,11 @@ function renderDeliveryStatus(detail) {
   const command = detail?.latest_command;
   root.replaceChildren();
   root.classList.toggle('hidden', !command);
-  if (!command) return;
+  if (!command || command.action === 'read') { root.classList.add('hidden'); return; }
+  if (['conflict', 'failed', 'expired'].includes(command.state) && ['continue', 'steer'].includes(command.action)) {
+    const restore = document.createElement('button'); restore.type = 'button'; restore.textContent = '恢复这条消息到输入框';
+    restore.onclick = () => void restoreCommandDraft(command); root.append(restore);
+  }
   const inferred = {pending: 'controller_received', submitted: 'relay_delivered', accepted: 'runner_received', confirmed: 'mac_confirmed'};
   const stage = command.delivery_stage || inferred[command.state] || 'controller_received';
   const stageIndex = {controller_received: 0, relay_delivered: 1, runner_received: 2, mac_confirmed: 3}[stage] ?? 0;
@@ -2404,6 +2409,79 @@ async function recoverDetailBaseline() {
   if (threadRef === state.selectedThread && navigator.onLine) startEventStream();
 }
 
+async function prepareSend(detail) {
+  const ref = detail.thread_ref;
+  const id = requestId();
+  await jsonFetch(`${API}/threads/${encodeURIComponent(ref)}/read`, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify({request_id: id, thread_revision: detail.thread_revision})});
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    if (state.selectedThread !== ref) throw new Error('已切换任务，本条消息未发送');
+    const fresh = await jsonFetch(`${API}/threads/${encodeURIComponent(ref)}`);
+    const receipt = fresh.latest_command;
+    if (receipt?.request_id === id && receipt.state === 'confirmed' && ['ready', 'load_required'].includes(fresh.control_state)) {
+      if (fresh.thread_revision !== detail.thread_revision || fresh.active_turn_ref !== detail.active_turn_ref || fresh.status !== detail.status) throw new Error('任务状态已变化，请查看最新回复后再发送');
+      return fresh;
+    }
+    if (receipt?.request_id === id && ['failed', 'conflict', 'expired', 'unknown', 'recovery_required'].includes(receipt.state)) throw new Error('未能读取 Mac 最新状态，本条消息未发送，请刷新后重试');
+    await new Promise(resolve => window.setTimeout(resolve, 250));
+  }
+  throw new Error('等待 Mac 同步超时，本条消息未发送，请稍后重试');
+}
+
+function commandFeedback(command) {
+  if (!command || command.action === 'read') return null;
+  const value = command.state;
+  if (value === 'confirmed') return {kind: 'success', text: 'Mac 已确认，回复将自动同步'};
+  if (value === 'conflict') return {kind: 'error', text: '消息未发送：任务状态已变化。请查看最新内容后重新发送；草稿已保留'};
+  if (['failed', 'expired'].includes(value)) return {kind: 'error', text: '发送未完成，请查看回执后重试；草稿已保留'};
+  if (['unknown', 'recovery_required'].includes(value)) return {kind: 'warning', text: '是否送达尚未确认，已暂停重复发送，请等待核对'};
+  return {kind: 'muted', text: 'Controller 已接收，等待 Mac 确认'};
+}
+
+function reconcileComposerReceipt(detail) {
+  const command = detail.latest_command;
+  const pending = imageState.pending[detail.thread_ref];
+  if (pending && command?.request_id === pending.body.request_id) {
+    if (command.state === 'confirmed') {
+      if (['continue', 'steer'].includes(pending.action)) {
+        if ((state.drafts[detail.thread_ref] || '').trim() === pending.body.input) delete state.drafts[detail.thread_ref];
+        if (q('composerInput').value.trim() === pending.body.input) q('composerInput').value = '';
+        const refs = pending.body.image_refs || [];
+        for (const item of currentAttachments(detail.thread_ref)) if (refs.includes(item.image_ref) && item.url) URL.revokeObjectURL(item.url);
+        imageState.drafts[detail.thread_ref] = currentAttachments(detail.thread_ref).filter(item => !refs.includes(item.image_ref));
+        resizeComposer();
+      }
+      delete imageState.pending[detail.thread_ref];
+    } else if (['conflict', 'failed', 'expired'].includes(command.state)) delete imageState.pending[detail.thread_ref];
+  }
+  const feedback = commandFeedback(command);
+  if (feedback && !imageState.busy[detail.thread_ref]) {
+    q('composerFeedback').className = `composer-status ${feedback.kind}`;
+    q('composerFeedback').textContent = feedback.text;
+  }
+}
+
+async function restoreCommandDraft(command) {
+  const ref = state.selectedThread;
+  if (q('composerInput').value.trim() || currentAttachments(ref).length || imageState.pending[ref] || imageState.busy[ref]) {
+    q('composerFeedback').textContent = '请先处理当前草稿，再恢复这条消息'; return;
+  }
+  const attachments = [];
+  try {
+    for (const imageRef of command.image_refs || []) {
+      const image = await jsonFetch(`${API}/images/${imageRef}`, {headers: {'X-CSRF-Token': state.csrf}});
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(image.mime_type) || image.data_base64.length > 87384 || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data_base64)) throw new Error('图片数据无效');
+      attachments.push({image_ref: imageRef, expires_at: image.expires_at, url: `data:${image.mime_type};base64,${image.data_base64}`, name: '恢复的图片'});
+    }
+  } catch (_error) {
+    if (ref === state.selectedThread) q('composerFeedback').textContent = '原图片已过期或无法读取，请重新添加图片；文字已恢复';
+  }
+  if (ref !== state.selectedThread || q('composerInput').value.trim() || currentAttachments(ref).length) return;
+  state.drafts[ref] = command.input || '';
+  q('composerInput').value = state.drafts[ref];
+  imageState.drafts[ref] = attachments;
+  resizeComposer(); renderComposer(state.detail);
+}
+
 async function submitAction(action, extra = {}, retry = null) {
   const detail = state.detail;
   if (!detail || imageState.busy[detail.thread_ref] || (!retry && imageState.pending[detail.thread_ref])) return;
@@ -2416,30 +2494,26 @@ async function submitAction(action, extra = {}, retry = null) {
   q('composerFeedback').className = 'composer-status muted';
   q('composerFeedback').textContent = action === 'steer' || action === 'continue' ? '正在发送…' : '正在处理…';
   q('submitDirection').disabled = true;
+  let writeAttempted = false;
   try {
+    if (!retry && ['continue', 'steer'].includes(action)) {
+      q('composerFeedback').textContent = '正在同步 Mac 当前任务…';
+      await prepareSend(detail);
+    }
+    writeAttempted = true;
     const actionPath = action === 'respond_request'
       ? `${API}/threads/${encodeURIComponent(detail.thread_ref)}/requests/${encodeURIComponent(body.request_ref)}/respond`
       : `${API}/threads/${encodeURIComponent(detail.thread_ref)}/${action}`;
     const result = await jsonFetch(actionPath, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf}, body: JSON.stringify(body)});
-    const confirmed = result.state === 'confirmed' || result.delivery_stage === 'mac_confirmed';
-    const accepted = ['pending', 'submitted', 'accepted', 'confirmed'].includes(result.state);
-    if (accepted || ['failed', 'conflict', 'expired', 'recovery_required'].includes(result.state)) delete imageState.pending[ref];
     if (isCurrent()) {
-      q('composerFeedback').className = `composer-status ${accepted ? 'success' : 'warning'}`;
-      q('composerFeedback').textContent = confirmed ? 'Mac 已确认，回复将自动同步' : accepted ? 'Controller 已接收，等待 Mac 确认' : '未完成发送，请检查回执；草稿已保留';
-    }
-    if (accepted && (action === 'steer' || action === 'continue')) {
-      if ((state.drafts[ref] || '').trim() === body.input) delete state.drafts[ref];
-      for (const item of currentAttachments(ref)) if ((body.image_refs || []).includes(item.image_ref) && item.url) URL.revokeObjectURL(item.url);
-      imageState.drafts[ref] = currentAttachments(ref).filter(item => !(body.image_refs || []).includes(item.image_ref));
-      if (isCurrent()) {
-        if (q('composerInput').value.trim() === body.input) q('composerInput').value = '';
-        resizeComposer(); state.following = true; state.selectedModel = ''; state.selectedEffort = ''; state.selectedPermission = ''; state.selectedCollaborationMode = '';
-      }
+      reconcileComposerReceipt({...detail, latest_command: result});
+      const feedback = commandFeedback({...result, action});
+      q('composerFeedback').className = `composer-status ${feedback.kind}`;
+      q('composerFeedback').textContent = feedback.text;
     }
     if (isCurrent()) await loadThread(ref, {restartStream: false});
   } catch (error) {
-    if (error.status >= 400 && error.status < 500) delete imageState.pending[ref];
+    if (!writeAttempted || (error.status >= 400 && error.status < 500)) delete imageState.pending[ref];
     if (isCurrent()) {
       q('composerFeedback').className = 'composer-status error';
       q('composerFeedback').textContent = `${error.message}。草稿保留，不会自动重发`;
@@ -2447,7 +2521,7 @@ async function submitAction(action, extra = {}, retry = null) {
     }
   } finally {
     delete imageState.busy[ref];
-    if (isCurrent() && state.detail) renderComposer(state.detail);
+    if (isCurrent() && state.detail) { reconcileComposerReceipt(state.detail); renderComposer(state.detail); }
   }
 }
 

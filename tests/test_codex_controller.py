@@ -1642,7 +1642,8 @@ class ControllerToolApiTests(unittest.TestCase):
                 self.assertEqual(tools["result"]["revision"], 2)
                 by_name = {item["name"]: item for item in tools["result"]["tools"]}
                 self.assertFalse(by_name["ledger_summary"]["enabled"])
-                self.assertEqual(len(by_name), 45)
+                self.assertEqual(len(by_name), 47)
+                self.assertFalse(by_name["fnos_query"]["configured"])
 
                 unauthorized, _ = request("GET", "/internal/v1/capabilities")
                 self.assertEqual(unauthorized, 401)

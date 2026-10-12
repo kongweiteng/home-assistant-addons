@@ -18,6 +18,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 
 ## 当前阶段
 
+- `0.5.59` adds optional owner-only fnOS Skill queries and exact service controls. Install the official platform package and complete independent OAuth first; enable `fnos_skill_enabled` only after authentication. See DOCS for setup and recovery. No NAS SSH or additional listener is introduced.
 - `0.5.57` 为 owner 微信会话接入 M8 充电状态、快慢充情景预测及提醒管理。自由口语通过既有模型映射结构化工具，不使用固定命令作为唯一入口。车辆上限设置能力由工具明确报告，不能把推荐目标声称为已控制车辆。
 
 - `0.5.51` 将内置 manifest 固定到 Runner `0.3.38`。Runner 标准运行和 Bridge 健康探测只做被动 Socket 重试，绝不调用 `open` 或 `codex://`，因此不会自动启动 Codex App、切换任务或抢占当前窗口；Bridge 自行恢复后管理能力会在下一次探测中恢复。实时连接页同步显示这一安全边界。配套 Relay `0.2.38`，Gateway 保持 `0.4.10`；WSS/SSE、Runner/LaunchAgent 自动恢复、原 Thread/Turn、图文和无 OpenAI API Key 行为不变。

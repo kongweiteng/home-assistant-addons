@@ -4,9 +4,13 @@
 
 - 从干净 0.5.57 基线增加管理员登记的通用 HTTP JSON 扩展；命名空间、manifest 摘要固定、闭合输入/输出 Schema、服务端逐工具策略、owner 活动 Turn、调用审计和未知写入防重放均统一实现。新工具默认关闭，目录/风险/地址变化撤销旧启用状态。
 - 发现私有目录与 Codex 安装目录中的标准 SKILL.md，每轮注入名称/描述；经受控 MCP 按需读取流程与 references 文本，不执行 skill 脚本。目录增加、删除和停用无需修改微信通道。
-- 原生命令、代码执行与子代理关闭，扩展凭据只在主进程或独立 provider；既有车辆、账本、成员与 Broker 门禁保留。尚未集成独立 fnOS 0.5.58 候选。
+- 原生命令、代码执行与子代理关闭，扩展凭据只在主进程或独立 provider；既有车辆、账本、成员与 Broker 门禁保留。保留已部署 0.5.58 的 fnOS 工具和配置。
 - 新增 SQLite 扩展目录历史与写入结果表，默认关闭策略及已确认/未知结果在重启后保留。文档提供独立 provider 和流程 skill 示例。
 - 本地候选；不代表正式 HAOS 升级、OAuth 或手机端到端验收。
+- Add optional owner-only fnOS tools backed by the separately installed official Skill and private OAuth profile; disabled by default.
+- Queries return bounded allowlisted fields; member/legacy sessions, shell/raw commands and unsupported NAS changes fail closed.
+- Application start/stop and container start/stop/restart require an explicit owner request, exact target and active job; uncertain controls are never replayed.
+- Keep existing tool policy, invocation audit, Gateway consumer and network exposure.
 
 ## 0.5.57
 

@@ -43,6 +43,7 @@ export CONTROLLER_MEMO_HTTP_USERNAME=$(jq -r '.memo_http_username // ""' "$OPTIO
 export CONTROLLER_MEMO_HTTP_PASSWORD=$(jq -r '.memo_http_password // ""' "$OPTIONS_FILE")
 export CONTROLLER_M8_REMINDER_REPLY_TOKEN=$(jq -r '.m8_reminder_reply_token // ""' "$OPTIONS_FILE")
 export CONTROLLER_MEMO_API_TOKEN=$(jq -r '.memo_api_token // ""' "$OPTIONS_FILE")
+export CONTROLLER_FNOS_SKILL_ENABLED=$(jq -r '.fnos_skill_enabled // false' "$OPTIONS_FILE")
 export CONTROLLER_MAX_REQUEST_BYTES=$(jq -r '.max_request_bytes // 1048576' "$OPTIONS_FILE")
 export CONTROLLER_MAX_QUEUE=$(jq -r '.max_queue // 200' "$OPTIONS_FILE")
 export CONTROLLER_MAX_RESULT_CHARS=$(jq -r '.max_result_chars // 12000' "$OPTIONS_FILE")

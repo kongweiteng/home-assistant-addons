@@ -26,6 +26,7 @@ options:
   m8_reminder_reply_token: ""
   internal_api_token: ""
   intake_enabled: false
+  fnos_skill_enabled: false
   auth_mode: chatgpt_device_code
   openai_api_key: ""
   openai_base_url: ""
@@ -60,6 +61,7 @@ schema:
   m8_reminder_reply_token: password
   internal_api_token: password
   intake_enabled: bool
+  fnos_skill_enabled: bool
   auth_mode: "list(chatgpt_device_code|api_key)"
   openai_api_key: password
   openai_base_url: str

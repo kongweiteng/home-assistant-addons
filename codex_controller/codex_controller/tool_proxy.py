@@ -28,6 +28,7 @@ from .store import ControllerStore, StoreError
 from .extensions import ExtensionRegistry, ExtensionError
 from .skills import SkillCatalog, SkillError, SKILL_NAMES
 from .extension_schema import validate_value, bounded_json, SchemaError
+from .fnos_skill import FNOS_DEFINITIONS, FNOS_TOOLS, FnosSkillClient, FnosSkillError
 from .prepare_car import (
     HomeAssistantPrepareCarError,
     HomeAssistantRequest,
@@ -152,6 +153,8 @@ class ToolRouter:
         m8_reminder_reply_token: str = "",
         extension_registry: ExtensionRegistry | None = None,
         skill_catalog: SkillCatalog | None = None,
+        fnos_skill_enabled: bool = False,
+        fnos_client: FnosSkillClient | None = None,
         request_json: Callable[..., dict[str, Any]] | None = None,
         request_memo_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
@@ -177,6 +180,7 @@ class ToolRouter:
         self.extensions = extension_registry
         self.skills = skill_catalog
         self._extension_lock = threading.RLock()
+        self.fnos_client = fnos_client or FnosSkillClient(enabled=fnos_skill_enabled)
         self.request_json = request_json or _request_json
         self.request_memo_json = request_memo_json or _request_memo_json
         self.request_bytes = request_bytes or _request_bytes
@@ -261,7 +265,7 @@ class ToolRouter:
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         with self._definition_lock:
             hub_definitions = self._hub_manifest.definitions
-        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + self.extension_definitions()
+        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + FNOS_DEFINITIONS + self.extension_definitions()
 
     def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
         return {definition.name: definition for definition in self.tool_definitions()}
@@ -271,7 +275,7 @@ class ToolRouter:
             for definition in self._hub_manifest.definitions:
                 if definition.name == name:
                     return definition
-        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + self.extension_definitions():
+        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + FNOS_DEFINITIONS + self.extension_definitions():
             if definition.name == name:
                 return definition
         return None
@@ -323,6 +327,8 @@ class ToolRouter:
                 tools.add(definition.name)
             elif definition.service == "home_assistant_prepare_car" and self._prepare_car_configured():
                 tools.add(definition.name)
+            elif definition.service == "fnos_skill" and self.fnos_client.configured():
+                tools.add(definition.name)
         return frozenset(tools)
 
     def route_ready_tools(self) -> frozenset[str]:
@@ -351,7 +357,7 @@ class ToolRouter:
         if capability_profile == "member_read_only":
             configured &= set(MEMBER_ALLOWED_TOOL_NAMES)
         elif capability_profile == "owner_legacy":
-            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS) | {d.name for d in self.extension_definitions()}
+            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | FNOS_TOOLS) | {d.name for d in self.extension_definitions()}
         elif capability_profile not in {None, "owner"}:
             return []
         if media_archive_authorized is False:
@@ -596,13 +602,13 @@ class ToolRouter:
         with self._context_lock:
             invocation_context = None if self._active_context is None else dict(self._active_context)
         try:
-            definition = self._authorize_tool(name)
+            definition = self._authorize_tool(name, invocation_context)
             if name == "ledger_generate_chart":
                 with self._context_lock:
                     context = None if self._active_context is None else dict(self._active_context)
                 if context is None or not context.get("job_id"):
                     raise ToolProxyError("tool_context_unavailable", "图表只能在活动 Controller 作业中生成")
-            result = self._call_authorized(definition, arguments)
+            result = self._call_authorized(definition, arguments, invocation_context)
             if name == "ledger_generate_chart":
                 result = self._capture_chart_result(result)
             outcome = "succeeded"
@@ -694,14 +700,12 @@ class ToolRouter:
             "summary": chart.get("summary"),
         }
 
-    def _authorize_tool(self, name: str) -> ToolDefinition:
+    def _authorize_tool(self, name: str, context: dict[str, Any] | None) -> ToolDefinition:
         definition = self._tool_definition(name)
         if definition is None:
             raise ToolProxyError("unknown_tool", "工具不在允许清单")
-        with self._context_lock:
-            context = None if self._active_context is None else dict(self._active_context)
         profile = None if context is None else context.get("capability_profile")
-        if (name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | SKILL_NAMES) or name.startswith("ext_")) and profile != "owner":
+        if (name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | FNOS_TOOLS | SKILL_NAMES) or name.startswith("ext_")) and profile != "owner":
             raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
         if profile == "member_read_only" and name not in MEMBER_ALLOWED_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
@@ -727,7 +731,7 @@ class ToolRouter:
             )
         return definition
 
-    def _call_authorized(self, definition: ToolDefinition, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _call_authorized(self, definition: ToolDefinition, arguments: dict[str, Any], invocation_context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")
         name = definition.name
@@ -742,6 +746,18 @@ class ToolRouter:
                 raise ToolProxyError(exc.code, "技能流程不可用或参数无效") from None
         if definition.service.startswith("extension:"):
             return self._extension_call(definition, arguments)
+        if name in FNOS_TOOLS:
+            # Keep authorization, command dedupe and audit bound to one job.
+            # Lifecycle transitions wait for the bounded Skill call to finish.
+            with self._context_lock:
+                if (invocation_context is None or self._active_context != invocation_context
+                        or invocation_context.get("capability_profile") != "owner"
+                        or not invocation_context.get("job_id")):
+                    raise ToolProxyError("tool_context_unavailable", "飞牛调用的活动作业已失效")
+                try:
+                    return self.fnos_client.call(name, arguments, job_id=invocation_context["job_id"])
+                except FnosSkillError as exc:
+                    raise ToolProxyError(exc.code, str(exc)) from None
         if definition.service == "renovation_hub" and definition.transport == "gateway_media_stream":
             if not self.ledger_base_url or len(self.ledger_token) < 32:
                 raise ToolProxyError("ledger_unavailable", "Renovation Hub 媒体接口未配置")

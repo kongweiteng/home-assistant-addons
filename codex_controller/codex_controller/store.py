@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .fnos_skill import FNOS_TOOLS
+
 import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1342,6 +1344,7 @@ class ControllerStore:
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | M8_CHARGE_TOOLS
+            | FNOS_TOOLS
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 
@@ -1358,6 +1361,7 @@ class ControllerStore:
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | M8_CHARGE_TOOLS
+            | FNOS_TOOLS
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 

@@ -324,6 +324,7 @@ def main() -> None:
         memo_api_token=os.environ.get("CONTROLLER_MEMO_API_TOKEN", ""),
         home_assistant_token=os.environ.get("SUPERVISOR_TOKEN", ""),
         m8_reminder_reply_token=os.environ.get("CONTROLLER_M8_REMINDER_REPLY_TOKEN", ""),
+        fnos_skill_enabled=os.environ.get("CONTROLLER_FNOS_SKILL_ENABLED", "false").lower() == "true",
         max_media_bytes=int(os.environ.get("CONTROLLER_MAX_MEDIA_BYTES", str(1024 * 1024 * 1024))),
         store=store,
         extension_registry=ExtensionRegistry(data_dir / "extensions", data_dir / "extension-secrets"),

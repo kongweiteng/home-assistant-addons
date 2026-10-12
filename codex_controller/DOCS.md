@@ -3,7 +3,7 @@
 
 `0.5.59` 增加通用扩展注册与 skill 发现。符合 [EXTENSIONS.md](EXTENSIONS.md) 契约的新能力通过安装、配置和工具启用接入微信，不修改 Gateway 或 Controller 核心；正式部署与手机验收另行记录。
 
-当前发布版本：`0.5.57`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
+当前源码候选版本：`0.5.59`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
 
 ## 瞬态 Turn 安全重试
 
@@ -274,3 +274,18 @@ An online host with an unsupported Codex runtime remains read-only and displays 
 模型必须查询真实状态和北京时间，不能靠聊天旧值。查询预测是只读情景，不修改出发计划或车端上限。默认慢充目标按本月是否完成一次100%确定为100%或95%，快充90%；当月用户报告标注为 user_reported，不能冒充遥测验证。车端充电上限读写与App覆盖检测未接入时，会明确返回 recommendation_only。
 
 快充时长与慢充分开计算。无高功率历史时需给出快充桩功率，功率为上限假设，时长包含高SOC降速的条件区间；正在充电时也可查询车辆上报剩余时间，但对应车端目标未知时不能替代指定目标的预测。
+
+
+## Optional fnOS Skill tools (0.5.59)
+
+`fnos_skill_enabled` defaults to `false`. The feature requires a separately installed official fnOS Skill at `/data/codex-home/skills/fnos` and an independently authenticated `home` profile. Select the official Linux binary for the Controller architecture; verify its upstream checksum before installation. The package is not downloaded automatically or bundled into this Add-on.
+
+Create the private authentication HOME `/data/fnos-auth` with mode `0700`. In an interactive terminal, set `HOME=/data/fnos-auth` and `TRIM_CLI_SESSION_STORAGE=file` for the official CLI and run `scripts/trim-cli --profile home --host <nas-host> --port <https-port> --scheme https login --no-open`. The user completes browser login and consent and enters the one-time code directly in that terminal. Never put credentials in Add-on options, chat, command arguments or logs. The explicit file backend is for headless Linux without a usable platform store; session files must remain private (`0600`) and outside the model workspace. Register the scoped machine session in the approved credential store.
+
+After OAuth, verify firmware and applications or containers using the Skill from the Controller environment. Only then enable the option. `fnos_query` supports `host_name`, `version`, `apps`, `containers` (including stopped containers), `docker_stats`, and `storage_pools`. Replies expose only allowlisted summary fields; missing fields remain unknown. Skill calls use a controlled environment without external proxies or inherited secrets.
+
+`fnos_service_control` accepts exact application identifiers for `start`/`stop` and exact container identifiers for `start`/`stop`/`restart`. The current owner must explicitly request the action; resolve the target with a query first. Both tools require an owner activity context and obey administrator tool policy and invocation audit. Members and legacy owner profiles cannot invoke them. Deletion, arbitrary commands, raw requests, NAS SSH, storage writes, user/network changes and NAS power actions are excluded.
+
+Control results marked `submitted` establish acceptance only; query again to verify the target state. The private ledger serializes calls and prevents replay of pending/unknown results for the same job and action, including across restarts. Do not retry an uncertain operation under a new job as recovery. Corrupt or inaccessible state fails closed. Read-only validation must not start, stop or restart NAS services.
+
+The Skill and private HOME live under persistent `/data`; back them up securely with the Controller data. The live file becomes authoritative when the CLI rotates refresh tokens; a registered bootstrap snapshot may become stale and must not overwrite a newer live session. If refresh fails, complete OAuth again and update only the matching credential entry. Disable the option to withdraw the tools; rolling back the Controller code must retain private data and existing service configuration.

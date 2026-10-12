@@ -1,5 +1,8 @@
 # Codex Controller 使用说明
 
+
+`0.5.59` 增加通用扩展注册与 skill 发现。符合 [EXTENSIONS.md](EXTENSIONS.md) 契约的新能力通过安装、配置和工具启用接入微信，不修改 Gateway 或 Controller 核心；正式部署与手机验收另行记录。
+
 当前发布版本：`0.5.57`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
 
 ## 瞬态 Turn 安全重试

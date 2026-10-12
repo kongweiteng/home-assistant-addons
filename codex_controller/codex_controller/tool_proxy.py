@@ -25,6 +25,9 @@ from .hub_manifest import (
     validate_hub_manifest,
 )
 from .store import ControllerStore, StoreError
+from .extensions import ExtensionRegistry, ExtensionError
+from .skills import SkillCatalog, SkillError, SKILL_NAMES
+from .extension_schema import validate_value, bounded_json, SchemaError
 from .prepare_car import (
     HomeAssistantPrepareCarError,
     HomeAssistantRequest,
@@ -147,6 +150,8 @@ class ToolRouter:
         memo_api_token: str = "",
         home_assistant_token: str = "",
         m8_reminder_reply_token: str = "",
+        extension_registry: ExtensionRegistry | None = None,
+        skill_catalog: SkillCatalog | None = None,
         request_json: Callable[..., dict[str, Any]] | None = None,
         request_memo_json: Callable[..., dict[str, Any]] | None = None,
         request_bytes: Callable[..., tuple[dict[str, Any], bytes]] | None = None,
@@ -169,6 +174,9 @@ class ToolRouter:
         self.memo_api_token = memo_api_token
         self.home_assistant_token = home_assistant_token
         self.m8_reminder_reply_token = m8_reminder_reply_token
+        self.extensions = extension_registry
+        self.skills = skill_catalog
+        self._extension_lock = threading.RLock()
         self.request_json = request_json or _request_json
         self.request_memo_json = request_memo_json or _request_memo_json
         self.request_bytes = request_bytes or _request_bytes
@@ -178,7 +186,7 @@ class ToolRouter:
         self.max_media_bytes = max_media_bytes
         self.store = store
         self.manifest_poll_interval = max(0.1, float(manifest_poll_interval))
-        self._context_lock = threading.Lock()
+        self._context_lock = threading.RLock()
         self._active_context: dict[str, Any] | None = None
         self._definition_lock = threading.RLock()
         self._hub_manifest: ValidatedHubManifest = BOOTSTRAP_MANIFEST
@@ -186,6 +194,7 @@ class ToolRouter:
         self._manifest_stop = threading.Event()
         self._manifest_thread: threading.Thread | None = None
         self._load_last_good_manifest()
+        self.sync_extensions()
 
     def begin_job(
         self,
@@ -252,7 +261,7 @@ class ToolRouter:
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         with self._definition_lock:
             hub_definitions = self._hub_manifest.definitions
-        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS
+        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + self.extension_definitions()
 
     def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
         return {definition.name: definition for definition in self.tool_definitions()}
@@ -262,7 +271,7 @@ class ToolRouter:
             for definition in self._hub_manifest.definitions:
                 if definition.name == name:
                     return definition
-        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS:
+        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + self.extension_definitions():
             if definition.name == name:
                 return definition
         return None
@@ -306,6 +315,8 @@ class ToolRouter:
             elif definition.service == "ha_operations_broker":
                 if self.operations_base_url and len(self.operations_token) >= 32:
                     tools.add(definition.name)
+            elif definition.service.startswith("extension:") or definition.service == "controller_skills":
+                tools.add(definition.name)
             elif definition.service == "family_memo" and self._memo_configured():
                 tools.add(definition.name)
             elif definition.service == "m8_charge_planner" and len(self.m8_reminder_reply_token) >= 32:
@@ -340,7 +351,7 @@ class ToolRouter:
         if capability_profile == "member_read_only":
             configured &= set(MEMBER_ALLOWED_TOOL_NAMES)
         elif capability_profile == "owner_legacy":
-            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS)
+            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS) | {d.name for d in self.extension_definitions()}
         elif capability_profile not in {None, "owner"}:
             return []
         if media_archive_authorized is False:
@@ -461,7 +472,7 @@ class ToolRouter:
             pass
 
     def start_manifest_sync(self) -> None:
-        if not self._hub_configured():
+        if not self._hub_configured() and self.extensions is None and self.skills is None:
             return
         if self._manifest_thread is not None and self._manifest_thread.is_alive():
             return
@@ -470,8 +481,10 @@ class ToolRouter:
         def synchronize() -> None:
             while not self._manifest_stop.is_set():
                 try:
-                    self.sync_hub_manifest()
-                except ToolProxyError:
+                    self.sync_extensions()
+                    if self._hub_configured():
+                        self.sync_hub_manifest()
+                except (ToolProxyError, StoreError, sqlite3.DatabaseError, OSError):
                     pass
                 if self._manifest_stop.wait(self.manifest_poll_interval):
                     break
@@ -489,14 +502,52 @@ class ToolRouter:
             self._manifest_thread.join(timeout=2)
         self._manifest_thread = None
 
+    def extension_definitions(self) -> tuple[ToolDefinition, ...]:
+        with self._extension_lock:
+            return (() if self.extensions is None else self.extensions.definitions()) + (() if self.skills is None else self.skills.definitions())
+
+    def sync_extensions(self) -> None:
+        if self.extensions is None and self.skills is None:
+            return
+        # Same lock order as calls: configuration cannot switch under an active request.
+        with self._context_lock, self._extension_lock:
+            if self.extensions is not None:
+                self.extensions.refresh()
+            if self.skills is not None:
+                self.skills.refresh()
+            catalog = {} if self.extensions is None else {
+                name: {"digest": digest, "default_enabled": False}
+                for name, digest in self.extensions.fingerprint().items()
+            }
+            for definition in (() if self.skills is None else self.skills.definitions()):
+                catalog[definition.name] = {"digest": "skill-reader-v1", "default_enabled": True}
+            if self.store is not None:
+                self.store.apply_extension_catalog(catalog)
+            else:
+                digest = hashlib.sha256(bounded_json(catalog)).hexdigest()
+                if getattr(self, "_extension_digest", None) != digest:
+                    self._extension_digest = digest
+                    self._fallback_revision += 1
+
+    def skill_context(self, capability_profile: str) -> list[dict[str, str]]:
+        with self._extension_lock:
+            if capability_profile != "owner" or self.skills is None or "controller_skill_read" not in self.available_tools("owner"):
+                return []
+            return self.skills.index()
+
     def tool_status(self) -> dict[str, Any]:
         if self.store is None:
             raise ToolProxyError("tool_policy_invalid", "工具策略存储未配置")
-        return self.store.tool_control_document(
+        document = self.store.tool_control_document(
             self.configured_tools(),
             self.route_ready_tools(),
             definitions=self.tool_definitions(),
         )
+        with self._extension_lock:
+            document["extensions"] = {"errors": [] if self.extensions is None else self.extensions.errors,
+                                      "skills": 0 if self.skills is None else len(self.skills.skills),
+                                      "invalid_skills": 0 if self.skills is None else self.skills.errors}
+        return document
 
     def update_tool_policy(
         self,
@@ -531,6 +582,14 @@ class ToolRouter:
         )
 
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name.startswith("ext_") or name in SKILL_NAMES:
+            with self._context_lock, self._extension_lock:
+                # Re-read revocations at the execution boundary; old model caches cannot bypass them.
+                self.sync_extensions()
+                return self._call_with_audit(name, arguments)
+        return self._call_with_audit(name, arguments)
+
+    def _call_with_audit(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
         outcome = "failed"
         error_code: str | None = None
@@ -571,6 +630,35 @@ class ToolRouter:
                     )
                 except (StoreError, sqlite3.DatabaseError, OSError):
                     pass
+
+    def _extension_call(self, definition: ToolDefinition, arguments: dict[str, Any]) -> dict[str, Any]:
+        context = self._active_context
+        if self.extensions is None or context is None or not context.get("turn_id") or self.store is None:
+            raise ToolProxyError("tool_context_unavailable", "扩展只能在所有者活动 Turn 内调用")
+        try:
+            bounded_json(arguments)
+            validate_value(arguments, definition.input_schema)
+            key = "sha256:" + hashlib.sha256(bounded_json([context.get("conversation_key", ""), context["message_id"], definition.name, arguments])).hexdigest()
+            if definition.idempotent_write:
+                replay = self.store.claim_extension_write(key)
+                if replay is not None:
+                    return replay
+            call_context = {"job_hash": hashlib.sha256(context["job_id"].encode()).hexdigest(),
+                            "turn_hash": hashlib.sha256(context["turn_id"].encode()).hexdigest(),
+                            "idempotency_key": key}
+            result = self.extensions.call(definition.name, arguments, call_context)
+            if definition.idempotent_write:
+                self.store.confirm_extension_write(key, result)
+            return result
+        except SchemaError:
+            raise ToolProxyError("extension_arguments_invalid", "扩展参数不符合 Schema") from None
+        except ExtensionError as exc:
+            code = "extension_write_unknown" if definition.idempotent_write else exc.code
+            raise ToolProxyError(code, "扩展写入结果未知，禁止重复执行" if definition.idempotent_write else "扩展调用失败") from None
+        except StoreError as exc:
+            raise ToolProxyError(exc.code, "扩展执行记录不可用或结果未知") from None
+        except (sqlite3.DatabaseError, OSError):
+            raise ToolProxyError("extension_write_unknown" if definition.idempotent_write else "extension_unavailable", "扩展执行记录不可用，禁止重复写入") from None
 
     def _capture_chart_result(self, result: dict[str, Any]) -> dict[str, Any]:
         if self.store is None:
@@ -613,7 +701,7 @@ class ToolRouter:
         with self._context_lock:
             context = None if self._active_context is None else dict(self._active_context)
         profile = None if context is None else context.get("capability_profile")
-        if name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS) and profile != "owner":
+        if (name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | SKILL_NAMES) or name.startswith("ext_")) and profile != "owner":
             raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
         if profile == "member_read_only" and name not in MEMBER_ALLOWED_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
@@ -643,6 +731,17 @@ class ToolRouter:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")
         name = definition.name
+        if definition.service == "controller_skills":
+            if self._active_context is None or not self._active_context.get("turn_id"):
+                raise ToolProxyError("tool_context_unavailable", "技能只在所有者活动 Turn 内可读")
+            try:
+                if self.skills is None:
+                    raise SkillError("skill_unavailable")
+                return self.skills.call(name, arguments)
+            except SkillError as exc:
+                raise ToolProxyError(exc.code, "技能流程不可用或参数无效") from None
+        if definition.service.startswith("extension:"):
+            return self._extension_call(definition, arguments)
         if definition.service == "renovation_hub" and definition.transport == "gateway_media_stream":
             if not self.ledger_base_url or len(self.ledger_token) < 32:
                 raise ToolProxyError("ledger_unavailable", "Renovation Hub 媒体接口未配置")

@@ -24,6 +24,8 @@ from .service import ControllerService
 from .store import ControllerStore, StoreError
 from .tool_catalog import ALL_TOOL_NAMES
 from .tool_proxy import ToolProxyServer, ToolRouter
+from .extensions import ExtensionRegistry
+from .skills import SkillCatalog
 
 
 def read_api_key_from_fd() -> str:
@@ -199,7 +201,9 @@ def write_codex_config(
 
 
 def codex_app_server_command(binary: str) -> list[str]:
-    return [binary, "app-server", "--disable", "goals", "--listen", "stdio://"]
+    return [binary, "app-server", "--disable", "goals", "--disable", "shell_tool",
+            "--disable", "unified_exec", "--disable", "shell_snapshot",
+            "--disable", "code_mode_host", "--disable", "multi_agent", "--listen", "stdio://"]
 
 
 def main() -> None:
@@ -322,6 +326,10 @@ def main() -> None:
         m8_reminder_reply_token=os.environ.get("CONTROLLER_M8_REMINDER_REPLY_TOKEN", ""),
         max_media_bytes=int(os.environ.get("CONTROLLER_MAX_MEDIA_BYTES", str(1024 * 1024 * 1024))),
         store=store,
+        extension_registry=ExtensionRegistry(data_dir / "extensions", data_dir / "extension-secrets"),
+        skill_catalog=SkillCatalog(data_dir / "skills", additional_roots=(
+            codex_home / "skills", codex_home / ".agents" / "skills", workspace / ".agents" / "skills",
+        ), boundary=data_dir),
         manifest_poll_interval=float(os.environ.get("CONTROLLER_HUB_MANIFEST_POLL_SECONDS", "30")),
     )
     proxy = ToolProxyServer(socket_path, router)

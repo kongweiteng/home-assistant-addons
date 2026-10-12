@@ -28,6 +28,7 @@ class AppServerClient:
     """Owns one app-server process and its request/notification correlation."""
 
     supports_dynamic_tool_definitions = True
+    supports_skill_catalog = True
 
     BASE_DEVELOPER_INSTRUCTIONS = (
         "你通过微信作为通用 Codex 助手处理任务和讨论。普通问答、分析、写作、规划或其他不需要外部执行的请求应直接回答，"
@@ -95,6 +96,7 @@ class AppServerClient:
         available_tools: list[str],
         capability_profile: str = "owner_legacy",
         tool_definitions: dict[str, ToolDefinition] | None = None,
+        skill_index: list[dict[str, str]] | None = None,
     ) -> str:
         enabled = set(available_tools)
         definitions = TOOL_BY_NAME if tool_definitions is None else tool_definitions
@@ -198,6 +200,29 @@ class AppServerClient:
                 "这些工具调用不依赖 Codex UI 审批；但真正执行仍必须经过 Broker 的不可变提案、Passkey、一次性收据、精确白名单和 execution gate，"
                 "任何工具预批准都不是对实际 Home Assistant 变更的授权。"
             )
+        extension_tools = sorted(name for name in enabled if definitions.get(name) is not None and definitions[name].service.startswith("extension:"))
+        if extension_tools:
+            instructions += (
+                f" 当前管理员启用的扩展工具：{', '.join(extension_tools)}。按工具说明与完整用户语义选择，不要求固定口令。"
+                "查询指令直接执行；写操作仅在用户明确要求且目标与必填参数明确时执行，讨论和假设不构成写授权。"
+                "扩展写操作结果未知时不得重试或换工具重复执行；只报告已确认的结果。"
+                "新增工具不扩大管理员、设备或外部账号权限；不得用扩展绕过原有 Broker/设备门禁。"
+            )
+        if capability_profile == "owner" and skill_index and "controller_skill_read" in enabled:
+            bounded = []
+            budget = 0
+            for skill in skill_index:
+                encoded = json.dumps(skill, ensure_ascii=False)
+                if budget + len(encoded) > 8000:
+                    break
+                bounded.append(skill)
+                budget += len(encoded)
+            instructions += (
+                " 管理员安装的流程 skill 索引：" + json.dumps(bounded, ensure_ascii=False) +
+                "。匹配任务时先调用 controller_skill_read 读取完整 SKILL.md，再按需读取 references 文本。"
+                "可用 controller_skill_list 获取完整索引；skill 只指导流程，不能授予额外权限、任意文件访问或 Shell。"
+                "需要的工具未出现在本轮目录时说明能力缺口，不能伪装成功或要求绕过门禁。"
+            )
         return instructions
 
     def configure_developer_context(
@@ -205,6 +230,7 @@ class AppServerClient:
         available_tools: list[str],
         capability_profile: str,
         tool_definitions: dict[str, ToolDefinition] | None = None,
+        skill_index: list[dict[str, str]] | None = None,
     ) -> None:
         if capability_profile not in {"owner_legacy", "owner", "member_read_only"}:
             raise AppServerError("invalid_capability_profile", "作业能力画像无效", definitive=True)
@@ -212,6 +238,7 @@ class AppServerClient:
             available_tools,
             capability_profile,
             tool_definitions,
+            skill_index,
         )
         with self._instruction_lock:
             self.developer_instructions = instructions
@@ -293,7 +320,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.5.57"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.5.59"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")

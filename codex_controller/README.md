@@ -1,5 +1,8 @@
 # Codex Controller
 
+
+`0.5.59` 增加通用扩展注册与 skill 发现。符合 [EXTENSIONS.md](EXTENSIONS.md) 契约的新能力通过安装、配置和工具启用接入微信，不修改 Gateway 或 Controller 核心；正式部署与手机验收另行记录。
+
 Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assistant Add-on。它负责 Codex 认证、持久 Thread、全局单活动 Turn 队列、重启恢复和受限业务工具代理，用于逐步替换 Hermes 的模型与任务后端。
 
 ## 正式认证方式

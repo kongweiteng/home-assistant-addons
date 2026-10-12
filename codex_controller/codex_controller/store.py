@@ -249,6 +249,20 @@ class ControllerStore:
                     first_seen_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS extension_catalog_state (
+                    id INTEGER PRIMARY KEY CHECK(id=1), digest TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS extension_tool_history (
+                    tool_name TEXT PRIMARY KEY, digest TEXT NOT NULL,
+                    active INTEGER NOT NULL CHECK(active IN (0,1)),
+                    default_enabled INTEGER NOT NULL CHECK(default_enabled IN (0,1))
+                );
+                CREATE TABLE IF NOT EXISTS extension_writes (
+                    idempotency_key TEXT PRIMARY KEY,
+                    state TEXT NOT NULL CHECK(state IN ('unknown','confirmed')),
+                    result_json TEXT,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS aito_prepare_car_confirmations (
                     confirmation_id TEXT PRIMARY KEY,
                     conversation_key TEXT NOT NULL,
@@ -1324,6 +1338,7 @@ class ControllerStore:
         )
         return (
             hub_names
+            | self.extension_tool_names(active_only=True)
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | M8_CHARGE_TOOLS
@@ -1339,11 +1354,64 @@ class ControllerStore:
         hub_names = {row["tool_name"] for row in rows if isinstance(row["tool_name"], str)}
         return (
             frozenset(hub_names)
+            | self.extension_tool_names(active_only=False)
             | frozenset(definition.name for definition in MEMO_DEFINITIONS)
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | M8_CHARGE_TOOLS
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
+
+    def extension_tool_names(self, *, active_only: bool) -> frozenset[str]:
+        try:
+            with self._connect() as connection:
+                query = "SELECT tool_name FROM extension_tool_history" + (" WHERE active=1" if active_only else "")
+                return frozenset(row["tool_name"] for row in connection.execute(query))
+        except sqlite3.DatabaseError as exc:
+            raise StoreError("extension_catalog_invalid", "扩展目录不可用", status=503) from exc
+
+    def apply_extension_catalog(self, catalog: dict[str, dict[str, Any]]) -> bool:
+        serialized = canonical_json(catalog)
+        digest = hashlib.sha256(serialized.encode()).hexdigest()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute("SELECT digest FROM extension_catalog_state WHERE id=1").fetchone()
+            if current is not None and current["digest"] == digest:
+                return False
+            meta = connection.execute("SELECT catalog_revision FROM tool_policy_meta WHERE id=1").fetchone()
+            if meta is None:
+                raise StoreError("tool_policy_invalid", "目录版本不存在", status=503)
+            revision = meta["catalog_revision"] + 1
+            connection.execute("UPDATE extension_tool_history SET active=0")
+            for name, entry in catalog.items():
+                previous = connection.execute("SELECT digest FROM extension_tool_history WHERE tool_name=?", (name,)).fetchone()
+                if previous is not None and previous["digest"] != entry["digest"]:
+                    # Changes of endpoint, risk or schema revoke prior tool authorization.
+                    connection.execute("INSERT INTO tool_policies(tool_name,enabled,revision,updated_at) VALUES (?,0,?,?) "
+                                       "ON CONFLICT(tool_name) DO UPDATE SET enabled=0,revision=excluded.revision,updated_at=excluded.updated_at",
+                                       (name, revision, shanghai_now_iso()))
+                connection.execute("INSERT INTO extension_tool_history(tool_name,digest,active,default_enabled) VALUES (?,?,1,?) "
+                                   "ON CONFLICT(tool_name) DO UPDATE SET digest=excluded.digest,active=1,default_enabled=excluded.default_enabled",
+                                   (name, entry["digest"], int(entry["default_enabled"])))
+            connection.execute("INSERT INTO extension_catalog_state(id,digest) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET digest=excluded.digest", (digest,))
+            connection.execute("UPDATE tool_policy_meta SET catalog_revision=?,updated_at=? WHERE id=1", (revision, shanghai_now_iso()))
+            return True
+
+    def claim_extension_write(self, key: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT state,result_json FROM extension_writes WHERE idempotency_key=?", (key,)).fetchone()
+            if row is not None:
+                if row["state"] == "confirmed" and row["result_json"] is not None:
+                    return json.loads(row["result_json"])
+                raise StoreError("extension_write_unknown", "写操作结果未知，禁止重复执行", status=409)
+            # A crash at any later point must never silently replay the action.
+            connection.execute("INSERT INTO extension_writes(idempotency_key,state,created_at) VALUES (?,'unknown',?)", (key, shanghai_now_iso()))
+        return None
+
+    def confirm_extension_write(self, key: str, result: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("UPDATE extension_writes SET state='confirmed',result_json=? WHERE idempotency_key=? AND state='unknown'", (canonical_json(result), key))
 
     def apply_hub_manifest(self, document: dict[str, Any]) -> dict[str, Any]:
         names = self._manifest_names(document)
@@ -1443,7 +1511,11 @@ class ControllerStore:
                     raise StoreError("tool_policy_invalid", "工具策略版本损坏", status=503)
                 active_names = set(self.active_tool_names())
                 historical_names = set(self.historical_tool_names())
-                enabled = set(active_names)
+                extension_names = self.extension_tool_names(active_only=True)
+                defaults = {row["tool_name"] for row in connection.execute(
+                    "SELECT tool_name FROM extension_tool_history WHERE active=1 AND default_enabled=1"
+                )}
+                enabled = (set(active_names) - set(extension_names)) | defaults
                 rows = connection.execute(
                     "SELECT tool_name,enabled,revision FROM tool_policies ORDER BY tool_name"
                 ).fetchall()
@@ -1456,6 +1528,8 @@ class ControllerStore:
                         raise StoreError("tool_policy_invalid", "工具策略版本越界", status=503)
                     if row["enabled"] == 0:
                         enabled.discard(row["tool_name"])
+                    elif row["tool_name"] in active_names:
+                        enabled.add(row["tool_name"])
                 return {"revision": revision, "enabled": frozenset(enabled)}
         except sqlite3.DatabaseError as exc:
             raise StoreError("tool_policy_invalid", "工具策略读取失败", status=503) from exc

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "status",
+      "display_name": "查询示例服务",
+      "description": "查询示例服务是否运行，不产生设备或数据写入。",
+      "risk_type": "read_only",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "outputSchema": {
+        "type": "object",
+        "properties": {"status": {"type": "string", "maxLength": 16, "enum": ["available"]}},
+        "required": ["status"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

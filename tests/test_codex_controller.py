@@ -587,6 +587,11 @@ class AppServerClientTests(unittest.TestCase):
                 "app-server",
                 "--disable",
                 "goals",
+                "--disable", "shell_tool",
+                "--disable", "unified_exec",
+                "--disable", "shell_snapshot",
+                "--disable", "code_mode_host",
+                "--disable", "multi_agent",
                 "--listen",
                 "stdio://",
             ],
@@ -1363,7 +1368,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.57"
+        expected = "0.5.59"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",

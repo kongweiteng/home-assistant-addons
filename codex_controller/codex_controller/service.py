@@ -518,7 +518,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.57",
+            "version": "0.5.59",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -760,6 +760,8 @@ class ControllerService:
             media_archive_authorized = has_explicit_media_archive_intent(
                 payload.get("text", ""), payload.get("attachments")
             )
+            if self.tool_context is not None and hasattr(self.tool_context, "sync_extensions"):
+                self.tool_context.sync_extensions()
             effective_tools = (
                 self.tool_context.available_tools(
                     capability_profile,
@@ -778,6 +780,9 @@ class ControllerService:
                         effective_tools,
                         capability_profile,
                         self.tool_context.tool_definitions_by_name(),
+                        **({"skill_index": self.tool_context.skill_context(capability_profile)}
+                           if getattr(self.app_server, "supports_skill_catalog", False)
+                           and hasattr(self.tool_context, "skill_context") else {}),
                     )
                 else:
                     self.app_server.configure_developer_context(effective_tools, capability_profile)

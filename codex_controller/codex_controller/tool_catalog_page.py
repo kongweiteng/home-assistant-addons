@@ -17,6 +17,7 @@ SERVICE_LABELS = {
     "family_memo": "家庭备忘录",
     "m8_charge_planner": "充电查询与提醒",
     "home_assistant_prepare_car": "用车准备",
+    "controller_models": "默认模型管理",
 }
 SERVICES = frozenset({"all", *SERVICE_LABELS})
 RISKS = frozenset({"all", "read_only", "write", "controlled"})

@@ -90,7 +90,7 @@ class TurnMediaManager:
     def bind_turn(self, job_id: str, turn_id: str) -> None:
         paths = self._job_paths.pop(job_id, [])
         if paths:
-            self._turn_paths[turn_id] = paths
+            self._turn_paths.setdefault(turn_id, []).extend(paths)
 
     def cleanup_job(self, job_id: str) -> None:
         paths = self._job_paths.pop(job_id, [])

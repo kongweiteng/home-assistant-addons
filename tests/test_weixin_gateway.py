@@ -243,7 +243,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.10"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.12"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -1353,6 +1353,25 @@ class StoreTests(unittest.TestCase):
 
 
 class ServiceTests(unittest.TestCase):
+    def test_m8_reply_only_owner_and_never_goes_to_controller(self) -> None:
+        raw = dict(fixture_update()['msgs'][0])
+        raw['item_list'] = [{'type': 1, 'text_item': {'text': '22点再提醒'}}]
+        async def exercise():
+            service = self.service()
+            service.m8_reminder_reply_token = 'synthetic-' * 5
+            with mock.patch('weixin_gateway.service.handle_reminder_reply', new_callable=mock.AsyncMock, return_value='已延迟') as handler, mock.patch.object(service, '_send_remote_work_text', new_callable=mock.AsyncMock):
+                await service._ingest({**raw, 'message_id': 'm8-unknown', 'from_user_id': 'fixture-stranger'})
+                await service._ingest({**raw, 'message_id': 'm8-group', 'room_id': 'fixture-room'})
+                handler.assert_not_awaited()
+                owner = self.store.user_by_identity_sender(service.identity['identity_id'], 'fixture-owner')
+                with mock.patch.object(self.store, 'user_by_identity_sender', return_value={**owner, 'role': 'member'}):
+                    await service._ingest({**raw, 'message_id': 'm8-member'})
+                handler.assert_not_awaited()
+                await service._ingest({**raw, 'message_id': 'm8-owner'})
+                handler.assert_awaited_once()
+                self.assertFalse(self.store.message_exists('m8-owner'))
+        self.run_async(exercise())
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -1460,6 +1479,77 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([call["status"] for call in client.typing_calls], [1, 2])
         self.assertEqual(self.store.get_message("typing-lifecycle-message")["state"], "completed")
         self.assertFalse(service._runtime_for_identity(None).typing_sessions)
+
+    def test_followup_success_has_one_combined_reply_and_all_inputs_finish(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        for suffix in ("parent", "child"):
+            message_id = f"followup-{suffix}"
+            self.store.store_message(
+                message_id=message_id, sender_id="fixture-owner",
+                conversation_key=owner["conversation_key"], text=suffix, media=[],
+                user_digest=owner["user_hash"], capability_profile="owner",
+            )
+            self.store.mark_submitted(message_id, f"job-{suffix}")
+
+        class FollowupController(CompletedController):
+            async def job(self, job_id: str) -> dict:
+                result = await super().job(job_id)
+                result["result"] = "结合补充内容的完整回答"
+                if job_id == "job-child":
+                    result.update(reply_suppressed=True, followup_state="accepted",
+                                  followup_parent_job_id="job-parent")
+                return result
+
+        service.controller = FollowupController()
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertEqual(len(service.client.sent), 1)
+        for suffix in ("parent", "child"):
+            self.assertEqual(self.store.get_message(f"followup-{suffix}")["state"], "completed")
+
+    def test_followup_unknown_or_failure_cannot_hide_error_reply(self) -> None:
+        service = self.service()
+        owner = self.store.user_by_private_id("fixture-owner")
+        assert owner is not None
+        self.store.store_message(
+            message_id="followup-unknown", sender_id="fixture-owner",
+            conversation_key=owner["conversation_key"], text="补充内容", media=[],
+            user_digest=owner["user_hash"], capability_profile="owner",
+        )
+        self.store.mark_submitted("followup-unknown", "job-unknown")
+
+        class UnknownController(CompletedController):
+            async def job(self, _job_id: str) -> dict:
+                return {"state": "recovery_required", "error_code": "followup_delivery_unknown",
+                        "reply_suppressed": True, "followup_state": "unknown",
+                        "followup_parent_job_id": "job-parent"}
+
+        service.controller = UnknownController()
+
+        async def exercise() -> None:
+            async def stop_after_cycle(_delay: float) -> None:
+                service._stop.set()
+            with mock.patch("weixin_gateway.service.asyncio.sleep", new=stop_after_cycle):
+                await service._delivery_loop()
+
+        self.run_async(exercise())
+        self.assertEqual(len(service.client.sent), 1)
+        self.assertEqual(self.store.get_message("followup-unknown")["state"], "failed")
+
+    def test_persisted_new_input_wakes_controller_delivery(self) -> None:
+        service = self.service()
+        update = fixture_update()["msgs"][0]
+        self.run_async(service._ingest(update))
+        self.assertTrue(service._delivery_wakeup.is_set())
+        self.assertEqual(len(self.store.pending_controller()), 1)
 
     def test_controller_delivery_forwards_cross_message_archive_context(self) -> None:
         service = self.service()
@@ -3469,7 +3559,7 @@ class AdminApiTests(unittest.TestCase):
                 frame = json.loads(fields["data"])
                 self.assertEqual(fields["event"], "status")
                 self.assertEqual(fields["id"], str(frame["revision"]))
-                self.assertEqual(frame["status"]["version"], "0.4.10")
+                self.assertEqual(frame["status"]["version"], "0.4.12")
                 self.assertIn("csrf_token", frame["status"])
                 self.assertNotIn("fixture-owner", json.dumps(frame, ensure_ascii=False))
             finally:

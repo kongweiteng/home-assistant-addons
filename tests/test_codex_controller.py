@@ -1368,7 +1368,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.59"
+        expected = "0.5.60"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1642,7 +1642,7 @@ class ControllerToolApiTests(unittest.TestCase):
                 self.assertEqual(tools["result"]["revision"], 2)
                 by_name = {item["name"]: item for item in tools["result"]["tools"]}
                 self.assertFalse(by_name["ledger_summary"]["enabled"])
-                self.assertEqual(len(by_name), 47)
+                self.assertEqual(len(by_name), 49)
                 self.assertFalse(by_name["fnos_query"]["configured"])
 
                 unauthorized, _ = request("GET", "/internal/v1/capabilities")
@@ -1898,7 +1898,7 @@ class ToolRouterTests(unittest.TestCase):
             )
 
     def test_tool_metadata_is_complete_unique_and_member_allowlist_is_exact(self) -> None:
-        self.assertEqual(len(ALL_TOOL_NAMES), 45)
+        self.assertEqual(len(ALL_TOOL_NAMES), 47)
         self.assertEqual(set(TOOL_BY_NAME), set(ALL_TOOL_NAMES))
         self.assertEqual(
             MEMBER_READ_ONLY_TOOL_NAMES,
@@ -2333,6 +2333,13 @@ class ToolRouterTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            persisted = store.create_job(fixture_job("fixture-context-message"))
+            claimed = store.claim_next()
+            store.assign_thread(claimed["job_id"], "thread-context")
+            store.assign_turn(claimed["job_id"], "turn-context")
+            router.clear_job("fixture-context-job")
+            router.begin_job(persisted["job_id"], "fixture-context-message")
+            router.bind_turn(persisted["job_id"], "turn-context")
             service = ControllerService(
                 store,
                 App(),  # type: ignore[arg-type]

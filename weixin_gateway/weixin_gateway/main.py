@@ -61,6 +61,7 @@ async def async_main() -> None:
         remote_work_ttl_seconds=int(os.environ.get("WEIXIN_REMOTE_WORK_TTL_SECONDS", "1800")),
         max_active_identities=int(os.environ.get("WEIXIN_MAX_ACTIVE_IDENTITIES", "5")),
     )
+    service.m8_reminder_reply_token = os.environ.get('WEIXIN_M8_REMINDER_REPLY_TOKEN', '')
     await service.start()
     loop = asyncio.get_running_loop()
     notification_runtime: GatewayNotificationRuntime | None = None

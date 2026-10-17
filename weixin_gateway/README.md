@@ -1,5 +1,7 @@
 # Weixin Gateway 微信网关
 
+`0.4.12` 支持连续微信消息的活动任务追加与单次综合回执。保留已部署的 M8 提醒回复功能。
+
 Weixin Gateway 是一个最小、独立、可审计的个人微信 iLink 传输层。它可以在同一 Add-on 进程中承载多个 ClawBot/iLink 身份，只负责每身份长轮询、访问控制、游标、`context_token`、消息去重、媒体加解密、Codex Controller 异步作业，以及默认关闭的 owner-only Remote Work 消息适配；不包含模型、Shell、插件或 Home Assistant 权限。
 
 ## 当前阶段

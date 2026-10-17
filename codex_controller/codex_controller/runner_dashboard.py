@@ -286,7 +286,7 @@ function riskText(value) {
 
 function serviceText(value) {
   const labels = {renovation_hub: 'Renovation Hub', ha_operations_broker: 'Operations Broker',
-    family_memo: '家庭备忘录', home_assistant_prepare_car: '用车准备'};
+    family_memo: '家庭备忘录', home_assistant_prepare_car: '用车准备', controller_models: '默认模型管理'};
   return labels[value] || '未知服务';
 }
 
@@ -1165,7 +1165,7 @@ q('closeRunnerCredential').onclick = closeCredentialRotation;
 q('runnerStateFilter').onchange = renderRunners;
 q('runnerPlatformFilter').onchange = renderRunners;
 q('reloadRunners').onclick = refreshRunners;
-for (const value of ['family_memo', 'home_assistant_prepare_car']) {
+for (const value of ['family_memo', 'home_assistant_prepare_car', 'controller_models']) {
   const option = document.createElement('option');
   option.value = value;
   option.textContent = serviceText(value);

@@ -371,7 +371,8 @@ class ControllerService:
         self._stop = threading.Event()
         self._scheduler: threading.Thread | None = None
         self._pending_turn_events: dict[str, list[dict[str, Any]]] = {}
-        self._event_lock = threading.Lock()
+        self._event_lock = threading.RLock()
+        self._turn_tool_sets: dict[str, frozenset[str]] = {}
         self.error_center = ErrorCenter(
             desktop_controller=desktop_controller,
             component_status=self._error_component_status,
@@ -425,6 +426,7 @@ class ControllerService:
                 "runner_manager_v2",
                 "desktop_takeover_v1",
                 "aito_prepare_car_confirmation_v1",
+                "conversation_followup_v1",
             ],
         }
 
@@ -518,7 +520,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.59",
+            "version": "0.5.60",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -618,6 +620,12 @@ class ControllerService:
         }
 
     def handle_notification(self, message: dict[str, Any], *, allow_buffer: bool = True) -> None:
+        # Only local state transitions hold this lock. Scheduler RPCs never do.
+        # A terminal event cannot pass a delivery claim's pending-state check.
+        with self._event_lock:
+            self._handle_notification_locked(message, allow_buffer=allow_buffer)
+
+    def _handle_notification_locked(self, message: dict[str, Any], *, allow_buffer: bool = True) -> None:
         method = message.get("method")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         if method == "error":
@@ -682,6 +690,9 @@ class ControllerService:
             turn_id = turn.get("id") or params.get("turnId")
             status = turn.get("status")
             if isinstance(turn_id, str) and isinstance(status, str):
+                if self.store.followup_pending(turn_id):
+                    self._buffer_event(turn_id, message)
+                    return
                 if allow_buffer:
                     with self._event_lock:
                         pending = self._pending_turn_events.get(turn_id)
@@ -690,10 +701,6 @@ class ControllerService:
                                 pending.append(message)
                             self.error_center.notify_local_change()
                             return
-                if self.tool_context is not None:
-                    self.tool_context.end_turn(turn_id)
-                if self.turn_media is not None:
-                    self.turn_media.cleanup_turn(turn_id)
                 error = turn.get("error") if isinstance(turn.get("error"), dict) else {}
                 classification = (
                     classify_turn_error(error)
@@ -716,6 +723,13 @@ class ControllerService:
                     tool_activity_observed=activity,
                     artifact_observed=artifact,
                 )
+                if handled:
+                    self._turn_tool_sets.pop(turn_id, None)
+                    if self.tool_context is not None:
+                        self.tool_context.end_turn(turn_id)
+                    if self.turn_media is not None:
+                        self.turn_media.cleanup_turn(turn_id)
+                    self.store.settle_followups(turn_id, status)
                 if not handled and allow_buffer:
                     self._buffer_event(turn_id, message)
         elif method == "account/updated":
@@ -747,6 +761,8 @@ class ControllerService:
                 next_artifact_cleanup = time.monotonic() + 60
             if not self.intake_enabled or self.start_error is not None:
                 continue
+            self.store.expire_followup_interrupts()
+            self._append_active_turn()
             job = self.store.claim_next()
             if job is None:
                 continue
@@ -755,7 +771,7 @@ class ControllerService:
     def _dispatch(self, job: dict[str, Any]) -> None:
         turn_started = False
         try:
-            payload = job["input"]
+            payload = self.store.continuation_input(job["job_id"], job["input"])
             capability_profile = payload.get("capability_profile", "owner_legacy")
             media_archive_authorized = has_explicit_media_archive_intent(
                 payload.get("text", ""), payload.get("attachments")
@@ -929,12 +945,15 @@ class ControllerService:
                 payload["text"],
                 job["message_id"],
                 input_items=input_items,
+                **({"model": self.tool_context.model_manager.get_default()}
+                   if getattr(self.tool_context, "model_manager", None) is not None else {}),
             )
             if self.tool_context is not None:
                 self.tool_context.bind_turn(job["job_id"], turn_id)
             turn_started = True
             if self.turn_media is not None:
                 self.turn_media.bind_turn(job["job_id"], turn_id)
+            self._turn_tool_sets[turn_id] = frozenset(effective_tools)
             self.store.assign_turn(job["job_id"], turn_id)
             self._flush_turn_events(turn_id)
         except AppServerError as exc:
@@ -962,6 +981,101 @@ class ControllerService:
                     self.tool_context.clear_job(job["job_id"])
                 if self.turn_media is not None:
                     self.turn_media.cleanup_job(job["job_id"])
+
+    @staticmethod
+    def _followup_control_barrier(payload: dict[str, Any]) -> bool:
+        # Deterministic commands must retain their original authorization path.
+        if is_new_thread_command(payload) or prepare_car_intent(payload) is not None:
+            return True
+        if (direct_memo_create_arguments(payload) is not None
+            or direct_memo_list_arguments(payload) is not None
+            or direct_memo_complete_query(payload) is not None):
+            return True
+        return False
+
+    def _claim_followup(self, parent: dict[str, Any], child: dict[str, Any]) -> bool:
+        with self._event_lock:
+            return self.store.claim_followup(parent["job_id"],child["job_id"],parent["turn_id"])
+
+    def _append_active_turn(self) -> bool:
+        """Scheduler-only RPC: the notification reader never waits for itself."""
+        candidate = self.store.followup_candidate()
+        if candidate is None:
+            return False
+        parent, child = candidate
+        payload = child["input"]
+        if self._followup_control_barrier(payload):
+            return False
+        parent_input = self.store.continuation_input(parent["job_id"], parent["input"])
+        all_attachments = self.store.related_attachments(parent["job_id"], parent_input["attachments"]) + payload["attachments"]
+        old_archive = has_explicit_media_archive_intent(parent_input["text"], parent_input["attachments"])
+        new_archive = has_explicit_media_archive_intent(payload["text"], all_attachments)
+        if new_archive and not old_archive:
+            # Preserve media context without adding permissions to the old catalog.
+            if self._claim_followup(parent, child):
+                self.store.finish_followup_delivery(child["job_id"], "rejected", "followup_catalog_changed")
+                self._flush_turn_events(parent["turn_id"])
+                return True
+            return False
+        if self.tool_context is not None:
+            tools = frozenset(self.tool_context.available_tools(
+                payload.get("capability_profile", "owner_legacy"),
+                media_archive_authorized=old_archive,
+            ))
+            if tools != self._turn_tool_sets.get(parent["turn_id"]):
+                return False
+        turn_id = parent["turn_id"]
+        if not self._claim_followup(parent, child):
+            return False
+        media_bound = False
+        try:
+            if (old_archive and MEDIA_ARCHIVE_NEGATION_RE.search(payload["text"])
+                and self.tool_context is not None and hasattr(self.tool_context, "restrict_media_archive")):
+                self.tool_context.restrict_media_archive(turn_id)
+            evidence = self.store.write_evidence(parent["job_id"])
+            text = ("用户补充了同一会话的新消息。结合先前问题和本条继续，最终只回复一次。"
+                    "追加不撤销已执行的操作；先核对已存在的结果，需要时更正，禁止重复创建。\n"
+                    + payload["text"])
+            if evidence:
+                text += "\n本轮已有写入执行证据，请核对结果：" + str(evidence)
+            followup_payload = {**payload, "text":text}
+            input_items = self.turn_media.prepare(child["job_id"], followup_payload) if self.turn_media is not None else None
+            if self.turn_media is not None:
+                self.turn_media.bind_turn(child["job_id"], turn_id)
+                media_bound = True
+            self.app_server.steer_turn(parent["thread_id"], turn_id, text, child["message_id"], input_items=input_items)
+            self.store.finish_followup_delivery(child["job_id"], "accepted")
+        except AppServerError as exc:
+            unsupported = exc.definitive and exc.rpc_code == -32601
+            guarded = bool(
+                unsupported and self.tool_context is not None
+                and hasattr(self.tool_context, "begin_followup_interrupt")
+                and self.tool_context.begin_followup_interrupt(parent["job_id"], child["job_id"], turn_id)
+            )
+            if guarded:
+                self.store.finish_followup_delivery(child["job_id"], "interrupt_wait")
+                self._flush_turn_events(turn_id)
+                if self.store.get_job(parent["job_id"])["state"] == "running":
+                    try:
+                        self.app_server.interrupt_turn(parent["thread_id"], turn_id)
+                    except AppServerError as interrupt_error:
+                        self.store.finish_followup_delivery(
+                            child["job_id"], "rejected" if interrupt_error.definitive else "unknown",
+                            interrupt_error.code,
+                        )
+                        self.tool_context.cancel_followup_interrupt(turn_id)
+            else:
+                self.store.finish_followup_delivery(child["job_id"], "rejected" if exc.definitive else "unknown", exc.code)
+        except MediaInputError as exc:
+            self.store.finish_followup_delivery(child["job_id"], "rejected", exc.code)
+        except Exception:
+            # Once a request might have escaped, fail closed and require review.
+            self.store.finish_followup_delivery(child["job_id"], "unknown", "followup_internal_error")
+        finally:
+            if self.turn_media is not None and not media_bound:
+                self.turn_media.cleanup_job(child["job_id"])
+            self._flush_turn_events(turn_id)
+        return True
 
     def _buffer_event(self, turn_id: str, message: dict[str, Any]) -> None:
         with self._event_lock:

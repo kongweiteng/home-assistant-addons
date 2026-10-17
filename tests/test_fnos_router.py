@@ -7,6 +7,7 @@ import unittest
 from codex_controller.app_server import AppServerClient
 from codex_controller.fnos_skill import FNOS_TOOLS, FnosSkillError
 from codex_controller.store import ControllerStore
+from codex_job_fixture import persist_tool_job
 from codex_controller.tool_proxy import ToolProxyError, ToolRouter
 
 
@@ -95,13 +96,15 @@ class FnosRouterTests(unittest.TestCase):
         self.assertNotIn("fnos_service_control", member)
 
     def test_job_switch_between_authorization_and_dispatch_cannot_execute(self):
-        self.router.begin_job("job-old", "message-old", "owner")
+        old_job = persist_tool_job(self.store, "message-old")
+        new_job = persist_tool_job(self.store, "message-new")
+        self.router.begin_job(old_job, "message-old", "owner")
         original = self.client.configured
 
         def swap_job():
             self.client.configured = original
-            self.router.clear_job("job-old")
-            self.router.begin_job("job-new", "message-new", "owner")
+            self.router.clear_job(old_job)
+            self.router.begin_job(new_job, "message-new", "owner")
             return original()
 
         self.client.configured = swap_job

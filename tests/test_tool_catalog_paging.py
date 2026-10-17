@@ -57,7 +57,7 @@ class ToolCatalogPagingTests(unittest.TestCase):
                             for tool in page["tools"]))
         self.assertEqual(tool_catalog_page(fixture(), "search=Operations")["page"]["total"], 23)
         self.assertTrue({tool.service for tool in TOOL_DEFINITIONS}.issubset(SERVICES))
-        for service in ("family_memo", "home_assistant_prepare_car"):
+        for service in ("family_memo", "home_assistant_prepare_car", "controller_models"):
             source = fixture()
             source["tools"][0]["service"] = service
             result = tool_catalog_page(source, "service=" + service)

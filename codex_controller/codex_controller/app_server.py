@@ -38,6 +38,9 @@ class AppServerClient:
         "收到图片、视频或文件时默认只用于本轮识别和回答，不得因为存在附件就自动归档；只有用户明确要求将其归档到装修/施工/工地档案时，才允许调用媒体归档工具。"
         "不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；"
         "这里仅禁止当前 Codex Turn/Goal 自身在后台等待，不限制调用已经配置、具有独立生命周期和通知通道的独立自动化服务。"
+        "同一轮收到后续微信输入时，应结合已有问题与新补充继续，并只给出一次完整结果。追加不撤销已发生的操作；"
+        "先核对已有工具结果，更正已有记录而非重复创建。最终答复须涵盖本轮已成功执行的动作，未知结果明确说明待核对。"
+        "只有用户明确要求切换默认模型时才调用 controller_model_set_default；讨论、假设和举例不构成切换授权。新默认从下一轮生效。"
         "不要输出内部推理、Token、路径或工具秘密。"
     )
 
@@ -332,7 +335,7 @@ class AppServerClient:
             thread.start()
         initialize = self.request(
             "initialize",
-            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.5.59"}},
+            {"clientInfo": {"name": "ha_codex_controller", "title": "Home Assistant Codex Controller", "version": "0.5.60"}},
         )
         if not isinstance(initialize, dict):
             raise AppServerError("app_server_protocol_error", "initialize 响应无效")
@@ -505,12 +508,14 @@ class AppServerClient:
         message_id: str,
         *,
         input_items: list[dict[str, Any]] | None = None,
+        model: str | None = None,
     ) -> str:
         result = self.request(
             "turn/start",
             {
                 "threadId": thread_id,
                 "clientUserMessageId": message_id,
+                **({"model": model} if model else {}),
                 "input": input_items if input_items is not None else [{"type": "text", "text": text}],
                 "approvalPolicy": "never",
             },
@@ -522,6 +527,21 @@ class AppServerClient:
         with self._thread_load_lock:
             self._forkable_threads.add(thread_id)
         return turn_id
+
+    def steer_turn(
+        self, thread_id: str, turn_id: str, text: str, message_id: str,
+        *, input_items: list[dict[str, Any]] | None = None,
+    ) -> str:
+        result = self.request("turn/steer", {
+            "threadId": thread_id,
+            "expectedTurnId": turn_id,
+            "clientUserMessageId": message_id,
+            "input": input_items if input_items is not None else [{"type": "text", "text": text}],
+        })
+        returned = result.get("turnId") if isinstance(result, dict) else None
+        if returned != turn_id:
+            raise AppServerError("followup_delivery_unknown", "追加未返回预期 Turn ID")
+        return returned
 
     def interrupt_turn(self, thread_id: str, turn_id: str) -> Any:
         return self.request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})

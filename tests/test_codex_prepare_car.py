@@ -15,6 +15,7 @@ from codex_controller.prepare_car import (
 )
 from codex_controller.service import ControllerService
 from codex_controller.store import ControllerStore
+from codex_job_fixture import persist_tool_job
 from codex_controller.tool_proxy import ToolProxyError, ToolRouter
 
 
@@ -181,13 +182,14 @@ class PrepareCarRouterTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def begin(self, job_id: str, message_id: str, profile: str = "owner") -> None:
-        self.router.begin_job(
-            job_id,
-            message_id,
-            profile,
-            conversation_key=self.conversation,
+    def begin(self, job_id: str, message_id: str, profile: str = "owner", *, router=None) -> str:
+        persisted_id = persist_tool_job(self.store, message_id, profile, conversation_key=self.conversation)
+        self.context_jobs = getattr(self, "context_jobs", {})
+        self.context_jobs[job_id] = persisted_id
+        (router or self.router).begin_job(
+            persisted_id, message_id, profile, conversation_key=self.conversation,
         )
+        return persisted_id
 
     def test_tools_are_owner_only_and_use_fixed_ha_routes(self) -> None:
         self.assertTrue(PREPARE_CAR_TOOL_NAMES.issubset(self.router.available_tools("owner")))
@@ -197,7 +199,7 @@ class PrepareCarRouterTests(unittest.TestCase):
         requested = self.router.call("aito_prepare_car_request", {"target": True})
         self.assertEqual(requested["status"], "pending_confirmation")
         self.assertEqual(self.calls, [])
-        self.router.clear_job("request-job")
+        self.router.clear_job(self.context_jobs["request-job"])
 
         self.begin("execute-job", "execute-message")
         executed = self.router.call("aito_prepare_car_execute", {"target": True})
@@ -209,7 +211,7 @@ class PrepareCarRouterTests(unittest.TestCase):
                 ("POST", "/services/switch/turn_on", {"entity_id": PREPARE_CAR_ENTITY_ID}),
             ],
         )
-        self.router.clear_job("execute-job")
+        self.router.clear_job(self.context_jobs["execute-job"])
         self.begin("replay-job", "execute-message")
         replay = self.router.call("aito_prepare_car_execute", {"target": True})
         self.assertTrue(replay["idempotent_replay"])
@@ -233,14 +235,14 @@ class PrepareCarRouterTests(unittest.TestCase):
             request_home_assistant=request,
             store=self.store,
         )
-        router.begin_job("request-unknown", "request-unknown", "owner", conversation_key=self.conversation)
+        self.begin("request-unknown", "request-unknown", router=router)
         router.call("aito_prepare_car_request", {"target": True})
-        router.clear_job("request-unknown")
-        router.begin_job("execute-unknown", "execute-unknown", "owner", conversation_key=self.conversation)
+        router.clear_job(self.context_jobs["request-unknown"])
+        self.begin("execute-unknown", "execute-unknown", router=router)
         result = router.call("aito_prepare_car_execute", {"target": True})
         self.assertEqual(result["status"], "unknown")
-        router.clear_job("execute-unknown")
-        router.begin_job("replay-unknown", "execute-unknown", "owner", conversation_key=self.conversation)
+        router.clear_job(self.context_jobs["execute-unknown"])
+        self.begin("replay-unknown", "execute-unknown", router=router)
         replay = router.call("aito_prepare_car_execute", {"target": True})
         self.assertEqual(replay["status"], "unknown")
         self.assertTrue(replay["idempotent_replay"])

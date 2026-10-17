@@ -22,6 +22,7 @@ from codex_controller.hub_manifest import (
 )
 from codex_controller.main import write_codex_config
 from codex_controller.store import ControllerStore, StoreError
+from codex_job_fixture import persist_tool_job
 from codex_controller.tool_catalog import MEMBER_READ_ONLY_TOOL_NAMES
 from codex_controller.tool_proxy import (
     ToolProxyError,
@@ -127,7 +128,7 @@ class DynamicMcpTests(unittest.TestCase):
         router = self.router(endpoint)
 
         self.assertEqual(len(BOOTSTRAP_MANIFEST.definitions), 27)
-        self.assertEqual(len(router.tool_definitions()), 47)
+        self.assertEqual(len(router.tool_definitions()), 49)
         self.assertNotIn("fnos_query", router.available_tools())
         self.assertIn("ledger_summary", router.available_tools())
         self.assertNotIn("ledger_attach", router.available_tools())
@@ -267,7 +268,8 @@ class DynamicMcpTests(unittest.TestCase):
             set(MEMBER_READ_ONLY_TOOL_NAMES),
         )
 
-        router.begin_job("owner-job", "owner-message", "owner")
+        owner_job = persist_tool_job(self.store, "owner-message")
+        router.begin_job(owner_job, "owner-message", "owner")
         self.assertTrue(router.call(FUTURE_READ, {"query": "水电"})["result"]["ok"])
         first = router.call(
             FUTURE_WRITE,
@@ -286,7 +288,7 @@ class DynamicMcpTests(unittest.TestCase):
         second_key = write_payloads[1]["arguments"]["idempotency_key"]
         self.assertEqual(first_key, second_key)
         self.assertRegex(first_key, r"^sha256:[a-f0-9]{64}$")
-        router.clear_job("owner-job")
+        router.clear_job(owner_job)
 
         router.begin_job("legacy-job", "legacy-message", "owner_legacy")
         self.assertTrue(router.call(FUTURE_READ, {"query": "木工"})["result"]["ok"])
@@ -312,7 +314,8 @@ class DynamicMcpTests(unittest.TestCase):
         endpoint = ManifestEndpoint(signed_manifest(include_future_read=True))
         router = self.router(endpoint)
         router.sync_hub_manifest()
-        router.begin_job("owner-job", "owner-message", "owner")
+        owner_job = persist_tool_job(self.store, "owner-message")
+        router.begin_job(owner_job, "owner-message", "owner")
         revision = self.store.tool_catalog_revision()
         router.update_tool_policy(
             FUTURE_READ,

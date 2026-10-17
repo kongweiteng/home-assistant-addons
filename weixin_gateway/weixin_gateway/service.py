@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import aiohttp
+from .m8_reminders import is_reminder_command, handle_reminder_reply
 
 from .protocol import (
     IlinkClient,
@@ -536,6 +537,7 @@ class GatewayService:
         self._failure_revision = 0
         self._failure_fingerprint = ""
         self._stop = asyncio.Event()
+        self._delivery_wakeup = asyncio.Event()
         self._outbound_lock = asyncio.Lock()
         self._authorization_lock = asyncio.Lock()
         self._poller_control_lock = asyncio.Lock()
@@ -1326,6 +1328,14 @@ class GatewayService:
         message["principal_id"] = user["principal_id"]
         if message["context_token"]:
             self.identity_store.set_context(current.identity, sender_id, message["context_token"])
+        if is_reminder_command(message.get('text')):
+            if not owner_runtime or user['role'] != 'owner' or message['media']:
+                reply = '仅家庭 owner 本人可以用纯文字忽略充电提醒。'
+            else:
+                reply = await handle_reminder_reply(getattr(self, 'm8_reminder_reply_token', ''), current.identity_id, storage_message_id, message['text'])
+            await self._send_remote_work_text(message, user, reply, error_code='m8_reminder_ignore')
+            self._touch_runtime_message(current)
+            return
         route = select_work_route(
             message.get("text"),
             role=str(user["role"]),
@@ -1401,6 +1411,7 @@ class GatewayService:
             user_digest=user["user_hash"],
             capability_profile="owner" if user["role"] == "owner" else "member_read_only",
         )
+        self._delivery_wakeup.set()
         self._touch_runtime_message(current)
 
     async def _handle_runner_manager_v2(
@@ -1796,6 +1807,18 @@ class GatewayService:
                                 self.last_error = exc.code
                                 self.publish_status_change()
                                 break
+                            consolidated = job.get("reply_suppressed") is True and (
+                                (job["state"] == "completed" and job.get("followup_state") == "accepted"
+                                 and isinstance(job.get("followup_parent_job_id"), str)
+                                 and bool(job["followup_parent_job_id"]))
+                                or (job["state"] == "cancelled" and job.get("followup_state") == "continuation")
+                            )
+                            if consolidated:
+                                # The Controller retains each input and sends one parent/continuation result.
+                                # Failed or uncertain inputs must still take the normal error path.
+                                await self._stop_typing_for_message(message)
+                                self._mark_finished(message["message_id"], success=True)
+                                continue
                             if job["state"] == "completed":
                                 self.store.update_conversation_link(
                                     message.get("user_hash"),
@@ -1849,7 +1872,7 @@ class GatewayService:
                                     controller_state=job["state"],
                                     controller_error_code=job.get("error_code"),
                                 )
-                    await asyncio.sleep(2)
+                    await self._wait_for_delivery()
                 except asyncio.CancelledError:
                     raise
                 except (StoreError, ProtocolError) as exc:
@@ -1863,6 +1886,17 @@ class GatewayService:
         finally:
             for runtime in self._runtimes.values():
                 await self._stop_all_typing(runtime)
+
+    async def _wait_for_delivery(self) -> None:
+        # Yield before waiting so lifecycle cancellation remains prompt even under continuous input.
+        await asyncio.sleep(0)
+        if self._stop.is_set():
+            return
+        try:
+            await asyncio.wait_for(self._delivery_wakeup.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            pass
+        self._delivery_wakeup.clear()
 
     async def _deliver_runner_manager_v2_updates(self) -> None:
         if not self.runner_manager_v2_enabled or not self.controller.configured:
@@ -3097,7 +3131,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.10",
+            "version": "0.4.12",
             "details_revision": self._status_details_revision,
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,

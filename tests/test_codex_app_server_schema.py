@@ -81,11 +81,20 @@ class AppServerSchemaCompatibilityTests(unittest.TestCase):
 
         turn_start = self.load("v2/TurnStartParams.json")
         self.assertEqual(set(turn_start["required"]), {"input", "threadId"})
-        for field in ("clientUserMessageId", "approvalPolicy"):
+        for field in ("clientUserMessageId", "approvalPolicy", "model"):
             self.assertIn(field, turn_start["properties"])
         turn_start_serialized = json.dumps(turn_start, ensure_ascii=False)
         for field in ('"localImage"', '"path"', '"detail"'):
             self.assertIn(field, turn_start_serialized)
+
+        steer = self.load("v2/TurnSteerParams.json")
+        self.assertEqual(set(steer["required"]), {"expectedTurnId", "input", "threadId"})
+        self.assertIn("clientUserMessageId", steer["properties"])
+        steer_serialized = json.dumps(steer, ensure_ascii=False)
+        for field in ('"localImage"', '"path"', '"detail"'):
+            self.assertIn(field, steer_serialized)
+        steer_response = self.load("v2/TurnSteerResponse.json")
+        self.assertEqual(steer_response["required"], ["turnId"])
 
         item_completed = self.load("v2/ItemCompletedNotification.json")
         self.assertTrue({"threadId", "turnId", "item"}.issubset(item_completed["required"]))
@@ -129,6 +138,13 @@ class AppServerMcpRuntimeCompatibilityTests(unittest.TestCase):
             root = Path(raw_directory)
             codex_home = root / "codex-home"
             workspace = root / "workspace"
+            # The persistence fixture uses a dummy local API account so no
+            # external login/catalog/network is needed before userMessage.
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model = "gpt-5.6-sol"\nopenai_base_url = "http://127.0.0.1:9/v1"\n'
+                '[features]\nresponses_websockets_v2 = false\n', encoding="utf-8",
+            )
             user_message_persisted = threading.Event()
 
             def observe(message: dict) -> None:
@@ -148,6 +164,7 @@ class AppServerMcpRuntimeCompatibilityTests(unittest.TestCase):
             )
             try:
                 first.start()
+                first.request("account/login/start", {"type": "apiKey", "apiKey": "fixture-only-not-a-secret"})
                 first.configure_developer_context(["ledger_show"], "owner")
                 original_thread = first.start_thread()
                 first.start_turn(original_thread, "fixture persistence turn", "fixture-persist-turn")

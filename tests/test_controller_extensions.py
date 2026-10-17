@@ -16,6 +16,7 @@ from codex_controller.extensions import ExtensionError, ExtensionRegistry, reque
 from codex_controller.extension_schema import SchemaError, validate_schema, validate_value
 from codex_controller.skills import SkillCatalog, SkillError, private_text
 from codex_controller.store import ControllerStore
+from codex_job_fixture import persist_tool_job
 from codex_controller.tool_proxy import ToolProxyError, ToolRouter, ToolProxyServer
 from codex_controller.main import codex_app_server_command, write_codex_config
 
@@ -66,8 +67,10 @@ class ExtensionsTests(unittest.TestCase):
         self.router.update_tool_policy(name, enabled=True, revision=self.store.tool_catalog_revision(), request_id="enable-" + name)
 
     def begin(self, profile="owner", message="message-1"):
-        self.router.begin_job("job-1", message, profile)
-        self.router.bind_turn("job-1", "turn-1")
+        message = message + "-" + profile
+        self.current_job_id = persist_tool_job(self.store, message, profile)
+        self.router.begin_job(self.current_job_id, message, profile)
+        self.router.bind_turn(self.current_job_id, "turn-1")
 
     def code(self, code, call):
         with self.assertRaises(ToolProxyError) as caught:
@@ -151,12 +154,13 @@ class ExtensionsTests(unittest.TestCase):
         self.router.call("ext_demo_lookup", {})
         self.router.call("ext_demo_lookup", {})
         self.assertEqual(len(self.calls), 1)
-        self.router.clear_job("job-1"); self.begin(message="message-2")
+        self.router.clear_job(self.current_job_id); self.begin(message="message-2")
         self.response = ExtensionError("extension_upstream_unavailable")
         self.code("extension_write_unknown", lambda: self.router.call("ext_demo_lookup", {}))
         self.assertEqual(len(self.calls), 2)
         restarted = ToolRouter(store=ControllerStore(self.root / "db.sqlite3"), extension_registry=self.registry)
-        restarted.begin_job("job-2", "message-2", "owner"); restarted.bind_turn("job-2", "turn-2")
+        job_id = persist_tool_job(self.store, "message-2-owner")
+        restarted.begin_job(job_id, "message-2-owner", "owner"); restarted.bind_turn(job_id, "turn-2")
         self.response = {"status": "ok"}
         self.code("extension_write_unknown", lambda: restarted.call("ext_demo_lookup", {}))
         self.assertEqual(len(self.calls), 2)
@@ -207,7 +211,7 @@ class ExtensionsTests(unittest.TestCase):
         self.assertEqual(self.router.call("controller_skill_read", {"name": "trip-review", "resource": "references/check.md"})["content"], "核对数据来源。")
         self.code("skill_path_invalid", lambda: self.router.call("controller_skill_read", {"name": "trip-review", "resource": "references/../../demo.json"}))
         self.code("skill_path_invalid", lambda: self.router.call("controller_skill_read", {"name": "trip-review", "resource": "scripts/run.py"}))
-        self.router.clear_job("job-1"); self.begin("member_read_only")
+        self.router.clear_job(self.current_job_id); self.begin("member_read_only")
         self.code("tool_not_allowed_for_profile", lambda: self.router.call("controller_skill_read", {"name": "trip-review"}))
 
     def test_symlink_skill_and_reference_rejected(self):
@@ -243,7 +247,7 @@ class ExtensionsTests(unittest.TestCase):
         self.registry.request = request
         caller = threading.Thread(target=lambda: self.router.call("ext_demo_lookup", {}))
         def clear():
-            self.router.clear_job("job-1"); finished.set()
+            self.router.clear_job(self.current_job_id); finished.set()
         caller.start(); self.assertTrue(entered.wait(1))
         clearing = threading.Thread(target=clear); clearing.start()
         self.assertFalse(finished.wait(.05))

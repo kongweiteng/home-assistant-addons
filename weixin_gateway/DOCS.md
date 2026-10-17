@@ -222,3 +222,8 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 回退到 `0.2.0` 时，Remote Work additive 表会被旧版本忽略，普通 Controller/通知/多用户链路继续运行；必须先保持 `remote_work_enabled=false`，并确认没有仍可能被 Mac Agent 接收的未过期 request。回退不会删除 task/worktree，状态未知任务保持人工核对。
 
 从 `0.2.2` 回退图片 artifact 链路时，先回退 Controller 到不再产生 `artifacts[]` 的版本，再回退 Gateway 到 `0.2.1`；additive `outbound_artifacts` 表会被旧版本忽略。回退前核对没有待发图片或待发 fallback，保留 Gateway/Controller 私有数据，禁止用旧 Hermes 身份恢复。
+
+
+## 连续消息回执（0.4.12）
+
+普通消息持久保存后唤醒 Controller 投递，无固定十秒等待。同一活动任务接受的补充由 Controller 返回 followup_parent_job_id、followup_state 和 reply_suppressed；仅明确成功关联的 completed 追加不重复回执。安全中断并建立续接的 cancelled 原轮也不额外发送取消提示；失败、恢复核对和未知投递不能被成功抑制字段隐藏。父任务或续接任务仍负责完整回复，已发送消息不撤回。

@@ -17,6 +17,7 @@ from .app_server import AppServerClient
 from .desktop_service import DesktopControllerService
 from .desktop_store import DesktopStore
 from .media_input import TurnMediaManager
+from .model_control import DEFAULT_CODEX_MODEL, ModelManager, backend_catalog_provider
 from .runner_relay import RelayPublisher, RunnerInstallerCatalog, validate_relay_auth_config
 from .runner_service import RunnerManagerService, desktop_runner_authorized
 from .runner_store import RunnerStore
@@ -223,6 +224,9 @@ def main() -> None:
         os.environ.get("CONTROLLER_CODEX_MODEL", ""),
         auth_mode=auth_mode,
     )
+    if auth_mode == "api_key" and not codex_model:
+        codex_model = DEFAULT_CODEX_MODEL
+    api_key = read_api_key_from_fd()
     write_codex_config(
         codex_home,
         socket_path,
@@ -346,12 +350,18 @@ def main() -> None:
         workspace=workspace,
         available_tools=router.available_tools(),
     )
+    router.model_manager = ModelManager(
+        database_path,
+        app_server,
+        configured_model=codex_model,
+        catalog_provider=(backend_catalog_provider(openai_base_url, api_key) if openai_base_url else None),
+    )
     service = ControllerService(
         store,
         app_server,
         intake_enabled=os.environ.get("CONTROLLER_INTAKE_ENABLED", "false").lower() == "true",
         auth_mode=auth_mode,
-        api_key=read_api_key_from_fd(),
+        api_key=api_key,
         api_base_mode="custom" if openai_base_url else "official",
         codex_model_mode="custom" if codex_model else "default",
         turn_media=turn_media,

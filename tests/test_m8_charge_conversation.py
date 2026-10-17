@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 from codex_controller.store import ControllerStore
+from codex_job_fixture import persist_tool_job
 from codex_controller.tool_proxy import ToolRouter, ToolProxyError
 from codex_controller.tool_catalog import M8_CHARGE_TOOLS
 from codex_controller.app_server import AppServerClient
@@ -27,7 +28,8 @@ class M8ChargeConversationTests(unittest.TestCase):
         self.request.assert_not_called()
 
     def test_routing_and_idempotency(self):
-        self.router.begin_job('job','message','owner',conversation_key='fixture')
+        job_id = persist_tool_job(self.store, 'message')
+        self.router.begin_job(job_id,'message','owner',conversation_key='sha256:'+'a'*64)
         self.router.call('m8_charge_reminder',{'action':'resume'})
         self.router.call('m8_charge_reminder',{'action':'resume'})
         first,second=[call.args[3] for call in self.request.call_args_list]

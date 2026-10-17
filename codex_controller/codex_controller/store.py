@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .fnos_skill import FNOS_TOOLS
+from .followup import FOLLOWUP_SCHEMA, FollowupStoreMixin
 
 import base64
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from .tool_catalog import (
     M8_CHARGE_TOOLS,
     BOOTSTRAP_HUB_DEFINITIONS,
     MEMO_DEFINITIONS,
+    MODEL_TOOL_NAMES,
     OPERATION_DEFINITIONS,
     TOOL_DEFINITIONS,
     ToolDefinition,
@@ -79,7 +81,7 @@ class StoreError(RuntimeError):
         self.status = status
 
 
-class ControllerStore:
+class ControllerStore(FollowupStoreMixin):
     """SQLite source of truth for jobs, idempotency and Thread mappings."""
 
     def __init__(
@@ -120,6 +122,7 @@ class ControllerStore:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=FULL")
+            connection.executescript(FOLLOWUP_SCHEMA)
             existing_tables = {
                 row["name"]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -927,6 +930,7 @@ class ControllerStore:
                 and not effective_tool
                 and not effective_artifact
                 and not has_artifact
+                and not connection.execute("SELECT 1 FROM job_followups WHERE parent_job_id=?", (row["job_id"],)).fetchone()
             )
             if can_retry:
                 connection.execute(
@@ -967,6 +971,7 @@ class ControllerStore:
                     row["job_id"],
                 ),
             )
+            self.reconcile_followup_result(connection, row["job_id"])
             self._event(connection, row["job_id"], state, item_type=safe_type if state == "failed" else None, error_code=safe_code if state == "failed" else error_code)
             return True
 
@@ -1183,6 +1188,7 @@ class ControllerStore:
             return True
 
     def recover_running(self) -> int:
+        self.recover_followups()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute("SELECT job_id FROM jobs WHERE state='running'").fetchall()
@@ -1286,6 +1292,9 @@ class ControllerStore:
             "turn_short": self.short_id("TN", document.get("turn_id")),
             "state": document["state"],
             "queue_position": document.get("queue_position"),
+            "followup_parent_job_id": document.get("followup_parent_job_id"),
+            "followup_state": document.get("followup_state"),
+            "reply_suppressed": document.get("reply_suppressed", False),
             "result": document.get("result"),
             "result_summary": document.get("result_summary") if completed else None,
             "artifacts": self._public_artifacts(str(document.get("job_id") or "")) if completed else [],
@@ -1345,6 +1354,7 @@ class ControllerStore:
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | M8_CHARGE_TOOLS
             | FNOS_TOOLS
+            | MODEL_TOOL_NAMES
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 
@@ -1362,6 +1372,7 @@ class ControllerStore:
             | frozenset(definition.name for definition in AITO_PREPARE_CAR_DEFINITIONS)
             | M8_CHARGE_TOOLS
             | FNOS_TOOLS
+            | MODEL_TOOL_NAMES
             | frozenset(definition.name for definition in OPERATION_DEFINITIONS)
         )
 
@@ -1803,6 +1814,7 @@ class ControllerStore:
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
         }
+        document.update(self.followup_details(connection, row["job_id"], row["state"]))
         if include_input:
             document["input"] = json.loads(row["input_json"])
         return document

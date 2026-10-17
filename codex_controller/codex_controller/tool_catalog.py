@@ -437,6 +437,31 @@ M8_CHARGE_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 M8_CHARGE_TOOLS = frozenset(definition.name for definition in M8_CHARGE_DEFINITIONS)
 
+MODEL_DEFINITIONS: tuple[ToolDefinition, ...] = (
+    ToolDefinition(
+        "controller_model_list", "查询 Controller 默认模型与可用型号", "controller_models", "read_only",
+        "仅已绑定所有者可查询 HA Controller 当前默认模型与当前后端精确模型目录。"
+        "目录列出不代表已通过推理调用验证；自定义后端目录不可用时失败关闭，不使用内置静态目录替代。"
+        "本工具不查询或更改 Mac Runner 的模型。",
+        ("现在默认用什么模型", "微信助手可以用哪些模型"),
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        requires_job_context=True,
+    ),
+    ToolDefinition(
+        "controller_model_set_default", "切换 Controller 默认模型", "controller_models", "write",
+        "仅当已绑定所有者明确要求切换 HA 微信助手默认模型时调用，先查询模型目录并使用精确 model ID。"
+        "用户的明确切换要求就是本次结构化操作授权，不重复征求确认；讨论、假设、举例、比较型号、引用他人要求"
+        "或只是询问能否切换不得调用。不得猜测或替换型号；不接受 URL、provider、凭据或配置文本。"
+        "设置持久保存且仅下一轮生效，当前活动轮模型不变；回执须说明下一轮生效。"
+        "不更改 Mac Runner 模型。",
+        ("把微信助手默认模型切到 gpt-6.1-sol",),
+        {"type": "object", "properties": {"model": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}},
+         "required": ["model"], "additionalProperties": False},
+        requires_job_context=True, idempotent_write=True,
+    ),
+)
+MODEL_TOOL_NAMES = frozenset(definition.name for definition in MODEL_DEFINITIONS)
+
 
 TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     BOOTSTRAP_HUB_DEFINITIONS
@@ -444,6 +469,7 @@ TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
     + OPERATION_DEFINITIONS
     + AITO_PREPARE_CAR_DEFINITIONS
     + M8_CHARGE_DEFINITIONS
+    + MODEL_DEFINITIONS
 )
 
 

@@ -122,7 +122,7 @@
 | `auth_mode` | 显式选择 `chatgpt_device_code` 或 `api_key`；默认设备码，禁止自动降级 |
 | `openai_api_key` | 仅在 `api_key` 模式使用的 Supervisor 私有 `password` option；页面和状态不会回显 |
 | `openai_base_url` | API Key 模式的可选 Responses API 根地址；空值使用官方端点，完整值不在页面、状态或日志回显 |
-| `codex_model` | API Key 模式的可选模型名；空值使用 Codex 默认模型，自定义端点需要固定模型时填写 |
+| `codex_model` | API Key 模式的初始模型名；空值初始使用 gpt-6.1-sol；微信持久设置优先，后续 Turn 生效 |
 | `ledger_base_url` | Renovation Hub 的固定内部服务根地址；为空时禁用兼容 Ledger 工具 |
 | `ledger_api_token` | Ledger 独立 bearer；不会传给 app-server |
 | `gateway_base_url` | Weixin Gateway 的固定内部服务根地址；用于图片非消费预览和工具一次性附件读取 |
@@ -170,7 +170,7 @@ API Key：
 1. 设置 `auth_mode=api_key`，把 Key 直接填入 Add-on options 的 `openai_api_key`；不要通过微信、Ingress、日志或聊天发送。
 2. `openai_base_url` 留空时使用 OpenAI 官方 API；需要中转时填写完整公开 HTTPS Responses API 根地址，例如 `https://api.example.com/v1`。不要把 Key、query 或 fragment 放进 URL。
 3. 自定义 URL 会拒绝 HTTP、userinfo、query、fragment、控制字符、localhost、HA 内部服务名、私网/回环/链路本地/保留地址和解析到任一非公网地址的域名；仅支持 Responses，不会降级为 Chat Completions。
-4. `codex_model` 留空时使用 Codex 默认模型；自定义端点要求固定模型时填写其 Responses 兼容模型名。
+4. `codex_model` 留空时初始使用 gpt-6.1-sol；自定义端点可填写精确的 Responses 兼容模型名。通过微信保存的默认模型设置优先。
 5. 启动时 Controller 会在未登录状态下调用官方 `account/login/start {"type":"apiKey","apiKey":"..."}`，但不会把 Key 放进 app-server 子进程环境或命令行。
 6. Controller 随后读回 `account.type=apiKey`；类型不匹配、Key 缺失、URL/模型无效或请求失败时，任务入口保持关闭。
 7. 修正 options 后可重启 Add-on，或在 Ingress 点击“重试 API Key 登录”。页面只显示 Key/URL 是否已配置和端点/模型模式，不显示 URL 或 Key。
@@ -289,3 +289,14 @@ After OAuth, verify firmware and applications or containers using the Skill from
 Control results marked `submitted` establish acceptance only; query again to verify the target state. The private ledger serializes calls and prevents replay of pending/unknown results for the same job and action, including across restarts. Do not retry an uncertain operation under a new job as recovery. Corrupt or inaccessible state fails closed. Read-only validation must not start, stop or restart NAS services.
 
 The Skill and private HOME live under persistent `/data`; back them up securely with the Controller data. The live file becomes authoritative when the CLI rotates refresh tokens; a registered bootstrap snapshot may become stale and must not overwrite a newer live session. If refresh fails, complete OAuth again and update only the matching credential entry. Disable the option to withdraw the tools; rolling back the Controller code must retain private data and existing service configuration.
+
+
+## 连续消息与微信模型管理（0.5.60）
+
+同一会话内连续发出的文字和图片先独立持久化并去重。活动任务优先接收追加输入；通过 threadId 与 expectedTurnId 绑定当前轮次，避免迟到补充进入下一轮。追加成功后由父任务综合回复，原消息保留关联。会话、权限画像、精确控制命令和附件归档授权变化均保持原门禁。
+
+不支持追加时，仅在未产生输出、工具或写入副作用的安全条件下中断，并等待原轮真实结束后续接；已开始记账、调用服务或结果未知时不得中断重跑。超时、重启或不确定投递需要核对，不盲目重发。已成功操作必须按实际结果说明，补充更正不视为自动撤销。
+
+所有者可以说“有哪些模型可用”“当前默认模型是什么”“把默认模型切换为 gpt-6.1-sol”。模型工具查询实际后端目录，精确验证后将默认模型持久保存在 Controller 私有数据库。切换从后续新一轮生效，活动轮模型不变；成员不能修改。自定义端点的目录不可用或没有指定型号时明确拒绝，不猜测替代型号。持久设置优先于 options 初始值，重启保留；API Key 配置为空时初始默认为 gpt-6.1-sol。
+
+升级前先排空在途消息并备份 Controller 与 Gateway 私有数据、options、原源码和镜像。旧版本忽略 additive 关联与模型表；回退前核对追加 attempt/unknown 和所有活动任务，禁止把未知执行自动重放。

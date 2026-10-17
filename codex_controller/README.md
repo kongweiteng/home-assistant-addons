@@ -1,5 +1,7 @@
 # Codex Controller
 
+`0.5.60` 支持连续微信消息的活动任务追加与单次综合回执。所有者还可通过微信查询并切换后续轮次的默认模型。
+
 
 `0.5.59` 增加通用扩展注册与 skill 发现。符合 [EXTENSIONS.md](EXTENSIONS.md) 契约的新能力通过安装、配置和工具启用接入微信，不修改 Gateway 或 Controller 核心；正式部署与手机验收另行记录。
 
@@ -10,7 +12,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `auth_mode=chatgpt_device_code`：调用官方 `account/login/start` 的 `chatgptDeviceCode`。这与本机 Codex 使用 ChatGPT 账号登录属于同一类官方 managed 认证，但 HAOS Controller 会建立独立会话。
 - `auth_mode=api_key`：从 Home Assistant Add-on 的 `password` option 读取 API Key，并调用官方 `account/login/start` 的 `apiKey` 模式。
 - API Key 模式可设置 `openai_base_url`。空值使用 OpenAI 官方 API；自定义值只接受公开 HTTPS 的 Responses API 兼容地址，不支持 Chat Completions、URL 内凭据、HTTP 或内网目标。
-- 可选 `codex_model` 用于固定自定义端点需要的模型名；空值使用 Codex 默认模型。该字段只在 API Key 模式生效。
+- 可选 `codex_model` 用于固定自定义端点需要的模型名；空值初始使用 gpt-6.1-sol。该 options 字段只在 API Key 模式生效；微信保存的默认模型设置优先，下一轮生效。
 - 认证模式必须在 options 中显式选择，登录后必须读回与配置匹配的账户类型；禁止自动降级、混用或静默切换。
 - 页面只显示 Key/URL 是否已配置以及端点/模型模式，不提供输入框、不回显 URL 或 Key；Key 不进入状态、SQLite、普通日志、命令行参数或 app-server 子进程环境，完整 URL 也不进入状态、SQLite 或普通日志。
 - 不支持 PAT、外部 Token 注入或实验 Bedrock 登录。

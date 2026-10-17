@@ -44,6 +44,8 @@ from .tool_catalog import (
     M8_CHARGE_TOOLS,
     MEMBER_ALLOWED_TOOL_NAMES,
     MEMO_DEFINITIONS,
+    MODEL_DEFINITIONS,
+    MODEL_TOOL_NAMES,
     MEMO_TOOLS,
     OPERATION_DEFINITIONS,
     ToolDefinition,
@@ -189,6 +191,7 @@ class ToolRouter:
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
         self.store = store
+        self.model_manager = None
         self.manifest_poll_interval = max(0.1, float(manifest_poll_interval))
         self._context_lock = threading.RLock()
         self._active_context: dict[str, Any] | None = None
@@ -232,6 +235,26 @@ class ToolRouter:
                 raise ToolProxyError("tool_context_invalid", "无法绑定工具调用 Turn")
             self._active_context["turn_id"] = turn_id
 
+    def restrict_media_archive(self, turn_id: str) -> None:
+        with self._context_lock:
+            if self._active_context is not None and self._active_context.get("turn_id") == turn_id:
+                self._active_context["media_archive_authorized"] = False
+
+    def begin_followup_interrupt(self, parent_id: str, child_id: str, turn_id: str) -> bool:
+        with self._context_lock:
+            context = self._active_context
+            if (context is None or context.get("job_id") != parent_id
+                or context.get("turn_id") != turn_id or self.store is None
+                or not self.store.can_interrupt_for_followup(parent_id, child_id)):
+                return False
+            context["interrupting"] = True
+            return True
+
+    def cancel_followup_interrupt(self, turn_id: str) -> None:
+        with self._context_lock:
+            if self._active_context is not None and self._active_context.get("turn_id") == turn_id:
+                self._active_context.pop("interrupting", None)
+
     def end_turn(self, turn_id: str) -> None:
         with self._context_lock:
             if self._active_context is not None and self._active_context.get("turn_id") == turn_id:
@@ -265,7 +288,7 @@ class ToolRouter:
     def tool_definitions(self) -> tuple[ToolDefinition, ...]:
         with self._definition_lock:
             hub_definitions = self._hub_manifest.definitions
-        return hub_definitions + MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + FNOS_DEFINITIONS + self.extension_definitions()
+        return hub_definitions + MEMO_DEFINITIONS + MODEL_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + FNOS_DEFINITIONS + self.extension_definitions()
 
     def tool_definitions_by_name(self) -> dict[str, ToolDefinition]:
         return {definition.name: definition for definition in self.tool_definitions()}
@@ -275,7 +298,7 @@ class ToolRouter:
             for definition in self._hub_manifest.definitions:
                 if definition.name == name:
                     return definition
-        for definition in MEMO_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + FNOS_DEFINITIONS + self.extension_definitions():
+        for definition in MEMO_DEFINITIONS + MODEL_DEFINITIONS + OPERATION_DEFINITIONS + AITO_PREPARE_CAR_DEFINITIONS + M8_CHARGE_DEFINITIONS + FNOS_DEFINITIONS + self.extension_definitions():
             if definition.name == name:
                 return definition
         return None
@@ -327,6 +350,8 @@ class ToolRouter:
                 tools.add(definition.name)
             elif definition.service == "home_assistant_prepare_car" and self._prepare_car_configured():
                 tools.add(definition.name)
+            elif definition.service == "controller_models" and self.model_manager is not None:
+                tools.add(definition.name)
             elif definition.service == "fnos_skill" and self.fnos_client.configured():
                 tools.add(definition.name)
         return frozenset(tools)
@@ -357,7 +382,7 @@ class ToolRouter:
         if capability_profile == "member_read_only":
             configured &= set(MEMBER_ALLOWED_TOOL_NAMES)
         elif capability_profile == "owner_legacy":
-            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | FNOS_TOOLS) | {d.name for d in self.extension_definitions()}
+            configured -= set(PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | FNOS_TOOLS | MODEL_TOOL_NAMES) | {d.name for d in self.extension_definitions()}
         elif capability_profile not in {None, "owner"}:
             return []
         if media_archive_authorized is False:
@@ -599,10 +624,23 @@ class ToolRouter:
         started = time.monotonic()
         outcome = "failed"
         error_code: str | None = None
+        evidence_id: str | None = None
+        result = None
         with self._context_lock:
             invocation_context = None if self._active_context is None else dict(self._active_context)
         try:
-            definition = self._authorize_tool(name, invocation_context)
+            with self._context_lock:
+                if invocation_context is not None and self._active_context != invocation_context:
+                    raise ToolProxyError("tool_context_unavailable", "操作上下文已失效，未执行")
+                definition = self._authorize_tool(name, invocation_context)
+                if self._active_context is not None and self._active_context.get("interrupting"):
+                    raise ToolProxyError("turn_interrupting", "当前 Turn 正在中断，操作未执行")
+                if not definition.read_only and self.store is not None and invocation_context is not None:
+                    # Write the started marker before any external call, under the
+                    # same guard used by controlled interruption. Persistence fails closed.
+                    evidence_id = self.store.start_write_evidence(
+                        invocation_context["job_id"], invocation_context.get("turn_id") or None, name,
+                    )
             if name == "ledger_generate_chart":
                 with self._context_lock:
                     context = None if self._active_context is None else dict(self._active_context)
@@ -624,6 +662,8 @@ class ToolRouter:
             } else "failed"
             raise
         finally:
+            if evidence_id is not None and self.store is not None:
+                self.store.finish_write_evidence(evidence_id, result if outcome == "succeeded" else None)
             if self.store is not None:
                 try:
                     self.store.record_tool_invocation(
@@ -705,8 +745,8 @@ class ToolRouter:
         if definition is None:
             raise ToolProxyError("unknown_tool", "工具不在允许清单")
         profile = None if context is None else context.get("capability_profile")
-        if (name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | FNOS_TOOLS | SKILL_NAMES) or name.startswith("ext_")) and profile != "owner":
-            raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
+        if (name in (PREPARE_CAR_TOOL_NAMES | M8_CHARGE_TOOLS | FNOS_TOOLS | SKILL_NAMES | MODEL_TOOL_NAMES) or name.startswith("ext_")) and profile != "owner":
+            raise ToolProxyError("tool_not_allowed_for_profile", "该工具仅限已绑定所有者调用")
         if profile == "member_read_only" and name not in MEMBER_ALLOWED_TOOL_NAMES:
             raise ToolProxyError("tool_not_allowed_for_profile", "当前微信成员没有调用该工具的权限")
         if name not in self.configured_tools():
@@ -735,6 +775,28 @@ class ToolRouter:
         if not isinstance(arguments, dict):
             raise ToolProxyError("invalid_arguments", "工具参数必须是对象")
         name = definition.name
+        if definition.service == "controller_models":
+            from .model_control import ModelControlError
+            with self._context_lock:
+                if (self.model_manager is None or invocation_context is None
+                    or self._active_context != invocation_context
+                    or invocation_context.get("capability_profile") != "owner"):
+                    raise ToolProxyError("tool_context_unavailable", "模型设置上下文已失效")
+            def context_is_current() -> bool:
+                if self._active_context != invocation_context:
+                    return False
+                self._authorize_tool(name, invocation_context)
+                return True
+            try:
+                # Directory discovery can issue app-server RPC. Never hold the
+                # lifecycle lock while the notification reader must answer it.
+                return self.model_manager.call(
+                    name, arguments, invocation_context,
+                    authorization_lock=self._context_lock,
+                    context_is_current=context_is_current,
+                )
+            except ModelControlError as exc:
+                raise ToolProxyError(exc.code, str(exc)) from None
         if definition.service == "controller_skills":
             if self._active_context is None or not self._active_context.get("turn_id"):
                 raise ToolProxyError("tool_context_unavailable", "技能只在所有者活动 Turn 内可读")
@@ -893,7 +955,7 @@ class ToolRouter:
         with self._context_lock:
             context = None if self._active_context is None else dict(self._active_context)
         if context is None or context.get("capability_profile") != "owner":
-            raise ToolProxyError("tool_not_allowed_for_profile", "只有 owner 可以调用备车工具")
+            raise ToolProxyError("tool_not_allowed_for_profile", "该工具仅限已绑定所有者调用")
         if name == "aito_prepare_car_status":
             self._require_exact_keys(arguments, set())
             try:

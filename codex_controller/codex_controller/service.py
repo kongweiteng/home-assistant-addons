@@ -10,7 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .app_server import AppServerClient, AppServerError
-from .media_input import MediaInputError, TurnMediaManager
+from .media_input import MediaInputError, TurnMediaManager, text_with_media_archive_context
 from .prepare_car import (
     PREPARE_CAR_TOOL_NAMES,
     execute_result_text,
@@ -91,10 +91,24 @@ CHINESE_DIGITS = {
 }
 
 
-def has_explicit_media_archive_intent(text: str, attachments: list[dict[str, Any]] | None = None) -> bool:
+def has_explicit_media_archive_intent(
+    text: str,
+    attachments: list[dict[str, Any]] | None = None,
+    media_archive_context: dict[str, Any] | None = None,
+) -> bool:
     """Allow media writes only for an explicit positive renovation-archive request."""
 
-    if not isinstance(text, str) or not text.strip() or not attachments:
+    if not attachments:
+        return False
+    if (
+        isinstance(media_archive_context, dict)
+        and media_archive_context.get("version") == 1
+        and media_archive_context.get("status") == "authorized"
+        and media_archive_context.get("authorized") is True
+        and isinstance(media_archive_context.get("idempotency_scope"), str)
+    ):
+        return True
+    if not isinstance(text, str) or not text.strip():
         return False
     normalized = re.sub(r"\s+", "", text)
     if MEDIA_ARCHIVE_NEGATION_RE.search(normalized):
@@ -773,8 +787,11 @@ class ControllerService:
         try:
             payload = self.store.continuation_input(job["job_id"], job["input"])
             capability_profile = payload.get("capability_profile", "owner_legacy")
+            media_archive_context = payload.get("media_archive_context")
             media_archive_authorized = has_explicit_media_archive_intent(
-                payload.get("text", ""), payload.get("attachments")
+                payload.get("text", ""),
+                payload.get("attachments"),
+                media_archive_context,
             )
             if self.tool_context is not None and hasattr(self.tool_context, "sync_extensions"):
                 self.tool_context.sync_extensions()
@@ -815,6 +832,11 @@ class ControllerService:
                     capability_profile,
                     conversation_key=job["conversation_key"],
                     media_archive_authorized=media_archive_authorized,
+                    media_archive_idempotency_scope=(
+                        media_archive_context.get("idempotency_scope")
+                        if isinstance(media_archive_context, dict) and media_archive_authorized
+                        else None
+                    ),
                 )
             prepare_intent = prepare_car_intent(payload)
             if (
@@ -940,9 +962,13 @@ class ControllerService:
             input_items = None
             if self.turn_media is not None:
                 input_items = self.turn_media.prepare(job["job_id"], payload)
+            turn_text = text_with_media_archive_context(
+                payload["text"],
+                media_archive_context,
+            )
             turn_id = self.app_server.start_turn(
                 thread_id,
-                payload["text"],
+                turn_text,
                 job["message_id"],
                 input_items=input_items,
                 **({"model": self.tool_context.model_manager.get_default()}

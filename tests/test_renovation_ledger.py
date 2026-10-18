@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -68,6 +69,53 @@ class RenovationLedgerTests(unittest.TestCase):
                 }
             )
         self.assertEqual(context.exception.code, "idempotency_conflict")
+
+    def test_legacy_database_migrates_classification_columns_before_index(self) -> None:
+        legacy_root = Path(self.temporary.name) / "legacy"
+        database_path = legacy_root / "data" / "ledger.sqlite3"
+        database_path.parent.mkdir(parents=True)
+        with sqlite3.connect(database_path) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE transactions (
+                    id TEXT PRIMARY KEY,
+                    legacy_id INTEGER,
+                    type TEXT NOT NULL,
+                    amount_cents INTEGER NOT NULL,
+                    occurred_on TEXT NOT NULL,
+                    main_category TEXT NOT NULL DEFAULT '',
+                    merchant TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    is_deposit INTEGER NOT NULL DEFAULT 0,
+                    original_payment_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    source_ref TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO transactions(
+                    id, legacy_id, type, amount_cents, occurred_on,
+                    main_category, merchant, created_at, updated_at
+                ) VALUES ('legacy-payment', 7, 'payment', 12345, '2026-08-01',
+                          '主材', '旧商家', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+                """
+            )
+        store = LedgerStore(
+            database_path,
+            data_dir=legacy_root / "data",
+            share_dir=legacy_root / "share",
+        )
+        columns = {
+            row[1]
+            for row in sqlite3.connect(database_path).execute("PRAGMA table_info(transactions)")
+        }
+        self.assertTrue({"category", "subcategory", "expense_type"}.issubset(columns))
+        self.assertEqual(store.show("legacy-payment")["amount_cents"], 12345)
+        indexes = {
+            row[1]
+            for row in sqlite3.connect(database_path).execute("PRAGMA index_list(transactions)")
+        }
+        self.assertIn("transactions_category_idx", indexes)
 
     def test_refund_inherits_category_and_tags_and_cannot_exceed_payment(self) -> None:
         payment = self.add_payment()["transaction"]

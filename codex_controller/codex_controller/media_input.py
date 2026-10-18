@@ -24,6 +24,53 @@ class MediaInputError(RuntimeError):
         self.code = code
 
 
+def text_with_media_archive_context(text: str, context: Any) -> str:
+    """Add bounded Gateway correlation facts without exposing private source identifiers."""
+
+    if not isinstance(context, dict) or context.get("version") != 1:
+        return text
+    status = context.get("status")
+    selected = context.get("selected_count")
+    expected = context.get("expected_count")
+    intent_text = str(context.get("intent_text") or "")
+    lines = [text]
+    if status == "authorized":
+        lines.extend(
+            [
+                "",
+                "Gateway 已在同一微信身份、用户和会话内验证跨消息归档授权。",
+                f"先前明确指令：{intent_text}",
+                f"已严格关联 {selected} 个附件；只能处理本作业列出的附件引用，不得扩展到其他图片。",
+            ]
+        )
+    elif status == "intent_registered":
+        suffix = f"，等待精确收到 {expected} 个附件" if expected is not None else "，只等待下一条附件消息"
+        lines.extend(["", f"Gateway 已登记跨消息归档意图{suffix}；当前尚未授权任何媒体写入。"])
+    elif status == "awaiting_more_attachments":
+        lines.extend(
+            [
+                "",
+                f"Gateway 已为先前归档意图收到 {selected}/{expected} 个附件；数量未满足，当前不得归档。",
+            ]
+        )
+    elif status == "cancelled":
+        lines.extend(["", "Gateway 已取消尚未完成的跨消息归档意图；当前不得归档任何附件。"])
+    elif status == "nothing_to_cancel":
+        lines.extend(["", "Gateway 未找到可取消的跨消息归档意图；当前不得归档任何附件。"])
+    elif status == "no_recent_attachments":
+        lines.extend(["", "Gateway 在当前身份、用户、会话和有效期内未找到可归档附件；不得猜测其他图片。"])
+    elif status == "attachment_count_mismatch":
+        lines.extend(
+            [
+                "",
+                f"Gateway 找到的附件数量为 {selected}，与用户要求的 {expected} 不一致；当前不得归档。",
+            ]
+        )
+    elif status == "too_many_attachments":
+        lines.extend(["", "Gateway 发现附件数量超过单批 16 个上限；当前不得归档。"])
+    return "\n".join(lines)
+
+
 class TurnMediaManager:
     """Materialize image previews under a private root until a Turn completes."""
 
@@ -49,7 +96,11 @@ class TurnMediaManager:
         attachments = payload.get("attachments")
         if not isinstance(attachments, list):
             raise MediaInputError("media_input_invalid", "附件元数据无效")
-        text = self._text_with_attachment_context(str(payload.get("text") or ""), attachments)
+        text = text_with_media_archive_context(
+            str(payload.get("text") or ""),
+            payload.get("media_archive_context"),
+        )
+        text = self._text_with_attachment_context(text, attachments)
         input_items: list[dict[str, Any]] = [{"type": "text", "text": text}]
         image_attachments = [item for item in attachments if item.get("media_type") == "image"]
         if not image_attachments:

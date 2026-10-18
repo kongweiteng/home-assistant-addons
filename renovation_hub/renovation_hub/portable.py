@@ -519,8 +519,7 @@ def _snapshot_state(database: Path, expected_summary: dict[str, Any]) -> dict[st
                 refunds_by_payment[int(parent["id"])] += amount_cents
         else:
             raise PortableArchiveError("便携包存在未知流水类型")
-        serialized.append(
-            {
+        serialized_item = {
                 "id": transaction_id,
                 "kind": kind,
                 "payment_id": payment_id,
@@ -538,11 +537,10 @@ def _snapshot_state(database: Path, expected_summary: dict[str, Any]) -> dict[st
                 "updated_at": str(row["updated_at"]),
                 "tags": list(tags),
             }
-        )
+        serialized.append(serialized_item)
     for payment_id, refunded_cents in refunds_by_payment.items():
         if refunded_cents > int(by_id[payment_id]["amount_cents"]):
             raise PortableArchiveError("便携包累计退款超过原付款")
-
     parsed_audit: list[dict[str, Any]] = []
     for row in audit_rows:
         try:
@@ -613,8 +611,6 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
         transaction_columns = {
             str(row[1]) for row in connection.execute("PRAGMA table_info(transactions)")
         }
-        if "category" in transaction_columns:
-            raise PortableArchiveError("版本 2 便携账本不应包含主分类字段")
         transactions = _sqlite_rows(connection, "SELECT * FROM transactions ORDER BY id")
         tag_rows = _sqlite_rows(
             connection,
@@ -642,6 +638,14 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
             str(row["key"]): str(row["value"])
             for row in connection.execute("SELECT key,value FROM metadata ORDER BY key")
         }
+        catalog_rows = []
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='classification_catalog'"
+        ).fetchone():
+            catalog_rows = _sqlite_rows(
+                connection,
+                "SELECT code,kind,parent_code,label,active,position,created_at,updated_at FROM classification_catalog ORDER BY kind,position,code",
+            )
     except PortableArchiveError:
         raise
     except sqlite3.Error as exc:
@@ -650,8 +654,13 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
         if connection is not None:
             connection.close()
 
-    if metadata.get("schema_version") != "3":
-        raise PortableArchiveError("版本 2 便携账本 SQLite schema_version 不是 3")
+    schema_version = metadata.get("schema_version")
+    if schema_version not in {"3", "4"}:
+        raise PortableArchiveError("版本 2 便携账本 SQLite schema_version 不是 3 或 4")
+    first_columns = set(transactions[0].keys()) if transactions else set()
+    has_classification = all(
+        field in first_columns for field in ("category", "subcategory", "expense_type")
+    ) if transactions else schema_version == "4"
     payment_ids = {int(row["id"]) for row in transactions if row["kind"] == "payment"}
     tags_by_payment: dict[int, list[str]] = defaultdict(list)
     tag_keys_by_payment: dict[int, set[str]] = defaultdict(set)
@@ -698,6 +707,10 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
             if payment_id is not None:
                 raise PortableArchiveError("便携包付款结构无效")
             effective_tags = tags_by_payment.get(transaction_id, [])
+            effective_classification = {
+                field: str(row[field] or "") if has_classification else ""
+                for field in ("category", "subcategory", "expense_type")
+            }
         elif kind == "refund":
             parent = by_id.get(payment_id or -1)
             if parent is None or parent["kind"] != "payment":
@@ -705,32 +718,57 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
             if status == "active" and parent["status"] != "active":
                 raise PortableArchiveError("便携包有效退款关联已撤销付款")
             effective_tags = tags_by_payment.get(int(parent["id"]), [])
+            effective_classification = {
+                field: str(parent[field] or "") if has_classification else ""
+                for field in ("category", "subcategory", "expense_type")
+            }
             if status == "active":
                 refunds_by_payment[int(parent["id"])] += amount_cents
         else:
             raise PortableArchiveError("便携包存在未知流水类型")
-        serialized.append(
-            {
-                "id": transaction_id,
-                "kind": kind,
-                "payment_id": payment_id,
-                "amount_cents": amount_cents,
-                "amount": f"{amount_cents // 100}.{amount_cents % 100:02d}",
-                "date": str(row["txn_date"]),
-                "vendor": str(row["vendor"]),
-                "description": str(row["description"]),
-                "is_deposit": bool(row["is_deposit"]),
-                "status": status,
-                "void_reason": str(row["void_reason"]),
-                "created_at": str(row["created_at"]),
-                "updated_at": str(row["updated_at"]),
-                "tags": list(effective_tags),
-                "grouped_tags": grouped_tags(effective_tags),
-            }
-        )
+        serialized_item = {
+            "id": transaction_id,
+            "kind": kind,
+            "payment_id": payment_id,
+            "amount_cents": amount_cents,
+            "amount": f"{amount_cents // 100}.{amount_cents % 100:02d}",
+            "date": str(row["txn_date"]),
+            "vendor": str(row["vendor"]),
+            "description": str(row["description"]),
+            "is_deposit": bool(row["is_deposit"]),
+            "status": status,
+            "void_reason": str(row["void_reason"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "tags": list(effective_tags),
+            "grouped_tags": grouped_tags(effective_tags),
+        }
+        if has_classification:
+            serialized_item.update(effective_classification)
+        serialized.append(serialized_item)
     for payment_id, refunded_cents in refunds_by_payment.items():
         if refunded_cents > int(by_id[payment_id]["amount_cents"]):
             raise PortableArchiveError("便携包累计退款超过原付款")
+    if has_classification:
+        catalog = {str(row["code"]): row for row in catalog_rows}
+        for item in serialized:
+            category = str(item.get("category") or "")
+            subcategory = str(item.get("subcategory") or "")
+            expense_type = str(item.get("expense_type") or "")
+            if subcategory and not category:
+                raise PortableArchiveError("便携包 subcategory 缺少 category")
+            for field, code, expected_kind in (
+                ("category", category, "category"),
+                ("subcategory", subcategory, "subcategory"),
+                ("expense_type", expense_type, "expense_type"),
+            ):
+                if not code:
+                    continue
+                entry = catalog.get(code)
+                if entry is None or entry["kind"] != expected_kind or not int(entry["active"]):
+                    raise PortableArchiveError(f"便携包 {field} 不在启用分类配置中")
+                if field == "subcategory" and entry["parent_code"] != category:
+                    raise PortableArchiveError("便携包 subcategory 父级不匹配")
 
     parsed_audit: list[dict[str, Any]] = []
     for row in audit_rows:
@@ -774,7 +812,7 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
         "refunds_cents": refunds_cents,
         "net_cents": payments_cents - refunds_cents,
     }
-    return {
+    result = {
         "metadata": metadata,
         "transactions": serialized,
         "transaction_tags": tag_rows,
@@ -784,6 +822,9 @@ def _snapshot_state_v2(database: Path) -> dict[str, Any]:
         "summary": summary_from_grouped_transactions(serialized),
         "monthly_summary": monthly_summary(serialized),
     }
+    if catalog_rows:
+        result["classification_catalog"] = catalog_rows
+    return result
 
 
 def _expected_transaction_csv(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -816,8 +857,10 @@ def _expected_transaction_csv(rows: list[dict[str, Any]]) -> list[dict[str, str]
     return result
 
 
-def _expected_transaction_csv_v2(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
-    fields = (
+def _expected_transaction_csv_v2(
+    rows: list[dict[str, Any]], *, include_classification: bool | None = None
+) -> list[dict[str, str]]:
+    fields = [
         "id",
         "kind",
         "payment_id",
@@ -833,7 +876,13 @@ def _expected_transaction_csv_v2(rows: list[dict[str, Any]]) -> list[dict[str, s
         "updated_at",
         "tags_json",
         "grouped_tags_json",
-    )
+    ]
+    if include_classification is None:
+        include_classification = bool(rows) and all(
+            field in rows[0] for field in ("category", "subcategory", "expense_type")
+        )
+    if include_classification:
+        fields[6:6] = ["category", "subcategory", "expense_type"]
     result: list[dict[str, str]] = []
     for row in rows:
         values = dict(row)
@@ -964,12 +1013,17 @@ def verify_extracted(root: Path) -> dict[str, Any]:
     for key in ("metadata", "transactions", "transaction_tags", "attachments", "audit_log", "summary"):
         if ledger.get(key) != state[key]:
             raise PortableArchiveError(f"便携包 {key} 与 SQLite 不一致")
+    if "classification_catalog" in state and ledger.get("classification_catalog") != state["classification_catalog"]:
+        raise PortableArchiveError("便携包 classification_catalog 与 SQLite 不一致")
     if ledger.get("invariants") != state["invariants"] or manifest.get("invariants") != state["invariants"]:
         raise PortableArchiveError("便携包账务不变量与 SQLite 不一致")
     expected_transactions_csv = (
         _expected_transaction_csv(state["transactions"])
         if format_version == FORMAT_VERSION
-        else _expected_transaction_csv_v2(state["transactions"])
+        else _expected_transaction_csv_v2(
+            state["transactions"],
+            include_classification=state["metadata"].get("schema_version") == "4",
+        )
     )
     if _load_csv(root / "transactions.csv") != expected_transactions_csv:
         raise PortableArchiveError("便携包 transactions.csv 与 SQLite 不一致")
@@ -1056,12 +1110,25 @@ def write_v2_archive(
             """
             PRAGMA foreign_keys=ON;
             CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE classification_catalog(
+              code TEXT PRIMARY KEY,
+              kind TEXT NOT NULL,
+              parent_code TEXT,
+              label TEXT NOT NULL,
+              active INTEGER NOT NULL,
+              position INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             CREATE TABLE transactions(
               id INTEGER PRIMARY KEY,
               kind TEXT NOT NULL,
               payment_id INTEGER REFERENCES transactions(id),
               amount_cents INTEGER NOT NULL,
               txn_date TEXT NOT NULL,
+              category TEXT NOT NULL DEFAULT '',
+              subcategory TEXT NOT NULL DEFAULT '',
+              expense_type TEXT NOT NULL DEFAULT '',
               vendor TEXT NOT NULL,
               description TEXT NOT NULL,
               is_deposit INTEGER NOT NULL,
@@ -1121,13 +1188,16 @@ def write_v2_archive(
                     else None
                 )
                 target.execute(
-                    "INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO transactions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         int(row["portable_id"]),
                         row["type"],
                         payment_id,
                         int(row["amount_cents"]),
                         row["occurred_on"],
+                        row["category"] or "",
+                        row["subcategory"] or "",
+                        row["expense_type"] or "",
                         row["merchant"],
                         row["note"],
                         int(row["is_deposit"]),
@@ -1136,6 +1206,14 @@ def write_v2_archive(
                         row["created_at"],
                         row["updated_at"],
                     ),
+                )
+            catalog_rows = source.execute(
+                "SELECT code,kind,parent_code,label,active,position,created_at,updated_at FROM classification_catalog ORDER BY kind,position,code"
+            ).fetchall()
+            for row in catalog_rows:
+                target.execute(
+                    "INSERT INTO classification_catalog VALUES (?,?,?,?,?,?,?,?)",
+                    tuple(row),
                 )
             tag_id = 1
             for row in source.execute(
@@ -1210,7 +1288,7 @@ def write_v2_archive(
                 )
         finally:
             source.close()
-        target.execute("INSERT INTO metadata VALUES ('schema_version','3')")
+        target.execute("INSERT INTO metadata VALUES ('schema_version','4')")
         target.execute("INSERT INTO metadata VALUES ('source_application','renovation_hub')")
         target.commit()
         target.close()
@@ -1236,6 +1314,7 @@ def write_v2_archive(
                 )
             },
         }
+        ledger["classification_catalog"] = state.get("classification_catalog", [])
         (root / "ledger.json").write_text(
             json.dumps(ledger, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -1249,7 +1328,7 @@ def write_v2_archive(
             encoding="utf-8",
         )
         (root / "FORMAT.md").write_text(
-            "# 装修账本便携格式 v2\n\n使用九个固定维度的分组多标签，不使用主分类。\n",
+            "# 装修账本便携格式 v2\n\n使用九个固定维度的分组多标签，并保留独立 category/subcategory/expense_type code。\n",
             encoding="utf-8",
         )
         (root / "verify.py").write_text(
@@ -1258,11 +1337,12 @@ def write_v2_archive(
         )
         _write_csv_rows(
             root / "transactions.csv",
-            _expected_transaction_csv_v2(state["transactions"]),
-            tuple(_expected_transaction_csv_v2(state["transactions"])[0].keys())
+            _expected_transaction_csv_v2(state["transactions"], include_classification=True),
+            tuple(_expected_transaction_csv_v2(state["transactions"], include_classification=True)[0].keys())
             if state["transactions"]
             else (
-                "id","kind","payment_id","amount_cents","amount","date","vendor",
+                "id","kind","payment_id","amount_cents","amount","date","category",
+                "subcategory","expense_type","vendor",
                 "description","is_deposit","status","void_reason","created_at",
                 "updated_at","tags_json","grouped_tags_json",
             ),
@@ -1298,7 +1378,7 @@ def write_v2_archive(
             "currency": "CNY",
             "amount_unit": "integer_cents",
             "hermes_required": False,
-            "source": {"application": "renovation_hub", "sqlite_schema_version": "3"},
+            "source": {"application": "renovation_hub", "sqlite_schema_version": "4"},
             "semantics": {
                 "primary_category_single": False,
                 "grouped_multi_tags": True,

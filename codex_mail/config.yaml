@@ -1,0 +1,31 @@
+name: Codex Mail Provider
+version: "0.1.0"
+slug: codex_mail
+description: "为 Codex Controller 提供受控、可审计且防重复的 QQ 邮箱发信能力。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_mail"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+boot: auto
+stage: experimental
+backup: cold
+watchdog: "http://[HOST]:[PORT:8129]/healthz"
+ports:
+  8129/tcp: null
+ports_description:
+  8129/tcp: "仅供 Codex Controller 内部认证调用，不映射宿主端口"
+options:
+  smtp_username: ""
+  smtp_authorization_code: ""
+  sender_name: "家庭微信助手"
+  allowed_recipients: []
+  extension_bearer: ""
+schema:
+  smtp_username: str
+  smtp_authorization_code: password
+  sender_name: str
+  allowed_recipients:
+    - str
+  extension_bearer: password

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "send",
+      "display_name": "发送邮件",
+      "description": "通过管理员固定配置的 QQ 邮箱发送纯文本邮件。仅允许预先登记的收件地址；完整用户请求已明确要求发送且收件人、主题、正文齐全时调用。草拟、讨论或翻译邮件不代表发送授权。结果 unknown 时不得自动重发，应先调用 ext_mail_recent_status 核对。当前不支持附件。",
+      "risk_type": "write",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {"type": "array", "items": {"type": "string", "maxLength": 254}, "minItems": 1, "maxItems": 10},
+          "cc": {"type": "array", "items": {"type": "string", "maxLength": 254}, "maxItems": 10},
+          "subject": {"type": "string", "minLength": 1, "maxLength": 200},
+          "text_body": {"type": "string", "minLength": 1, "maxLength": 20000}
+        },
+        "required": ["to", "subject", "text_body"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {"type": "string", "maxLength": 16, "enum": ["sent", "failed", "unknown"]},
+          "send_id": {"type": "string", "maxLength": 64},
+          "message_id": {"type": "string", "maxLength": 320},
+          "verification": {"type": "string", "maxLength": 32, "enum": ["smtp_accepted", "sent_folder_confirmed", "not_sent", "unresolved"]},
+          "error_code": {"type": "string", "maxLength": 64}
+        },
+        "required": ["status", "send_id", "message_id", "verification", "error_code"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "recent_status",
+      "display_name": "核对最近邮件",
+      "description": "读取最近十次邮件发送记录，并用 QQ 邮箱 Sent 文件夹核对结果未知的记录。不发送或重发邮件。",
+      "risk_type": "read_only",
+      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "properties": {
+                "send_id": {"type": "string", "maxLength": 64},
+                "status": {"type": "string", "maxLength": 16, "enum": ["sent", "failed", "unknown"]},
+                "verification": {"type": "string", "maxLength": 32, "enum": ["smtp_accepted", "sent_folder_confirmed", "not_sent", "unresolved"]},
+                "error_code": {"type": "string", "maxLength": 64},
+                "recipients": {"type": "array", "items": {"type": "string", "maxLength": 254}, "maxItems": 20},
+                "subject": {"type": "string", "maxLength": 200},
+                "created_at": {"type": "string", "maxLength": 40},
+                "updated_at": {"type": "string", "maxLength": 40}
+              },
+              "required": ["send_id", "status", "verification", "error_code", "recipients", "subject", "created_at", "updated_at"],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

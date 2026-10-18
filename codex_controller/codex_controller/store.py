@@ -36,10 +36,24 @@ RECOVERY_RESOLUTIONS = {
 ARTIFACT_ID_RE = re.compile(r"^AR-[A-Z2-7]{26}$")
 DOWNLOAD_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+ZIP_MAGIC_PREFIXES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+ARTIFACT_MIME_TYPES = frozenset({"image/png", "application/zip"})
 DEFAULT_ARTIFACT_TTL_SECONDS = 86400
 DEFAULT_MAX_ARTIFACT_BYTES = 20 * 1024 * 1024
 DEFAULT_ARTIFACT_QUOTA_BYTES = 100 * 1024 * 1024
 DEFAULT_MAX_ARTIFACTS_PER_JOB = 4
+MEDIA_ARCHIVE_CONTEXT_STATUSES = frozenset(
+    {
+        "authorized",
+        "intent_registered",
+        "awaiting_more_attachments",
+        "cancelled",
+        "nothing_to_cancel",
+        "no_recent_attachments",
+        "attachment_count_mismatch",
+        "too_many_attachments",
+    }
+)
 
 
 def utc_now() -> str:
@@ -48,6 +62,101 @@ def utc_now() -> str:
 
 def canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def validate_media_archive_context(
+    value: Any,
+    attachments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate Gateway-owned correlation without trusting model-visible text."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise StoreError("invalid_job", "media_archive_context 无效")
+    required = {
+        "version",
+        "source",
+        "status",
+        "authorized",
+        "intent_message_id",
+        "intent_text",
+        "expected_count",
+        "selected_count",
+        "source_attachments",
+    }
+    allowed = required | {"idempotency_scope"}
+    if set(value) - allowed or not required.issubset(value):
+        raise StoreError("invalid_job", "media_archive_context 字段无效")
+    source = value.get("source")
+    status = value.get("status")
+    authorized = value.get("authorized")
+    intent_message_id = value.get("intent_message_id")
+    intent_text = value.get("intent_text")
+    expected_count = value.get("expected_count")
+    selected_count = value.get("selected_count")
+    source_attachments = value.get("source_attachments")
+    if value.get("version") != 1 or source not in {"image_first", "intent_first"}:
+        raise StoreError("invalid_job", "media_archive_context 版本或来源无效")
+    if status not in MEDIA_ARCHIVE_CONTEXT_STATUSES or not isinstance(authorized, bool):
+        raise StoreError("invalid_job", "media_archive_context 状态无效")
+    if not isinstance(intent_message_id, str) or not 1 <= len(intent_message_id) <= 256:
+        raise StoreError("invalid_job", "归档指令 message_id 无效")
+    if not isinstance(intent_text, str) or len(intent_text) > 32000:
+        raise StoreError("invalid_job", "归档指令文本无效")
+    if expected_count is not None and (
+        isinstance(expected_count, bool) or not isinstance(expected_count, int) or not 1 <= expected_count <= 16
+    ):
+        raise StoreError("invalid_job", "归档附件期望数量无效")
+    if isinstance(selected_count, bool) or not isinstance(selected_count, int) or not 0 <= selected_count <= 16:
+        raise StoreError("invalid_job", "归档附件选择数量无效")
+    if not isinstance(source_attachments, list) or len(source_attachments) > 16:
+        raise StoreError("invalid_job", "归档来源附件无效")
+    normalized_sources: list[dict[str, str]] = []
+    for source_attachment in source_attachments:
+        if not isinstance(source_attachment, dict) or set(source_attachment) != {"message_id", "sha256"}:
+            raise StoreError("invalid_job", "归档来源附件字段无效")
+        source_message_id = source_attachment.get("message_id")
+        digest = source_attachment.get("sha256")
+        if not isinstance(source_message_id, str) or not 1 <= len(source_message_id) <= 256:
+            raise StoreError("invalid_job", "归档来源 message_id 无效")
+        if not isinstance(digest, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            raise StoreError("invalid_job", "归档来源附件摘要无效")
+        normalized_sources.append({"message_id": source_message_id, "sha256": digest})
+    if selected_count != len(normalized_sources):
+        raise StoreError("invalid_job", "归档附件选择数量不一致")
+    if authorized:
+        if status != "authorized" or not attachments or len(attachments) != len(normalized_sources):
+            raise StoreError("invalid_job", "归档授权上下文与附件不一致")
+        if not intent_text.strip() or (expected_count is not None and selected_count != expected_count):
+            raise StoreError("invalid_job", "归档授权指令或数量不一致")
+        if [item["sha256"] for item in attachments] != [item["sha256"] for item in normalized_sources]:
+            raise StoreError("invalid_job", "归档授权附件摘要不一致")
+        canonical = canonical_json(
+            {
+                "intent_message_id": intent_message_id,
+                "source_attachments": normalized_sources,
+            }
+        )
+        expected_scope = "sha256:" + hashlib.sha256(
+            f"weixin-media-archive-v1\n{canonical}".encode("utf-8")
+        ).hexdigest()
+        if value.get("idempotency_scope") != expected_scope:
+            raise StoreError("invalid_job", "归档幂等作用域无效")
+    elif status == "authorized" or "idempotency_scope" in value:
+        raise StoreError("invalid_job", "未授权归档上下文不能携带幂等作用域")
+    return {
+        "version": 1,
+        "source": source,
+        "status": status,
+        "authorized": authorized,
+        "intent_message_id": intent_message_id,
+        "intent_text": intent_text,
+        "expected_count": expected_count,
+        "selected_count": selected_count,
+        "source_attachments": normalized_sources,
+        **({"idempotency_scope": value["idempotency_scope"]} if authorized else {}),
+    }
 
 
 class StoreError(RuntimeError):
@@ -95,6 +204,62 @@ class ControllerStore:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=10000")
         return connection
+
+    @staticmethod
+    def _migrate_job_artifacts(connection: sqlite3.Connection) -> None:
+        """Expand the original PNG-only artifact table without losing queued jobs."""
+
+        table = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='job_artifacts'"
+        ).fetchone()
+        if table is None:
+            return
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(job_artifacts)")}
+        definition = str(table["sql"] or "")
+        if "filename" in columns and "artifact_type IN ('image')" not in definition:
+            return
+        connection.execute("DROP INDEX IF EXISTS job_artifacts_job_idx")
+        connection.execute("DROP INDEX IF EXISTS job_artifacts_expiry_idx")
+        connection.execute("ALTER TABLE job_artifacts RENAME TO job_artifacts_legacy")
+        connection.execute(
+            """
+            CREATE TABLE job_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL CHECK(artifact_type IN ('image','file')),
+                mime_type TEXT NOT NULL,
+                storage_name TEXT NOT NULL UNIQUE,
+                filename TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
+                sha256 TEXT NOT NULL,
+                width INTEGER CHECK(width IS NULL OR width > 0),
+                height INTEGER CHECK(height IS NULL OR height > 0),
+                summary_json TEXT NOT NULL,
+                download_token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(job_id,sha256),
+                FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO job_artifacts(
+                artifact_id,job_id,artifact_type,mime_type,storage_name,filename,
+                size_bytes,sha256,width,height,summary_json,download_token_hash,
+                expires_at,created_at
+            )
+            SELECT artifact_id,job_id,artifact_type,mime_type,storage_name,
+                   CASE WHEN artifact_type='image' THEN 'artifact.png' ELSE 'artifact.bin' END,
+                   size_bytes,sha256,width,height,summary_json,download_token_hash,
+                   expires_at,created_at
+            FROM job_artifacts_legacy
+            """
+        )
+        connection.execute("DROP TABLE job_artifacts_legacy")
+        connection.execute("CREATE INDEX job_artifacts_job_idx ON job_artifacts(job_id,created_at)")
+        connection.execute("CREATE INDEX job_artifacts_expiry_idx ON job_artifacts(expires_at)")
 
     def _initialize(self) -> None:
         with self._connect() as connection:
@@ -150,13 +315,14 @@ class ControllerStore:
                 CREATE TABLE IF NOT EXISTS job_artifacts (
                     artifact_id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
-                    artifact_type TEXT NOT NULL CHECK(artifact_type IN ('image')),
-                    mime_type TEXT NOT NULL CHECK(mime_type IN ('image/png')),
+                    artifact_type TEXT NOT NULL CHECK(artifact_type IN ('image','file')),
+                    mime_type TEXT NOT NULL,
                     storage_name TEXT NOT NULL UNIQUE,
+                    filename TEXT NOT NULL,
                     size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
                     sha256 TEXT NOT NULL,
-                    width INTEGER NOT NULL CHECK(width > 0),
-                    height INTEGER NOT NULL CHECK(height > 0),
+                    width INTEGER CHECK(width IS NULL OR width > 0),
+                    height INTEGER CHECK(height IS NULL OR height > 0),
                     summary_json TEXT NOT NULL,
                     download_token_hash TEXT NOT NULL UNIQUE,
                     expires_at TEXT NOT NULL,
@@ -224,6 +390,7 @@ class ControllerStore:
                 );
                 """
             )
+            self._migrate_job_artifacts(connection)
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(jobs)")}
             if "capability_profile" not in columns:
                 connection.execute(
@@ -299,6 +466,10 @@ class ControllerStore:
                     **({"display_name": str(attachment["display_name"])[:255]} if attachment.get("display_name") else {}),
                 }
             )
+        media_archive_context = validate_media_archive_context(
+            payload.get("media_archive_context"),
+            normalized_attachments,
+        )
         if not isinstance(reply_capabilities, list) or not set(reply_capabilities).issubset({"text", "image", "file"}):
             raise StoreError("invalid_job", "reply_capabilities 无效")
         if "capability_profile" in payload and capability_profile not in {"owner", "member_read_only"}:
@@ -310,6 +481,7 @@ class ControllerStore:
             "received_at": received_at,
             "text": text,
             "attachments": normalized_attachments,
+            **({"media_archive_context": media_archive_context} if media_archive_context else {}),
             "reply_capabilities": sorted(set(reply_capabilities)),
             "capability_profile": capability_profile,
         }
@@ -472,55 +644,70 @@ class ControllerStore:
             self._event(connection, row["job_id"], state, error_code=error_code)
             return True
 
-    def capture_chart_artifact(
+    def capture_artifact(
         self,
         job_id: str,
-        chart: dict[str, Any],
+        artifact: dict[str, Any],
         content: bytes,
     ) -> dict[str, Any]:
-        """Validate and atomically persist one trusted Hub PNG for a running job."""
+        """Validate and atomically persist one trusted Hub artifact for a running job."""
         if not isinstance(job_id, str) or not job_id:
             raise StoreError("artifact_context_invalid", "artifact 作业上下文无效", status=409)
-        if not isinstance(chart, dict):
-            raise StoreError("artifact_metadata_invalid", "图表元数据无效", status=502)
-        download_ref = chart.get("download_ref")
-        size_bytes = chart.get("size_bytes")
-        expected_digest = chart.get("sha256")
-        width = chart.get("width")
-        height = chart.get("height")
-        summary = chart.get("summary")
-        if not isinstance(download_ref, str) or not re.fullmatch(r"summary-[a-f0-9]{32}\.png", download_ref):
-            raise StoreError("artifact_reference_invalid", "图表引用无效", status=502)
-        if not isinstance(content, bytes) or not content.startswith(PNG_MAGIC):
-            raise StoreError("artifact_content_invalid", "图表不是有效 PNG", status=502)
+        if not isinstance(artifact, dict):
+            raise StoreError("artifact_metadata_invalid", "artifact 元数据无效", status=502)
+        artifact_type = artifact.get("type")
+        mime_type = artifact.get("mime_type")
+        filename = artifact.get("filename")
+        size_bytes = artifact.get("size_bytes")
+        expected_digest = artifact.get("sha256")
+        width = artifact.get("width")
+        height = artifact.get("height")
+        summary = artifact.get("summary")
+        result_summary = artifact.get("result_summary")
+        if artifact_type not in {"image", "file"} or mime_type not in ARTIFACT_MIME_TYPES:
+            raise StoreError("artifact_metadata_invalid", "artifact 类型或 MIME 无效", status=502)
+        if artifact_type == "image" and mime_type != "image/png":
+            raise StoreError("artifact_metadata_invalid", "图片 artifact 必须是 PNG", status=502)
+        if not isinstance(filename, str) or not filename or len(filename) > 255 or Path(filename).name != filename:
+            raise StoreError("artifact_metadata_invalid", "artifact 文件名无效", status=502)
+        if not isinstance(result_summary, str) or not 1 <= len(result_summary) <= 500 or "\n" in result_summary or "\r" in result_summary:
+            raise StoreError("artifact_summary_invalid", "artifact 摘要无效", status=502)
+        if not isinstance(content, bytes) or not content:
+            raise StoreError("artifact_content_invalid", "artifact 内容为空", status=502)
+        if artifact_type == "image" and not content.startswith(PNG_MAGIC):
+            raise StoreError("artifact_content_invalid", "artifact 不是有效 PNG", status=502)
+        if artifact_type == "file" and not content.startswith(ZIP_MAGIC_PREFIXES):
+            raise StoreError("artifact_content_invalid", "artifact 不是有效 ZIP", status=502)
         if not isinstance(size_bytes, int) or size_bytes != len(content) or not 1 <= size_bytes <= self.max_artifact_bytes:
-            raise StoreError("artifact_size_invalid", "图表大小不一致或越界", status=502)
+            raise StoreError("artifact_size_invalid", "artifact 大小不一致或越界", status=502)
         if not isinstance(expected_digest, str):
-            raise StoreError("artifact_digest_invalid", "图表摘要缺失", status=502)
+            raise StoreError("artifact_digest_invalid", "artifact 摘要缺失", status=502)
         expected_digest = expected_digest.removeprefix("sha256:")
         actual_digest = hashlib.sha256(content).hexdigest()
         if not re.fullmatch(r"[a-f0-9]{64}", expected_digest) or not hmac.compare_digest(expected_digest, actual_digest):
-            raise StoreError("artifact_digest_invalid", "图表摘要不一致", status=502)
-        if (
-            isinstance(width, bool)
-            or not isinstance(width, int)
-            or isinstance(height, bool)
-            or not isinstance(height, int)
-            or not 1 <= width <= 8192
-            or not 1 <= height <= 8192
-        ):
-            raise StoreError("artifact_dimensions_invalid", "图表尺寸无效", status=502)
+            raise StoreError("artifact_digest_invalid", "artifact 摘要不一致", status=502)
+        if artifact_type == "image":
+            if (
+                isinstance(width, bool)
+                or not isinstance(width, int)
+                or isinstance(height, bool)
+                or not isinstance(height, int)
+                or not 1 <= width <= 8192
+                or not 1 <= height <= 8192
+            ):
+                raise StoreError("artifact_dimensions_invalid", "图片尺寸无效", status=502)
+        elif width is not None or height is not None:
+            raise StoreError("artifact_dimensions_invalid", "文件 artifact 不应携带图片尺寸", status=502)
         if not isinstance(summary, dict):
-            raise StoreError("artifact_summary_invalid", "图表汇总无效", status=502)
+            raise StoreError("artifact_summary_invalid", "artifact 汇总无效", status=502)
         summary_json = canonical_json(summary)
         if len(summary_json.encode("utf-8")) > 1024 * 1024:
-            raise StoreError("artifact_summary_invalid", "图表汇总过大", status=502)
-        result_summary = self._chart_result_summary(summary)
+            raise StoreError("artifact_summary_invalid", "artifact 汇总过大", status=502)
         self.cleanup_artifacts()
         now = utc_now()
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=self.artifact_ttl_seconds)).isoformat()
         artifact_id = self._new_artifact_id()
-        storage_name = f"{uuid.uuid4().hex}.png"
+        storage_name = f"{uuid.uuid4().hex}{'.png' if artifact_type == 'image' else '.bin'}"
         token = self._download_token(artifact_id, expires_at)
         token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
         descriptor, temporary_name = tempfile.mkstemp(prefix=".artifact.", dir=self.artifact_dir)
@@ -537,7 +724,7 @@ class ControllerStore:
                 connection.execute("BEGIN IMMEDIATE")
                 job = connection.execute("SELECT state FROM jobs WHERE job_id=?", (job_id,)).fetchone()
                 if job is None or job["state"] != "running":
-                    raise StoreError("artifact_context_invalid", "图表只能绑定到运行中的作业", status=409)
+                    raise StoreError("artifact_context_invalid", "artifact 只能绑定到运行中的作业", status=409)
                 existing = connection.execute(
                     "SELECT * FROM job_artifacts WHERE job_id=? AND sha256=?",
                     (job_id, actual_digest),
@@ -560,12 +747,15 @@ class ControllerStore:
                 os.replace(temporary, target)
                 target_created = True
                 connection.execute(
-                    "INSERT INTO job_artifacts(artifact_id,job_id,artifact_type,mime_type,storage_name,size_bytes,sha256,width,height,summary_json,download_token_hash,expires_at,created_at) "
-                    "VALUES (?,?, 'image','image/png',?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO job_artifacts(artifact_id,job_id,artifact_type,mime_type,storage_name,filename,size_bytes,sha256,width,height,summary_json,download_token_hash,expires_at,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         artifact_id,
                         job_id,
+                        artifact_type,
+                        mime_type,
                         storage_name,
+                        filename,
                         size_bytes,
                         actual_digest,
                         width,
@@ -578,7 +768,7 @@ class ControllerStore:
                 )
                 connection.execute("UPDATE jobs SET result_summary=? WHERE job_id=?", (result_summary, job_id))
                 row = connection.execute("SELECT * FROM job_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
-                self._event(connection, job_id, "artifact_captured", item_type="image", content_length=size_bytes)
+                self._event(connection, job_id, "artifact_captured", item_type=artifact_type, content_length=size_bytes)
                 return self._artifact_public_document(connection, row)
         except Exception:
             if target_created and target.is_file() and not target.is_symlink():
@@ -587,6 +777,26 @@ class ControllerStore:
         finally:
             if temporary.exists():
                 temporary.unlink()
+
+    def capture_chart_artifact(
+        self,
+        job_id: str,
+        chart: dict[str, Any],
+        content: bytes,
+    ) -> dict[str, Any]:
+        """Backward-compatible name for older Controller callers and tests."""
+
+        if not isinstance(chart.get("download_ref"), str) or not re.fullmatch(
+            r"summary-[a-f0-9]{32}\.png", str(chart.get("download_ref"))
+        ):
+            raise StoreError("artifact_reference_invalid", "图表引用无效", status=502)
+        normalized = dict(chart)
+        normalized.setdefault("type", "image")
+        normalized.setdefault("filename", normalized.get("download_ref", "artifact.png"))
+        normalized.setdefault("mime_type", "image/png")
+        normalized.setdefault("result_summary", self._chart_result_summary(normalized.get("summary") or {}))
+        normalized.setdefault("download_kind", "chart")
+        return self.capture_artifact(job_id, normalized, content)
 
     def read_job_artifact(self, job_id: str, artifact_id: str) -> tuple[dict[str, Any], bytes]:
         if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", job_id):
@@ -1211,6 +1421,7 @@ class ControllerStore:
             "artifact_id": row["artifact_id"],
             "type": row["artifact_type"],
             "mime_type": row["mime_type"],
+            "filename": row["filename"],
             "size_bytes": row["size_bytes"],
             "sha256": f"sha256:{row['sha256']}",
             "width": row["width"],
@@ -1231,9 +1442,14 @@ class ControllerStore:
             raise StoreError("artifact_storage_invalid", "artifact 存储越界", status=409)
         content = path.read_bytes()
         digest = hashlib.sha256(content).hexdigest()
+        valid_image = row["artifact_type"] == "image" and row["mime_type"] == "image/png" and content.startswith(PNG_MAGIC)
+        valid_file = (
+            row["artifact_type"] == "file"
+            and row["mime_type"] == "application/zip"
+            and content.startswith(ZIP_MAGIC_PREFIXES)
+        )
         if (
-            row["mime_type"] != "image/png"
-            or not content.startswith(PNG_MAGIC)
+            not (valid_image or valid_file)
             or len(content) != row["size_bytes"]
             or not hmac.compare_digest(digest, row["sha256"])
         ):

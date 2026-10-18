@@ -29,9 +29,11 @@ import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState
 import { ApiError, api, assetUrl, loadSession, uploadMedia } from "./api";
 import type {
   Area,
+  ClassificationCatalogItem,
   HubData,
   MediaAsset,
   PageKey,
+  PaymentPlan,
   Project,
   SessionState,
   Stage,
@@ -47,6 +49,8 @@ const EMPTY_DATA: HubData = {
   transactions: [],
   summary: null,
   media: [],
+  catalog: [],
+  paymentPlans: [],
 };
 
 const NAV_ITEMS: Array<{ key: PageKey; label: string; icon: typeof IconHome }> = [
@@ -75,6 +79,7 @@ const EVENT_META: Record<TimelineEvent["event_type"], { label: string; tone: str
 
 type EditorState =
   | { kind: "payment"; item?: Transaction }
+  | { kind: "payment-plan" }
   | { kind: "refund"; item: Transaction }
   | { kind: "undo"; item: Transaction }
   | { kind: "stage"; item?: Stage }
@@ -105,6 +110,7 @@ function fullDate(value?: string | null): string {
 }
 
 function transactionCategory(item: Transaction): string {
+  if (item.category?.trim()) return item.category.trim();
   for (const dimension of ["主题", "专业"]) {
     const value = item.grouped_tags?.[dimension]?.find((candidate) => candidate.trim());
     if (value) return value.trim();
@@ -170,13 +176,15 @@ export function App() {
     setLoading(true);
     setError("");
     try {
-      const [dashboard, stages, areas, timeline, ledger, media] = await Promise.all([
+      const [dashboard, stages, areas, timeline, ledger, media, catalog, paymentPlans] = await Promise.all([
         api.dashboard(targetProjectId),
         api.stages(targetProjectId),
         api.areas(targetProjectId),
         api.timeline(targetProjectId),
         api.ledger(targetProjectId),
         api.media(targetProjectId),
+        api.catalog(),
+        api.paymentPlans(targetProjectId),
       ]);
       setData({
         dashboard,
@@ -186,6 +194,8 @@ export function App() {
         transactions: ledger.items,
         summary: ledger.summary,
         media: media.items,
+        catalog: catalog.items,
+        paymentPlans: paymentPlans.items,
       });
     } catch (caught) {
       setError(getErrorMessage(caught));
@@ -412,6 +422,8 @@ export function App() {
                   session={session}
                   writable={writable}
                   mediaCount={data.media.length}
+                  paymentPlans={data.paymentPlans}
+                  onAddPaymentPlan={() => openEditor({ kind: "payment-plan" })}
                   onEditProject={() => openEditor({ kind: "project", item: activeProject })}
                   onAddArea={() => openEditor({ kind: "area" })}
                   onEditArea={(item) => openEditor({ kind: "area", item })}
@@ -431,12 +443,14 @@ export function App() {
           project={activeProject}
           stages={data.stages}
           areas={data.areas}
+          catalog={data.catalog}
           saving={saving}
           onClose={() => setEditor(null)}
           onPayment={(body, item) => void runWrite(
             () => item ? api.correctPayment(item.id, body) : api.addPayment(body),
             item ? "账目已更新" : "账目已记录",
           )}
+          onPaymentPlan={(body) => void runWrite(() => api.createPaymentPlan(body), "付款计划已创建")}
           onRefund={(body) => void runWrite(() => api.addRefund(body), "退款已记录")}
           onUndo={(item, reason) => void runWrite(() => api.undoTransaction(item.id, { version: item.version, reason }), "账目已撤销")}
           onStage={(body, item) => void runWrite(
@@ -691,8 +705,8 @@ function StagesPage({ stages, events, writable, onCreate, onEdit }: { stages: St
   return <div className="single-page"><div className="page-title"><div><span className="eyebrow">PROJECT PHASES</span><h1>装修阶段</h1><p>规划施工顺序、起止时间和当前唯一进行中阶段。</p></div><button className="primary-button" type="button" onClick={onCreate} disabled={!writable}><IconPlus size={19} />新增阶段</button></div><StageRail stages={stages} /><div className="stage-board">{stages.map((item, index) => { const count = events.filter((event) => event.stage_id === item.id).length; return <article className={`stage-card ${item.status}`} key={item.id}><header><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{item.name}</strong><small>{STAGE_LABELS[item.status]}</small></div><button type="button" onClick={() => onEdit(item)} disabled={!writable}><IconEdit size={18} /></button></header><dl><div><dt>计划周期</dt><dd>{fullDate(item.planned_start)} — {fullDate(item.planned_end)}</dd></div><div><dt>实际周期</dt><dd>{fullDate(item.actual_start)} — {fullDate(item.actual_end)}</dd></div><div><dt>现场记录</dt><dd>{count} 条</dd></div></dl><div className="stage-card-footer"><i style={{ backgroundColor: item.color }} /><span>版本 {item.version}</span></div></article>; })}{!stages.length && <div className="empty-inline"><IconFlag size={38} /><h2>还没有装修阶段</h2><p>先建立设计、拆除、水电、泥木、油漆、安装等阶段。</p></div>}</div></div>;
 }
 
-function SettingsPage({ project, areas, session, writable, mediaCount, onEditProject, onAddArea, onEditArea, onRefresh }: { project: Project; areas: Area[]; session: SessionState | null; writable: boolean; mediaCount: number; onEditProject: () => void; onAddArea: () => void; onEditArea: (item: Area) => void; onRefresh: () => void }) {
-  return <div className="single-page settings-page"><div className="page-title"><div><span className="eyebrow">PROJECT SETTINGS</span><h1>设置</h1><p>维护项目基础信息、空间与本地数据健康状态。</p></div><button className="secondary-button" type="button" onClick={onRefresh}><IconRefresh size={18} />刷新状态</button></div><div className="settings-grid"><SectionCard title="项目信息" action={<button className="text-button" type="button" onClick={onEditProject} disabled={!writable}><IconEdit size={16} />编辑</button>}><dl className="settings-list"><div><dt>项目名称</dt><dd>{project.name}</dd></div><div><dt>时区</dt><dd>{project.timezone}</dd></div><div><dt>总预算</dt><dd>{currency(project.budget_cents)}</dd></div><div><dt>项目状态</dt><dd><span className="status-chip active">{project.status}</span></dd></div></dl></SectionCard><SectionCard title="运行与数据状态"><dl className="settings-list"><div><dt>Writer 模式</dt><dd><span className={`status-chip ${writable ? "active" : "locked"}`}>{session?.writer_mode || "unknown"}</span></dd></div><div><dt>便携导出</dt><dd>{session?.portable_export_state || "unknown"}</dd></div><div><dt>媒体档案</dt><dd>{mediaCount} 个文件</dd></div><div><dt>页面权限</dt><dd>{writable ? "可读写" : "只读"}</dd></div></dl></SectionCard><SectionCard title="空间管理" action={<button className="text-button" type="button" onClick={onAddArea} disabled={!writable}><IconPlus size={16} />新增空间</button>} className="areas-card"><div className="area-list">{areas.map((area) => <button type="button" key={area.id} onClick={() => onEditArea(area)} disabled={!writable}><span><IconHome size={18} /><b>{area.name}</b></span><small>{area.status === "active" ? "使用中" : "已归档"}</small><IconEdit size={16} /></button>)}</div></SectionCard><SectionCard title="安全边界"><div className="safety-copy"><IconLock size={25} /><div><strong>正式环境切换保持独立授权</strong><p>页面不会自行启用 primary writer，也不会连接 Hermes、正式微信或读取真实账本。媒体原件不进入 SQLite 和便携账本 ZIP。</p></div></div></SectionCard></div></div>;
+function SettingsPage({ project, areas, session, writable, mediaCount, paymentPlans, onAddPaymentPlan, onEditProject, onAddArea, onEditArea, onRefresh }: { project: Project; areas: Area[]; session: SessionState | null; writable: boolean; mediaCount: number; paymentPlans: PaymentPlan[]; onAddPaymentPlan: () => void; onEditProject: () => void; onAddArea: () => void; onEditArea: (item: Area) => void; onRefresh: () => void }) {
+  return <div className="single-page settings-page"><div className="page-title"><div><span className="eyebrow">PROJECT SETTINGS</span><h1>设置</h1><p>维护项目基础信息、空间与本地数据健康状态。</p></div><button className="secondary-button" type="button" onClick={onRefresh}><IconRefresh size={18} />刷新状态</button></div><div className="settings-grid"><SectionCard title="项目信息" action={<button className="text-button" type="button" onClick={onEditProject} disabled={!writable}><IconEdit size={16} />编辑</button>}><dl className="settings-list"><div><dt>项目名称</dt><dd>{project.name}</dd></div><div><dt>时区</dt><dd>{project.timezone}</dd></div><div><dt>总预算</dt><dd>{currency(project.budget_cents)}</dd></div><div><dt>项目状态</dt><dd><span className="status-chip active">{project.status}</span></dd></div></dl></SectionCard><SectionCard title="付款计划" action={<button className="text-button" type="button" onClick={onAddPaymentPlan} disabled={!writable}><IconPlus size={16} />新增计划</button>}><div className="plan-list">{paymentPlans.length ? paymentPlans.map((plan) => <article className="plan-card" key={plan.id}><div><strong>{plan.name}</strong><span>{plan.payment_status === "paid" ? "已付清" : plan.payment_status === "partial" ? "部分已付" : "待付款"}</span></div><b>{currency(plan.paid_amount_cents)} / {currency(plan.total_amount_cents)}</b><small>剩余 {currency(plan.remaining_amount_cents)} · {plan.payment_nodes.map((node) => node.name).join("、") || "无节点"}</small></article>) : <p className="muted-empty">可把订金和尾款关联到同一项目计划。</p>}</div></SectionCard><SectionCard title="运行与数据状态"><dl className="settings-list"><div><dt>Writer 模式</dt><dd><span className={`status-chip ${writable ? "active" : "locked"}`}>{session?.writer_mode || "unknown"}</span></dd></div><div><dt>便携导出</dt><dd>{session?.portable_export_state || "unknown"}</dd></div><div><dt>媒体档案</dt><dd>{mediaCount} 个文件</dd></div><div><dt>页面权限</dt><dd>{writable ? "可读写" : "只读"}</dd></div></dl></SectionCard><SectionCard title="空间管理" action={<button className="text-button" type="button" onClick={onAddArea} disabled={!writable}><IconPlus size={16} />新增空间</button>} className="areas-card"><div className="area-list">{areas.map((area) => <button type="button" key={area.id} onClick={() => onEditArea(area)} disabled={!writable}><span><IconHome size={18} /><b>{area.name}</b></span><small>{area.status === "active" ? "使用中" : "已归档"}</small><IconEdit size={16} /></button>)}</div></SectionCard><SectionCard title="安全边界"><div className="safety-copy"><IconLock size={25} /><div><strong>正式环境切换保持独立授权</strong><p>页面不会自行启用 primary writer，也不会连接 Hermes、正式微信或读取真实账本。媒体原件不进入 SQLite 和便携账本 ZIP。</p></div></div></SectionCard></div></div>;
 }
 
 function EditorDialog(props: {
@@ -700,9 +714,11 @@ function EditorDialog(props: {
   project: Project;
   stages: Stage[];
   areas: Area[];
+  catalog: ClassificationCatalogItem[];
   saving: boolean;
   onClose: () => void;
   onPayment: (body: unknown, item?: Transaction) => void;
+  onPaymentPlan: (body: unknown) => void;
   onRefund: (body: unknown) => void;
   onUndo: (item: Transaction, reason: string) => void;
   onStage: (body: unknown, item?: Stage) => void;
@@ -712,7 +728,8 @@ function EditorDialog(props: {
   onUpload: (files: File[], metadata: { project_id: string; captured_at?: string | null; links: Array<{ target_type: "stage" | "area"; target_id: string }> }, onProgress: (value: number) => void) => Promise<void>;
 }) {
   const { editor } = props;
-  if (editor.kind === "payment") return <PaymentDialog item={editor.item} project={props.project} stages={props.stages} areas={props.areas} saving={props.saving} onClose={props.onClose} onSubmit={props.onPayment} />;
+  if (editor.kind === "payment") return <PaymentDialog item={editor.item} project={props.project} stages={props.stages} areas={props.areas} catalog={props.catalog} saving={props.saving} onClose={props.onClose} onSubmit={props.onPayment} />;
+  if (editor.kind === "payment-plan") return <PaymentPlanDialog project={props.project} saving={props.saving} onClose={props.onClose} onSubmit={props.onPaymentPlan} />;
   if (editor.kind === "refund") return <RefundDialog item={editor.item} project={props.project} saving={props.saving} onClose={props.onClose} onSubmit={props.onRefund} />;
   if (editor.kind === "undo") return <UndoDialog item={editor.item} saving={props.saving} onClose={props.onClose} onSubmit={props.onUndo} />;
   if (editor.kind === "stage") return <StageDialog item={editor.item} project={props.project} saving={props.saving} onClose={props.onClose} onSubmit={props.onStage} />;
@@ -736,18 +753,40 @@ function DialogActions({ saving, onClose, submitLabel = "保存" }: { saving: bo
   return <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={saving}>{saving ? "正在保存..." : submitLabel}</button></div>;
 }
 
-function PaymentDialog({ item, project, stages, areas, saving, onClose, onSubmit }: { item?: Transaction; project: Project; stages: Stage[]; areas: Area[]; saving: boolean; onClose: () => void; onSubmit: (body: unknown, item?: Transaction) => void }) {
+function PaymentPlanDialog({ project, saving, onClose, onSubmit }: { project: Project; saving: boolean; onClose: () => void; onSubmit: (body: unknown) => void }) {
+  const [name, setName] = useState("装修付款计划");
+  const [total, setTotal] = useState("");
+  const [deposit, setDeposit] = useState("");
+  const [tail, setTail] = useState("");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const nodes = [
+      { name: "订金", amount_cents: Math.round(Number(deposit || 0) * 100), position: 1 },
+      { name: "尾款", amount_cents: Math.round(Number(tail || 0) * 100), position: 2 },
+    ].filter((node) => node.amount_cents > 0);
+    const requestId = globalThis.crypto?.randomUUID?.() || `local-${Date.now()}`;
+    onSubmit({ idempotency_key: `payment-plan-${requestId}`, project_id: project.id, name, total_amount_cents: Math.round(Number(total) * 100), payment_nodes: nodes });
+  };
+  return <Dialog title="新增付款计划" subtitle="订金和尾款共享同一项目，已付与剩余金额由账本关联数据派生。" onClose={onClose}><form onSubmit={submit}><div className="form-grid"><Field label="计划名称" wide><input required value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="计划总额（元）"><input type="number" min="0.01" step="0.01" required value={total} onChange={(event) => setTotal(event.target.value)} /></Field><Field label="订金节点（元）"><input type="number" min="0" step="0.01" value={deposit} onChange={(event) => setDeposit(event.target.value)} /></Field><Field label="尾款节点（元）"><input type="number" min="0" step="0.01" value={tail} onChange={(event) => setTail(event.target.value)} /></Field></div><DialogActions saving={saving} onClose={onClose} submitLabel="创建付款计划" /></form></Dialog>;
+}
+
+function PaymentDialog({ item, project, stages, areas, catalog, saving, onClose, onSubmit }: { item?: Transaction; project: Project; stages: Stage[]; areas: Area[]; catalog: ClassificationCatalogItem[]; saving: boolean; onClose: () => void; onSubmit: (body: unknown, item?: Transaction) => void }) {
   const [amount, setAmount] = useState(item ? String(item.amount_cents / 100) : "");
   const [occurredOn, setOccurredOn] = useState(item?.occurred_on || new Date().toISOString().slice(0, 10));
-  const [category, setCategory] = useState(item?.main_category || "水电工程");
+  const categories = catalog.filter((entry) => entry.kind === "category");
+  const expenseTypes = catalog.filter((entry) => entry.kind === "expense_type");
+  const [category, setCategory] = useState(item?.category || categories[0]?.code || "");
+  const [subcategory, setSubcategory] = useState(item?.subcategory || "");
+  const [expenseType, setExpenseType] = useState(item?.expense_type || expenseTypes[0]?.code || "");
+  const subcategories = catalog.filter((entry) => entry.kind === "subcategory" && entry.parent_code === category);
   const [merchant, setMerchant] = useState(item?.merchant || "");
   const [note, setNote] = useState(item?.note || "");
   const [tags, setTags] = useState(item?.tags.join("，") || "");
   const [deposit, setDeposit] = useState(item?.is_deposit || false);
   const [stageId, setStageId] = useState(item?.context?.stage_id || stages.find((stage) => stage.status === "active")?.id || "");
   const [areaId, setAreaId] = useState(item?.context?.area_id || "");
-  const submit = (event: FormEvent) => { event.preventDefault(); const common = { amount_cents: Math.round(Number(amount) * 100), occurred_on: occurredOn, main_category: category, merchant, note, is_deposit: deposit, tags: tags.split(/[，,]/).map((value) => value.trim()).filter(Boolean) }; onSubmit(item ? { version: item.version, changes: common, reason: "页面编辑账目" } : { ...common, project_id: project.id, stage_id: stageId || null, area_id: areaId || null }, item); };
-  return <Dialog title={item ? "编辑账目" : "新增账目"} subtitle="金额、分类与标签会进入统一账本和审计记录。" onClose={onClose}><form onSubmit={submit}><div className="form-grid"><Field label="金额（元）"><input type="number" min="0.01" step="0.01" required value={amount} onChange={(event) => setAmount(event.target.value)} /></Field><Field label="发生日期"><input type="date" required value={occurredOn} onChange={(event) => setOccurredOn(event.target.value)} /></Field><Field label="主分类"><input required value={category} onChange={(event) => setCategory(event.target.value)} /></Field><Field label="商家 / 收款方"><input value={merchant} onChange={(event) => setMerchant(event.target.value)} /></Field>{!item && <><Field label="装修阶段"><select value={stageId} onChange={(event) => setStageId(event.target.value)}><option value="">不关联</option>{stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></Field><Field label="空间"><select value={areaId} onChange={(event) => setAreaId(event.target.value)}><option value="">全屋 / 不关联</option>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></Field></>}<Field label="标签（逗号分隔）" wide><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="材料，人工，水电" /></Field><Field label="备注" wide><textarea value={note} onChange={(event) => setNote(event.target.value)} rows={3} /></Field><label className="check-field wide"><input type="checkbox" checked={deposit} onChange={(event) => setDeposit(event.target.checked)} /><span>这是一笔订金</span></label></div><DialogActions saving={saving} onClose={onClose} submitLabel={item ? "保存修改" : "记录账目"} /></form></Dialog>;
+  const submit = (event: FormEvent) => { event.preventDefault(); const enteredTags = tags.split(/[，,]/).map((value) => value.trim()).filter(Boolean); const common: Record<string, unknown> = { amount_cents: Math.round(Number(amount) * 100), occurred_on: occurredOn, category: category || null, subcategory: subcategory || null, expense_type: expenseType || null, merchant, note, is_deposit: deposit, project_id: project.id, stage_id: stageId || null, area_id: areaId || null }; if (item?.ledger_format_version === 2) common.grouped_tags = item.grouped_tags || {}; else { common.main_category = item?.main_category || "水电工程"; common.tags = enteredTags; } onSubmit(item ? { version: item.version, changes: common, reason: "页面编辑账目" } : { ...common, project_id: project.id, stage_id: stageId || null, area_id: areaId || null }, item); };
+  return <Dialog title={item ? "编辑账目" : "新增账目"} subtitle="金额、项目归属和独立分类会进入统一账本和审计记录。" onClose={onClose}><form onSubmit={submit}><div className="form-grid"><Field label="金额（元）"><input type="number" min="0.01" step="0.01" required value={amount} onChange={(event) => setAmount(event.target.value)} /></Field><Field label="发生日期"><input type="date" required value={occurredOn} onChange={(event) => setOccurredOn(event.target.value)} /></Field><Field label="业务大类"><select value={category} onChange={(event) => { setCategory(event.target.value); setSubcategory(""); }}><option value="">未设置</option>{categories.map((entry) => <option key={entry.code} value={entry.code}>{entry.label}</option>)}</select></Field><Field label="业务子类"><select value={subcategory} onChange={(event) => setSubcategory(event.target.value)} disabled={!category}><option value="">未设置</option>{subcategories.map((entry) => <option key={entry.code} value={entry.code}>{entry.label}</option>)}</select></Field><Field label="支出类型"><select value={expenseType} onChange={(event) => setExpenseType(event.target.value)}><option value="">未设置</option>{expenseTypes.map((entry) => <option key={entry.code} value={entry.code}>{entry.label}</option>)}</select></Field><Field label="商家 / 收款方"><input value={merchant} onChange={(event) => setMerchant(event.target.value)} /></Field><Field label="装修阶段"><select value={stageId} onChange={(event) => setStageId(event.target.value)}><option value="">不关联</option>{stages.map((stage) => <option key={stage.id} value={stage.id}>{stage.name}</option>)}</select></Field><Field label="空间"><select value={areaId} onChange={(event) => setAreaId(event.target.value)}><option value="">全屋 / 不关联</option>{areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}</select></Field><Field label="标签（逗号分隔）" wide><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="材料，人工，水电" /></Field><Field label="备注" wide><textarea value={note} onChange={(event) => setNote(event.target.value)} rows={3} /></Field><label className="check-field wide"><input type="checkbox" checked={deposit} onChange={(event) => setDeposit(event.target.checked)} /><span>这是一笔订金</span></label></div><DialogActions saving={saving} onClose={onClose} submitLabel={item ? "保存修改" : "记录账目"} /></form></Dialog>;
 }
 
 function RefundDialog({ item, project, saving, onClose, onSubmit }: { item: Transaction; project: Project; saving: boolean; onClose: () => void; onSubmit: (body: unknown) => void }) {

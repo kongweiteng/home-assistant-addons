@@ -37,6 +37,8 @@ RECEIPT_ID_RE = re.compile(r"^RCPT-[A-F0-9]{32}$")
 SHA256_ID_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 ATTACHMENT_REF_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 CHART_REF_RE = re.compile(r"^summary-[a-f0-9]{32}\.png$")
+ARTIFACT_MIME_TYPES = {"image/png", "application/zip"}
+ZIP_MAGIC_PREFIXES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 ATTACHMENT_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain"}
 MAX_GATEWAY_ATTACHMENT_BYTES = 20 * 1024 * 1024
 MEDIA_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "video/mp4", "video/quicktime", "video/webm"}
@@ -134,7 +136,7 @@ class ToolRouter:
         self.operations_token = operations_token
         self.request_json = request_json or _request_json
         self.request_bytes = request_bytes or _request_bytes
-        self.request_artifact = request_artifact or _request_hub_chart
+        self.request_artifact = request_artifact or _request_hub_artifact
         self.stream_media = stream_media or _stream_gateway_to_hub
         self.max_media_bytes = max_media_bytes
         self.store = store
@@ -155,11 +157,16 @@ class ToolRouter:
         capability_profile: str = "owner_legacy",
         *,
         media_archive_authorized: bool | None = None,
+        media_archive_idempotency_scope: str | None = None,
     ) -> None:
         if not job_id or not message_id:
             raise ToolProxyError("tool_context_invalid", "工具调用上下文无效")
         if capability_profile not in {"owner_legacy", "owner", "member_read_only"}:
             raise ToolProxyError("tool_context_invalid", "工具能力画像无效")
+        if media_archive_idempotency_scope is not None and not SHA256_ID_RE.fullmatch(
+            media_archive_idempotency_scope
+        ):
+            raise ToolProxyError("tool_context_invalid", "媒体归档幂等作用域无效")
         with self._context_lock:
             if self._active_context is not None:
                 raise ToolProxyError("tool_context_busy", "已有活动工具调用上下文")
@@ -171,6 +178,8 @@ class ToolRouter:
             }
             if media_archive_authorized is not None:
                 self._active_context["media_archive_authorized"] = media_archive_authorized
+            if media_archive_idempotency_scope is not None:
+                self._active_context["media_archive_idempotency_scope"] = media_archive_idempotency_scope
 
     def bind_turn(self, job_id: str, turn_id: str) -> None:
         with self._context_lock:
@@ -468,14 +477,14 @@ class ToolRouter:
         error_code: str | None = None
         try:
             definition = self._authorize_tool(name)
-            if name == "ledger_generate_chart":
+            if name in {"ledger_generate_chart", "ledger_export"}:
                 with self._context_lock:
                     context = None if self._active_context is None else dict(self._active_context)
                 if context is None or not context.get("job_id"):
-                    raise ToolProxyError("tool_context_unavailable", "图表只能在活动 Controller 作业中生成")
+                    raise ToolProxyError("tool_context_unavailable", "文件制品只能在活动 Controller 作业中生成")
             result = self._call_authorized(definition, arguments)
-            if name == "ledger_generate_chart":
-                result = self._capture_chart_result(result)
+            if name in {"ledger_generate_chart", "ledger_export"}:
+                result = self._capture_artifact_result(result)
             outcome = "succeeded"
             return result
         except ToolProxyError as exc:
@@ -500,38 +509,63 @@ class ToolRouter:
                 except (StoreError, sqlite3.DatabaseError, OSError):
                     pass
 
-    def _capture_chart_result(self, result: dict[str, Any]) -> dict[str, Any]:
+    def _capture_artifact_result(self, result: dict[str, Any]) -> dict[str, Any]:
         if self.store is None:
             raise ToolProxyError("artifact_store_unavailable", "Controller artifact 存储不可用")
         if not isinstance(result, dict):
             raise ToolProxyError("artifact_metadata_invalid", "Renovation Hub 图表响应无效")
-        chart = result.get("result") if result.get("version") == 1 else result
-        if not isinstance(chart, dict):
-            raise ToolProxyError("artifact_metadata_invalid", "Renovation Hub 图表结果无效")
-        reference = chart.get("download_ref")
-        if not isinstance(reference, str) or not CHART_REF_RE.fullmatch(reference):
-            raise ToolProxyError("artifact_reference_invalid", "Renovation Hub 图表引用无效")
+        artifact = result.get("result") if result.get("version") == 1 else result
+        if not isinstance(artifact, dict):
+            raise ToolProxyError("artifact_metadata_invalid", "Renovation Hub artifact 结果无效")
+        if "type" not in artifact and "download_ref" in artifact:
+            legacy = dict(artifact)
+            legacy["type"] = "image"
+            legacy["filename"] = legacy.get("download_ref")
+            legacy["mime_type"] = "image/png"
+            legacy["download_kind"] = "chart"
+            summary = legacy.get("summary") if isinstance(legacy.get("summary"), dict) else {}
+            legacy["result_summary"] = (
+                f"已生成装修账单统计图：共 {summary.get('transaction_count', 0)} 笔记录，"
+                f"净支出 ¥{summary.get('net_amount', '0.00')}。"
+            )
+            artifact = legacy
+        artifact_type = artifact.get("type")
+        mime_type = artifact.get("mime_type")
+        reference = artifact.get("download_ref")
+        kind = artifact.get("download_kind")
+        if artifact_type not in {"image", "file"} or mime_type not in ARTIFACT_MIME_TYPES:
+            raise ToolProxyError("artifact_metadata_invalid", "Renovation Hub artifact 类型无效")
+        if artifact_type == "image" and (mime_type != "image/png" or kind != "chart" or not isinstance(reference, str) or not CHART_REF_RE.fullmatch(reference)):
+            raise ToolProxyError("artifact_reference_invalid", "Renovation Hub 图片 artifact 引用无效")
+        if artifact_type == "file" and (mime_type != "application/zip" or kind != "portable" or reference != "current"):
+            raise ToolProxyError("artifact_reference_invalid", "Renovation Hub 文件 artifact 引用无效")
         with self._context_lock:
             context = None if self._active_context is None else dict(self._active_context)
         if context is None or not context.get("job_id"):
-            raise ToolProxyError("tool_context_unavailable", "图表只能在活动 Controller 作业中生成")
+            raise ToolProxyError("tool_context_unavailable", "文件制品只能在活动 Controller 作业中生成")
         try:
+            endpoint = (
+                f"/internal/v1/downloads/chart/{quote(reference, safe='')}"
+                if kind == "chart"
+                else "/internal/v1/downloads/portable/current"
+            )
             response_meta, content = self.request_artifact(
                 "GET",
-                f"{self.ledger_base_url}/internal/v1/downloads/chart/{quote(reference, safe='')}",
+                f"{self.ledger_base_url}{endpoint}",
                 self.ledger_token,
                 min(self.store.max_artifact_bytes, MAX_JOB_ARTIFACT_BYTES),
             )
-            if response_meta.get("mime_type") != "image/png":
-                raise StoreError("artifact_content_type_invalid", "Hub 图表类型不是 PNG", status=502)
-            artifact = self.store.capture_chart_artifact(context["job_id"], chart, content)
+            if response_meta.get("mime_type") != mime_type:
+                raise StoreError("artifact_content_type_invalid", "Hub artifact MIME 不一致", status=502)
+            captured = self.store.capture_artifact(context["job_id"], artifact, content)
         except StoreError as exc:
             raise ToolProxyError(exc.code, str(exc)) from exc
-        safe_artifact = {key: value for key, value in artifact.items() if key != "fallback_path"}
+        safe_captured = {key: value for key, value in captured.items() if key != "fallback_path"}
         return {
             "delivery": "weixin_gateway_automatic",
-            "artifact": safe_artifact,
-            "summary": chart.get("summary"),
+            "artifact": safe_captured,
+            "summary": artifact.get("summary"),
+            "result_summary": artifact.get("result_summary"),
         }
 
     def _authorize_tool(self, name: str) -> ToolDefinition:
@@ -681,8 +715,19 @@ class ToolRouter:
         if context is None:
             raise ToolProxyError("tool_context_unavailable", "写工具只能在活动 Controller 作业中调用")
         canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        archive_scope = (
+            str(context.get("media_archive_idempotency_scope") or "")
+            if name == "renovation_media_ingest"
+            else ""
+        )
+        material = f"codex-controller-tool-v1\n{context['message_id']}\n{name}\n{canonical}"
+        if archive_scope:
+            material = (
+                f"codex-controller-tool-v1\n{context['message_id']}\n{name}\n"
+                f"{archive_scope}\n{canonical}"
+            )
         digest = hashlib.sha256(
-            f"codex-controller-tool-v1\n{context['message_id']}\n{name}\n{canonical}".encode("utf-8")
+            material.encode("utf-8")
         ).hexdigest()
         return f"sha256:{digest}"
 
@@ -826,18 +871,18 @@ def _request_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[d
     }, data
 
 
-def _request_hub_chart(method: str, url: str, token: str, max_bytes: int) -> tuple[dict[str, Any], bytes]:
+def _request_hub_artifact(method: str, url: str, token: str, max_bytes: int) -> tuple[dict[str, Any], bytes]:
     request = Request(
         url,
         method=method,
-        headers={"Authorization": f"Bearer {token}", "Accept": "image/png"},
+        headers={"Authorization": f"Bearer {token}", "Accept": "image/png, application/zip"},
     )
     try:
         with urlopen(request, timeout=30) as response:
             mime_type = response.headers.get_content_type()
             length_header = response.headers.get("Content-Length")
-            if mime_type != "image/png":
-                raise ToolProxyError("artifact_content_type_invalid", "Hub 图表类型不是 PNG")
+            if mime_type not in ARTIFACT_MIME_TYPES:
+                raise ToolProxyError("artifact_content_type_invalid", "Hub artifact MIME 不在白名单")
             if not length_header:
                 raise ToolProxyError("artifact_size_invalid", "Hub 图表缺少长度")
             try:
@@ -854,8 +899,10 @@ def _request_hub_chart(method: str, url: str, token: str, max_bytes: int) -> tup
         raise ToolProxyError("upstream_unavailable", "Renovation Hub 图表接口不可用") from exc
     if len(data) != declared_length or len(data) > max_bytes:
         raise ToolProxyError("artifact_size_invalid", "Hub 图表实际长度不一致")
-    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise ToolProxyError("artifact_content_invalid", "Hub 图表不是有效 PNG")
+    if mime_type == "image/png" and not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ToolProxyError("artifact_content_invalid", "Hub 图片 artifact 不是有效 PNG")
+    if mime_type == "application/zip" and not data.startswith(ZIP_MAGIC_PREFIXES):
+        raise ToolProxyError("artifact_content_invalid", "Hub 文件 artifact 不是有效 ZIP")
     return {"mime_type": mime_type, "size_bytes": len(data)}, data
 
 

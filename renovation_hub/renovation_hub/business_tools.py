@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
-from .ledger import LedgerError
+from .ledger import CLASSIFICATION_KINDS, LedgerError
 from .portable import MAX_GROUPED_TAG_LENGTH, MAX_GROUPED_TAGS, TAG_DIMENSIONS
 
 
@@ -198,8 +198,11 @@ _PAYMENT_V2_ALLOWED_FIELDS = {
     "project_id",
     "stage_id",
     "area_id",
+    "category",
+    "subcategory",
+    "expense_type",
 }
-_PAYMENT_V2_REQUIRED_FIELDS = {"amount_cents", "occurred_on", "grouped_tags"}
+_PAYMENT_V2_REQUIRED_FIELDS = {"amount_cents", "occurred_on", "grouped_tags", "project_id"}
 
 
 def _ledger_add_payment_v2(
@@ -232,6 +235,80 @@ def _ledger_show(store: Any, _media: Any | None, arguments: dict[str, Any], _act
 def _ledger_verify_export(store: Any, _media: Any | None, _arguments: dict[str, Any], _actor_hash: str) -> dict[str, Any]:
     path = store.share_dir / "current" / "kanhuwan-renovation-ledger.zip"
     return store.verify_portable(path)
+
+
+def _artifact_document(
+    *,
+    artifact_type: str,
+    filename: str,
+    mime_type: str,
+    size_bytes: int,
+    sha256: str,
+    download_kind: str,
+    download_ref: str,
+    width: int | None = None,
+    height: int | None = None,
+    summary: dict[str, Any] | None = None,
+    result_summary: str,
+) -> dict[str, Any]:
+    """Return the only model-facing representation of a generated file."""
+
+    if artifact_type not in {"image", "file"}:
+        raise LedgerError("artifact_invalid", "制品类型无效", status=500)
+    if not filename or Path(filename).name != filename:
+        raise LedgerError("artifact_invalid", "制品文件名无效", status=500)
+    digest = sha256.removeprefix("sha256:")
+    if len(digest) != 64:
+        raise LedgerError("artifact_invalid", "制品摘要无效", status=500)
+    return {
+        "type": artifact_type,
+        "filename": filename,
+        "mime_type": mime_type,
+        "size_bytes": int(size_bytes),
+        "sha256": f"sha256:{digest}",
+        "width": width,
+        "height": height,
+        "download_kind": download_kind,
+        "download_ref": download_ref,
+        "summary": summary or {},
+        "result_summary": result_summary,
+    }
+
+
+def _ledger_generate_chart(store: Any, _media: Any | None, arguments: dict[str, Any], _actor_hash: str) -> dict[str, Any]:
+    chart = store.generate_chart(arguments)
+    return _artifact_document(
+        artifact_type="image",
+        filename=str(chart["download_ref"]),
+        mime_type="image/png",
+        size_bytes=int(chart["size_bytes"]),
+        sha256=str(chart["sha256"]),
+        download_kind="chart",
+        download_ref=str(chart["download_ref"]),
+        width=int(chart["width"]),
+        height=int(chart["height"]),
+        summary=dict(chart.get("summary") or {}),
+        result_summary=(
+            f"已生成装修账单统计图：共 {chart['summary']['transaction_count']} 笔记录，"
+            f"净支出 ¥{chart['summary']['net_amount']}。"
+        ),
+    )
+
+
+def _ledger_export(store: Any, _media: Any | None, _arguments: dict[str, Any], _actor_hash: str) -> dict[str, Any]:
+    exported = store.export_portable()
+    path = Path(str(exported["path"]))
+    return _artifact_document(
+        artifact_type="file",
+        filename=path.name,
+        mime_type="application/zip",
+        size_bytes=int(exported["size_bytes"]),
+        sha256=str(exported["sha256"]),
+        download_kind="portable",
+        download_ref="current",
+        summary={"format_version": int(exported.get("format_version", 1))},
+        result_summary=f"已生成装修账本文件：{path.name}。",
+    )
 
 
 def _ledger_import(store: Any, arguments: dict[str, Any], *, shadow: bool) -> dict[str, Any]:
@@ -317,6 +394,9 @@ LEDGER_FILTERS = {
     "type": _enum("payment", "refund"),
     "status": _enum("active", "voided"),
     "main_category": _string(80, minimum=1),
+    "category": _string(64, minimum=1),
+    "subcategory": _string(64, minimum=1),
+    "expense_type": _string(64, minimum=1),
     "start": DATE,
     "end": DATE,
     "keyword": _string(100, minimum=1),
@@ -373,6 +453,9 @@ MUTATION_PATCH = _object(
         "amount_cents": _integer(1, 100_000_000_000),
         "occurred_on": DATE,
         "main_category": _string(80, minimum=1),
+        "category": _string(64, minimum=1),
+        "subcategory": _string(64, minimum=1),
+        "expense_type": _string(64, minimum=1),
         "merchant": _string(200),
         "note": _string(2000),
         "is_deposit": {"type": "boolean"},
@@ -381,8 +464,119 @@ MUTATION_PATCH = _object(
     }
 )
 
+MUTATION_SELECTOR = _object(
+    {
+        "transaction_ids": {"type": "array", "items": ID, "minItems": 1, "maxItems": 1000, "uniqueItems": True},
+        "project_id": ID,
+        "stage_id": ID,
+        "area_id": ID,
+        "start": DATE,
+        "end": DATE,
+        "main_category": _string(80, minimum=1),
+        "category": _string(64, minimum=1),
+        "subcategory": _string(64, minimum=1),
+        "expense_type": _string(64, minimum=1),
+        "legacy_main_category": _string(80, minimum=1),
+        "status": _enum("active"),
+    }
+)
+
 
 BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
+    _tool(
+        "ledger_classification_catalog",
+        "查询账目分类配置",
+        "读取稳定 code、标签和父子关系；历史账目不会因为读取配置而自动分类。",
+        risk_type="read",
+        input_schema=_object(
+            {
+                "kind": _enum(*sorted(CLASSIFICATION_KINDS)),
+                "include_inactive": {"type": "boolean"},
+            }
+        ),
+        business_actions=("ledger.classification.catalog",),
+        handler=_store_call("classification_catalog"),
+    ),
+    _tool(
+        "ledger_classification_upsert",
+        "维护账目分类配置",
+        "以稳定 code 配置大类、子类或支出类型；已使用的 code 不允许改变 kind。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "idempotency_key": _string(256, minimum=16),
+                "code": _string(64, minimum=2),
+                "kind": _enum(*sorted(CLASSIFICATION_KINDS)),
+                "parent_code": _string(64),
+                "label": _string(120, minimum=1),
+                "active": {"type": "boolean"},
+                "position": _integer(0, 10000),
+                "reason": _string(500, minimum=1),
+            },
+            required=("idempotency_key", "code", "kind", "label", "reason"),
+        ),
+        business_actions=("ledger.classification.upsert",),
+        handler=_store_call("upsert_classification"),
+    ),
+    _tool(
+        "ledger_payment_plan_create",
+        "创建付款计划",
+        "为项目创建一份付款计划；已付、剩余和状态由账本关联付款及退款派生。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "idempotency_key": _string(256, minimum=16),
+                "project_id": ID,
+                "name": _string(120, minimum=1),
+                "total_amount_cents": _integer(1, 100_000_000_000),
+                "payment_nodes": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": _object({"name": _string(120, minimum=1), "amount_cents": _integer(1, 100_000_000_000), "due_on": DATE, "position": _integer(0, 10000)}, required=("name", "amount_cents")),
+                },
+            },
+            required=("idempotency_key", "project_id", "name", "total_amount_cents"),
+        ),
+        business_actions=("ledger.payment_plan.create",),
+        handler=_store_call("create_payment_plan"),
+    ),
+    _tool(
+        "ledger_payment_plan_list",
+        "查询付款计划",
+        "查询项目付款计划及其由 Ledger 派生的已付、剩余和状态。",
+        risk_type="read",
+        input_schema=_object({"project_id": ID}),
+        business_actions=("ledger.payment_plan.list",),
+        handler=lambda store, _media, arguments, _actor: {"items": store.list_payment_plans(arguments)},
+    ),
+    _tool(
+        "ledger_payment_plan_show",
+        "查看付款计划",
+        "查看付款计划节点、分配和派生金额。",
+        risk_type="read",
+        input_schema=_object({"payment_plan_id": ID}, required=("payment_plan_id",)),
+        business_actions=("ledger.payment_plan.show",),
+        handler=lambda store, _media, arguments, _actor: store.show_payment_plan(str(arguments.get("payment_plan_id") or "")),
+    ),
+    _tool(
+        "ledger_payment_plan_allocate",
+        "关联付款计划",
+        "把已归属同一项目的既有付款分配到一个付款节点，金额和退款由 Ledger 派生。",
+        risk_type="write",
+        input_schema=_object(
+            {
+                "idempotency_key": _string(256, minimum=16),
+                "payment_plan_id": ID,
+                "payment_node_id": ID,
+                "transaction_id": ID,
+                "amount_cents": _integer(1, 100_000_000_000),
+                "reason": _string(500, minimum=1),
+            },
+            required=("idempotency_key", "payment_plan_id", "payment_node_id", "transaction_id", "amount_cents", "reason"),
+        ),
+        business_actions=("ledger.payment_plan.allocate",),
+        handler=_store_call("allocate_payment_plan"),
+    ),
     _tool(
         "ledger_add_payment",
         "新增装修付款",
@@ -400,8 +594,11 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
                 "project_id": ID,
                 "stage_id": ID,
                 "area_id": ID,
+                "category": _string(64, minimum=1),
+                "subcategory": _string(64, minimum=1),
+                "expense_type": _string(64, minimum=1),
             },
-            required=("amount_cents", "occurred_on", "grouped_tags"),
+            required=("amount_cents", "occurred_on", "grouped_tags", "project_id"),
         ),
         business_actions=("ledger.transaction.create",),
         handler=_ledger_add_payment_v2,
@@ -441,6 +638,9 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
                         "amount_cents": _integer(1, 100_000_000_000),
                         "occurred_on": DATE,
                         "main_category": _string(80, minimum=1),
+                        "category": _string(64, minimum=1),
+                        "subcategory": _string(64, minimum=1),
+                        "expense_type": _string(64, minimum=1),
                         "merchant": _string(200),
                         "note": _string(2000),
                         "is_deposit": {"type": "boolean"},
@@ -468,15 +668,16 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
                     "type": "array",
                     "items": ID,
                     "minItems": 1,
-                    "maxItems": 100,
+                    "maxItems": 1000,
                     "uniqueItems": True,
                 },
+                "selector": MUTATION_SELECTOR,
                 "patch": MUTATION_PATCH,
                 "reason": _string(500, minimum=1),
                 "preview_digest": _string(71, minimum=71),
                 "confirmed": {"type": "boolean"},
             },
-            required=("mode", "target_type", "target_ids", "patch", "reason"),
+            required=("mode", "target_type", "patch", "reason"),
         ),
         business_actions=("mutation.apply",),
         handler=_store_call("mutate"),
@@ -545,7 +746,7 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
         risk_type="write",
         input_schema=_object(LEDGER_FILTERS),
         business_actions=("ledger.chart.generate",),
-        handler=_store_call("generate_chart"),
+        handler=_ledger_generate_chart,
         requires_job_context=False,
         idempotent_write=False,
     ),
@@ -556,7 +757,7 @@ BUSINESS_TOOL_REGISTRY: tuple[BusinessToolDefinition, ...] = (
         risk_type="write",
         input_schema=_object(),
         business_actions=("ledger.portable.export",),
-        handler=lambda store, _media, _arguments, _actor: store.export_portable(),
+        handler=_ledger_export,
         requires_job_context=False,
         idempotent_write=False,
     ),

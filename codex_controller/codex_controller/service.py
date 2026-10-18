@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from .app_server import AppServerClient, AppServerError
-from .media_input import MediaInputError, TurnMediaManager
+from .media_input import MediaInputError, TurnMediaManager, text_with_media_archive_context
 from .runner_service import RunnerManagerService
 from .store import ControllerStore, StoreError
 
@@ -24,10 +24,24 @@ MEDIA_ARCHIVE_MEDIA_ACTION_RE = re.compile(
 MEDIA_ARCHIVE_NEGATION_RE = re.compile(r"(?:不要|别|无需|不用|不需要).{0,12}(?:归档|存档|保存|添加|加入|关联|记录)")
 
 
-def has_explicit_media_archive_intent(text: str, attachments: list[dict[str, Any]] | None = None) -> bool:
+def has_explicit_media_archive_intent(
+    text: str,
+    attachments: list[dict[str, Any]] | None = None,
+    media_archive_context: dict[str, Any] | None = None,
+) -> bool:
     """Allow media writes only for an explicit positive renovation-archive request."""
 
-    if not isinstance(text, str) or not text.strip() or not attachments:
+    if not attachments:
+        return False
+    if (
+        isinstance(media_archive_context, dict)
+        and media_archive_context.get("version") == 1
+        and media_archive_context.get("status") == "authorized"
+        and media_archive_context.get("authorized") is True
+        and isinstance(media_archive_context.get("idempotency_scope"), str)
+    ):
+        return True
+    if not isinstance(text, str) or not text.strip():
         return False
     normalized = re.sub(r"\s+", "", text)
     if MEDIA_ARCHIVE_NEGATION_RE.search(normalized):
@@ -210,7 +224,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.4.0",
+            "version": "0.4.2",
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
             "api_key_configured": bool(self._api_key),
@@ -331,8 +345,11 @@ class ControllerService:
         try:
             payload = job["input"]
             capability_profile = payload.get("capability_profile", "owner_legacy")
+            media_archive_context = payload.get("media_archive_context")
             media_archive_authorized = has_explicit_media_archive_intent(
-                payload.get("text", ""), payload.get("attachments")
+                payload.get("text", ""),
+                payload.get("attachments"),
+                media_archive_context,
             )
             effective_tools = (
                 self.tool_context.available_tools(
@@ -367,6 +384,11 @@ class ControllerService:
                     payload["message_id"],
                     capability_profile,
                     media_archive_authorized=media_archive_authorized,
+                    media_archive_idempotency_scope=(
+                        media_archive_context.get("idempotency_scope")
+                        if isinstance(media_archive_context, dict) and media_archive_authorized
+                        else None
+                    ),
                 )
             thread_id = self.store.conversation_thread(job["conversation_key"])
             if thread_id is None:
@@ -380,9 +402,13 @@ class ControllerService:
             input_items = None
             if self.turn_media is not None:
                 input_items = self.turn_media.prepare(job["job_id"], payload)
+            turn_text = text_with_media_archive_context(
+                payload["text"],
+                media_archive_context,
+            )
             turn_id = self.app_server.start_turn(
                 thread_id,
-                payload["text"],
+                turn_text,
                 job["message_id"],
                 input_items=input_items,
             )

@@ -137,8 +137,15 @@ class ControllerClient:
             raise StoreError("artifact_invalid", "Controller artifact job_id 无效", status=502)
         if not isinstance(artifact_id, str) or not re.fullmatch(r"AR-[A-Z2-7]{26}", artifact_id):
             raise StoreError("artifact_invalid", "Controller artifact_id 无效", status=502)
-        if artifact.get("type") != "image" or artifact.get("mime_type") != "image/png":
+        artifact_type = artifact.get("type")
+        mime_type = artifact.get("mime_type")
+        filename = artifact.get("filename") or ("artifact.png" if mime_type == "image/png" else "artifact.zip")
+        if artifact_type not in {"image", "file"} or mime_type not in {"image/png", "application/zip"}:
             raise StoreError("artifact_invalid", "Controller artifact 类型无效", status=502)
+        if artifact_type == "image" and mime_type != "image/png":
+            raise StoreError("artifact_invalid", "图片 artifact 类型无效", status=502)
+        if not isinstance(filename, str) or not filename or len(filename) > 255 or Path(filename).name != filename:
+            raise StoreError("artifact_invalid", "Controller artifact 文件名无效", status=502)
         if (
             isinstance(expected_size, bool)
             or not isinstance(expected_size, int)
@@ -155,7 +162,7 @@ class ControllerClient:
         try:
             async with self.session.get(
                 f"{self.base_url}/internal/v1/jobs/{job_id}/artifacts/{artifact_id}",
-                headers={"Authorization": f"Bearer {self.token}", "Accept": "image/png"},
+                headers={"Authorization": f"Bearer {self.token}", "Accept": str(mime_type)},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status < 200 or response.status >= 300:
@@ -163,7 +170,7 @@ class ControllerClient:
                     raise StoreError("artifact_unavailable", "Controller artifact 暂不可用", status=response.status)
                 length_header = response.headers.get("Content-Length")
                 digest_header = response.headers.get("X-Content-SHA256")
-                if response.content_type != "image/png" or not length_header:
+                if response.content_type != mime_type or not length_header:
                     raise StoreError("artifact_invalid", "Controller artifact 响应头无效", status=502)
                 try:
                     declared_size = int(length_header)
@@ -1333,6 +1340,8 @@ class GatewayService:
                                 "attachments": message["attachments"],
                                 "reply_capabilities": ["text", "image", "file"],
                             }
+                            if message.get("media_archive_context"):
+                                payload["media_archive_context"] = message["media_archive_context"]
                             stored_profile = str(message.get("capability_profile") or "owner_legacy")
                             try:
                                 incompatible = False
@@ -1640,9 +1649,9 @@ class GatewayService:
             )
             return exc.code
         prefix = (
-            "图片发送状态暂无法确认，可在 24 小时内下载："
+            "文件发送状态暂无法确认，可在 24 小时内下载："
             if state.get("error_code") == "delivery_state_unknown"
-            else "图片发送失败，可在 24 小时内下载："
+            else "文件发送失败，可在 24 小时内下载："
         )
         context = self.identity_store.context(runtime.identity, message["sender_id"])
         response = await runtime.client.send_text(
@@ -2450,7 +2459,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.0",
+            "version": "0.4.2",
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,
             "poller_override": poller_control["override"],

@@ -107,8 +107,14 @@ def create_app(
         ("GET", "/api/v1/dashboard", dashboard, "dashboard.read"),
         ("GET", "/api/v1/ledger", ledger, "ledger.collection.list"),
         ("GET", "/api/v1/ledger/transactions", ledger, "ledger.transaction.list"),
+        ("GET", "/api/v1/ledger/catalog", ledger_catalog, "ledger.classification.catalog"),
+        ("GET", "/api/v1/payment-plans", payment_plans, "ledger.payment_plan.list"),
+        ("POST", "/api/v1/payment-plans", payment_plan_create, "ledger.payment_plan.create"),
+        ("GET", "/api/v1/payment-plans/{payment_plan_id}", payment_plan_show, "ledger.payment_plan.show"),
+        ("POST", "/api/v1/payment-plans/{payment_plan_id}/allocations", payment_plan_allocate, "ledger.payment_plan.allocate"),
         ("POST", "/api/v1/ledger/transactions", ledger_create, "ledger.transaction.create"),
         ("PATCH", "/api/v1/ledger/transactions/{transaction_id}", ledger_update, "ledger.transaction.update"),
+        ("POST", "/api/v1/ledger/bulk-update", ledger_bulk_update, "mutation.apply"),
         ("POST", "/api/v1/ledger/refunds", ledger_refund, "ledger.refund.create"),
         ("POST", "/api/v1/ledger/transactions/{transaction_id}/undo", ledger_undo, "ledger.transaction.undo"),
         ("GET", "/api/v1/reports/summary", report_summary, "ledger.report.summary"),
@@ -135,6 +141,7 @@ def create_app(
     app.router.add_post("/internal/v1/admin/cutover/activate", cutover_activate)
     app.router.add_post("/internal/v1/admin/cutover/suspend", cutover_suspend)
     app.router.add_get("/internal/v1/downloads/chart/{reference}", chart_download)
+    app.router.add_get("/internal/v1/downloads/portable/current", portable_download)
     app.router.add_get("/internal/v1/media/replay", media_replay)
     app.router.add_post("/internal/v1/media/ingest", media_ingest)
     app.router.add_get("/{tail:.*}", spa)
@@ -335,6 +342,31 @@ async def ledger(request: web.Request) -> web.Response:
     return _result({"items": _store(request).query(query), "summary": _store(request).summary(query)})
 
 
+async def ledger_catalog(request: web.Request) -> web.Response:
+    query = _query(request)
+    if "include_inactive" in query:
+        query["include_inactive"] = query["include_inactive"].lower() in {"1", "true", "yes"}
+    return _result(_store(request).classification_catalog(query))
+
+
+async def payment_plans(request: web.Request) -> web.Response:
+    return _result({"items": _store(request).list_payment_plans(_query(request))})
+
+
+async def payment_plan_create(request: web.Request) -> web.Response:
+    return _result(_store(request).create_payment_plan(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
+
+
+async def payment_plan_show(request: web.Request) -> web.Response:
+    return _result(_store(request).show_payment_plan(request.match_info["payment_plan_id"]))
+
+
+async def payment_plan_allocate(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    payload["payment_plan_id"] = request.match_info["payment_plan_id"]
+    return _result(_store(request).allocate_payment_plan(payload, actor_hash=PAGE_ACTOR))
+
+
 async def ledger_create(request: web.Request) -> web.Response:
     return _result(_store(request).add_payment(await _page_json(request), actor_hash=PAGE_ACTOR), status=201)
 
@@ -343,6 +375,11 @@ async def ledger_update(request: web.Request) -> web.Response:
     payload = await _page_json(request)
     payload["payment_id"] = request.match_info["transaction_id"]
     return _result(_store(request).correct_payment(payload, actor_hash=PAGE_ACTOR))
+
+
+async def ledger_bulk_update(request: web.Request) -> web.Response:
+    payload = await _page_json(request)
+    return _result(_store(request).mutate(payload, actor_hash=PAGE_ACTOR))
 
 
 async def ledger_refund(request: web.Request) -> web.Response:
@@ -463,6 +500,21 @@ async def chart_download(request: web.Request) -> web.StreamResponse:
             status=404,
         )
     return web.FileResponse(target, headers={"Content-Type": "image/png"})
+
+
+async def portable_download(request: web.Request) -> web.StreamResponse:
+    """Serve only the current authenticated portable export to Controller."""
+
+    _authorized(request)
+    target = (_store(request).share_dir / "current" / "kanhuwan-renovation-ledger.zip").resolve()
+    root = (_store(request).share_dir / "current").resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise web.HTTPNotFound()
+    if not target.is_file() or target.is_symlink():
+        raise web.HTTPNotFound()
+    return web.FileResponse(target, headers={"Content-Type": "application/zip"})
 
 
 async def mcp_manifest(request: web.Request) -> web.Response:

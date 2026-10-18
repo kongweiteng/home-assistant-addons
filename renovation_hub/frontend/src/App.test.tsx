@@ -129,6 +129,8 @@ function installFetch(writable: boolean, transactions: Transaction[] = []) {
     if (url.includes("api/v1/stages")) return response({ items: [stage] });
     if (url.includes("api/v1/areas")) return response({ items: [] });
     if (url.includes("api/v1/timeline")) return response({ items: [] });
+    if (url.includes("api/v1/ledger/catalog")) return response({ items: [{ code: "water", kind: "category", parent_code: null, label: "水电", active: true, position: 1 }, { code: "paint", kind: "subcategory", parent_code: "water", label: "油漆", active: true, position: 1 }, { code: "material", kind: "expense_type", parent_code: null, label: "材料", active: true, position: 1 }] });
+    if (url.includes("api/v1/payment-plans")) return response({ items: [] });
     if (url.includes("api/v1/ledger")) return response({ items: transactions, summary: { currency: "CNY", net_amount_cents: 1416900, net_amount: "14169.00", category_totals: {}, tag_totals: {}, transaction_count: transactions.length } });
     if (url.includes("api/v1/media")) return response({ items: [] });
     throw new Error(`Unexpected request: ${url}`);

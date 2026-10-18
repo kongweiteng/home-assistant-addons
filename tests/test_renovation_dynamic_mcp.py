@@ -52,7 +52,7 @@ class BusinessManifestTests(unittest.TestCase):
         self.assertEqual(manifest["service"], "renovation_hub")
         self.assertEqual(manifest["scope"], "business")
         self.assertGreater(manifest["catalog_revision"], 0)
-        self.assertEqual(len(manifest["tools"]), 31)
+        self.assertEqual(len(manifest["tools"]), 37)
         names = [tool["name"] for tool in manifest["tools"]]
         self.assertEqual(names, sorted(names))
         self.assertEqual(
@@ -119,7 +119,7 @@ class BusinessManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             set(payment_schema["required"]),
-            {"amount_cents", "occurred_on", "grouped_tags"},
+            {"amount_cents", "occurred_on", "grouped_tags", "project_id"},
         )
         self.assertEqual(
             set(payment_schema["properties"]),
@@ -134,12 +134,14 @@ class BusinessManifestTests(unittest.TestCase):
                 "project_id",
                 "stage_id",
                 "area_id",
+                "category",
+                "subcategory",
+                "expense_type",
             },
         )
         for legacy in (
             "amount",
             "date",
-            "category",
             "description",
             "main_category",
             "tags",
@@ -158,7 +160,7 @@ class BusinessManifestTests(unittest.TestCase):
             self.assertEqual(values["items"]["maxLength"], MAX_GROUPED_TAG_LENGTH)
 
     def test_registry_rejects_namespace_schema_and_duplicate_drift(self) -> None:
-        first = BUSINESS_TOOL_REGISTRY[0]
+        first = next(item for item in BUSINESS_TOOL_REGISTRY if item.risk_type == "write")
         with self.assertRaisesRegex(ValueError, "invalid business namespace"):
             validate_business_tool_registry((replace(first, name="ha_operations_attack"),))
         with self.assertRaisesRegex(ValueError, "input schema must reject"):
@@ -483,7 +485,7 @@ class BusinessDispatchTests(unittest.TestCase):
                     "occurred_on": "2026-08-05",
                     "grouped_tags": {"自定义维度": ["主材"]},
                 },
-                "invalid_tags",
+                "invalid_input",
             ),
         )
         for arguments, expected_code in invalid_cases:

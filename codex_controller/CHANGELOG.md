@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.4.2
+
+- `job_artifacts` 从 PNG-only additive 迁移为 image/file 模型，旧图片记录自动补齐文件名并保持可读。
+- Hub `ledger_export` 现在通过统一 artifact DTO 下载并固化 ZIP；Controller 校验 MIME、ZIP 签名、长度和 SHA-256，模型只看到安全 artifact 元数据。
+- 本版本只完成本地源码与测试，不部署、不重启、不发送真实微信消息。
+
+## 0.4.1
+
+- 新增严格校验的 `media_archive_context@1` 作业字段：Controller 重算归档指令、来源消息与附件摘要，只在 Gateway 授权上下文完整一致时开放媒体归档工具并把历史指令加入受控提示。
+- 跨消息媒体幂等 scope 绑定指令消息、图片消息和附件摘要，再叠加工具参数；没有该 scope 的旧同消息归档保持原 `codex-controller-tool-v1` 幂等公式，避免升级改变既有写入键。
+- job 字段与处理逻辑均为 additive；Runner Center、Relay、普通 Thread/MCP、Operations 和 Remote Work 路由不变。本候选不执行真实归档、HAOS 升级、微信验收或生产部署。
+
 ## 0.4.0
 
 - Runner Center 新增摘要固定的 Runner `0.2.0` installer manifest：固定 Codex `0.146.0`、Python `3.11.13` 和四个平台资产，HTTPS/WSS、DNS、公网地址、版本、字段和 SHA-256 任一不满足即 fail closed。

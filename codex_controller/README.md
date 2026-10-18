@@ -39,6 +39,8 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - `0.2.3` 的 bootstrap 付款目录与 Hub canonical v2 契约一致；Hub 返回白名单内、有界且结构化的校验错误时保留 `invalid_input` / `invalid_tags` 等可纠正语义，非 JSON、超长或未知错误仍统一脱敏。
 - `0.2.4` 将普通附件与装修档案意图分离：图片、视频和文件默认只用于识别，只有明确请求保存到装修/施工/工地档案时才暴露并允许媒体归档工具；媒体从 Gateway 非消费流式读取，Hub 成功后才 ACK 消费。
 - `0.4.0` 保持 Runner Center v2 管理面默认开启，并增加独立 Relay adapter、Relay enrollment/auth/event 内部接口和摘要固定的 Runner `0.2.0` 安装制品目录。Runner 调度仍是确定性控制面，不经过 Codex app-server。
+- `0.4.1` 接受 Gateway 校验后的 `media_archive_context@1`，支持图片与明确归档指令分开发送。Controller 会复核指令消息、来源图片消息、附件摘要和幂等作用域，只在上下文授权且摘要一致时开放 `renovation_media_ingest`；旧同消息归档继续使用原幂等键公式。
+- `0.4.2` 将 Hub 导出统一纳入 `file` artifact：兼容旧 PNG-only `job_artifacts` 表迁移，新增 ZIP 签名/长度/摘要校验，completed job 只返回安全文件 DTO，不暴露 Hub 路径。
 - 页面只在 HTTPS manifest、固定 SHA-256 和公开 WSS URL 全部校验成功后允许创建 Runner；创建结果是可一键复制的完整安装命令，不再返回分散的 `runner_id + enrollment token`。命令 15 分钟后自动禁用复制，支持撤销和重新生成，列表持续显示 pending/claimed/expired/revoked enrollment 状态。
 - Relay 内部 URL 和两个最小权限 token 未配置时继续显示 `relay_configured=false`，等待任务不会被伪发布；`runner_relay_api_token` 只用于 Controller -> Relay 发布，`runner_relay_controller_api_token` 只用于 Relay -> Controller 回调，三项必须同时配置且 token 不得相同，否则拒绝启动。installer 未配置或摘要不匹配时仅关闭“生成安装命令”，既有 Runner Registry、列表和管理操作仍可使用。需要整体降级时可显式设置 `runner_center_v2_enabled=false`，普通微信、Controller Thread、MCP、装修账本、Operations 和 Remote Work v1 行为不变。
 - 本源码候选不代表已经创建公网 WSS/NPM/DNS 路由、安装真实 Runner、升级 HAOS 或启用微信 v2；这些外部动作必须单独发布和验收。
@@ -57,7 +59,7 @@ Codex Controller 是一个基于 OpenAI 官方 `codex app-server` 的 Home Assis
 - app-server Thread 使用只读 sandbox 和 `approvalPolicy=never`；正式 HA 变更只能经 Broker。
 - 当前动态发布的内部 MCP 工具逐个使用 `approve`，因此微信路径不依赖 Codex UI 审批；这不是权限放宽。manifest 校验、`member_read_only` 固定 allowlist、逐工具策略、当前作业/Turn、稳定幂等键、Hub 单 writer 以及 Broker 的提案、Passkey、一次性收据、allowlist 和 execution gate 继续在服务端强制。
 - Controller 重启后，状态不确定的运行中作业进入 `recovery_required`，不会自动重放写操作。
-- 写工具只在当前活动 Turn 的上下文中可调用；Turn 结束后上下文立即清除，同一微信消息的同语义调用复用相同幂等键，不同消息生成不同幂等键。
+- 写工具只在当前活动 Turn 的上下文中可调用；Turn 结束后上下文立即清除。同消息归档保持历史幂等键公式；跨消息归档额外绑定归档指令、来源图片消息和附件摘要，避免不同图片批次共享写入键。
 
 ## 本地验证
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -28,7 +29,7 @@ from codex_controller.main import (
     write_codex_config,
 )
 from codex_controller.mcp_proxy import socket_call, tool_catalog
-from codex_controller.media_input import TurnMediaManager
+from codex_controller.media_input import TurnMediaManager, text_with_media_archive_context
 from codex_controller.service import (
     ControllerService,
     NEW_THREAD_RESULT,
@@ -201,6 +202,60 @@ class ControllerStoreTests(unittest.TestCase):
             self.store.create_job(fixture_job(text="不同内容"))
         self.assertEqual(context.exception.code, "idempotency_conflict")
 
+    def test_cross_message_media_archive_context_is_strictly_validated_and_persisted(self) -> None:
+        attachment = {
+            "attachment_ref": "a" * 43,
+            "media_type": "image",
+            "size_bytes": 7,
+            "sha256": "sha256:" + "b" * 64,
+        }
+        source_attachments = [{"message_id": "source-image-1", "sha256": attachment["sha256"]}]
+        canonical = json.dumps(
+            {"intent_message_id": "archive-command", "source_attachments": source_attachments},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        media_context = {
+            "version": 1,
+            "source": "image_first",
+            "status": "authorized",
+            "authorized": True,
+            "intent_message_id": "archive-command",
+            "intent_text": "刚才这张图片归档",
+            "expected_count": 1,
+            "selected_count": 1,
+            "source_attachments": source_attachments,
+            "idempotency_scope": "sha256:"
+            + hashlib.sha256(f"weixin-media-archive-v1\n{canonical}".encode("utf-8")).hexdigest(),
+        }
+        payload = fixture_job("archive-command", text="刚才这张图片归档")
+        payload["attachments"] = [attachment]
+        payload["media_archive_context"] = media_context
+
+        created = self.store.create_job(payload)
+        claimed = self.store.claim_next()
+        assert claimed is not None
+        self.assertEqual(claimed["input"]["media_archive_context"], media_context)
+        self.store.fail_claimed(created["job_id"], "fixture_done", uncertain=False)
+
+        tampered = fixture_job("archive-command-tampered", text="刚才这张图片归档")
+        tampered["attachments"] = [attachment]
+        tampered["media_archive_context"] = {
+            **media_context,
+            "idempotency_scope": "sha256:" + "0" * 64,
+        }
+        with self.assertRaises(StoreError) as error:
+            self.store.create_job(tampered)
+        self.assertEqual(error.exception.code, "invalid_job")
+
+        wrong_count = fixture_job("archive-command-wrong-count", text="刚才这张图片归档")
+        wrong_count["attachments"] = [attachment]
+        wrong_count["media_archive_context"] = {**media_context, "expected_count": 2}
+        with self.assertRaises(StoreError) as error:
+            self.store.create_job(wrong_count)
+        self.assertEqual(error.exception.code, "invalid_job")
+
     def test_only_one_job_can_be_running(self) -> None:
         self.store.create_job(fixture_job("fixture-message-1"))
         self.store.create_job(fixture_job("fixture-message-2"))
@@ -253,6 +308,130 @@ class ControllerStoreTests(unittest.TestCase):
         restarted = ControllerStore(self.root / "controller.sqlite3")
         self.assertEqual(restarted.get_public_job(running["job_id"])["artifacts"], public["artifacts"])
 
+    def test_legacy_png_artifact_table_is_migrated_without_losing_existing_artifact(self) -> None:
+        database = self.root / "legacy-controller.sqlite3"
+        artifact_dir = database.parent / "job-artifacts"
+        artifact_dir.mkdir(mode=0o700, exist_ok=True)
+        job_id = "11111111-1111-1111-1111-111111111111"
+        artifact_id = "AR-" + "M" * 26
+        storage_name = "legacy-chart.png"
+        content = b"\x89PNG\r\n\x1a\nlegacy-chart"
+        (artifact_dir / storage_name).write_bytes(content)
+        now = "2026-08-05T12:00:00+00:00"
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            PRAGMA foreign_keys=ON;
+            CREATE TABLE conversations (
+                conversation_key TEXT PRIMARY KEY,
+                thread_id TEXT UNIQUE,
+                display_name TEXT,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL UNIQUE,
+                conversation_key TEXT NOT NULL,
+                thread_id TEXT,
+                turn_id TEXT UNIQUE,
+                state TEXT NOT NULL,
+                input_digest TEXT NOT NULL,
+                input_json TEXT NOT NULL,
+                result_text TEXT,
+                result_summary TEXT,
+                error_code TEXT,
+                attempt INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY(conversation_key) REFERENCES conversations(conversation_key)
+            );
+            CREATE TABLE job_artifacts (
+                artifact_id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL CHECK(artifact_type IN ('image')),
+                mime_type TEXT NOT NULL CHECK(mime_type IN ('image/png')),
+                storage_name TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
+                sha256 TEXT NOT NULL,
+                width INTEGER NOT NULL CHECK(width > 0),
+                height INTEGER NOT NULL CHECK(height > 0),
+                summary_json TEXT NOT NULL,
+                download_token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(job_id,sha256),
+                FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+            );
+            CREATE TABLE controller_meta (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                display_secret BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        conversation_key = "sha256:" + "a" * 64
+        connection.execute(
+            "INSERT INTO conversations VALUES (?,?,?,?,?,?)",
+            (conversation_key, None, None, "active", now, now),
+        )
+        connection.execute(
+            "INSERT INTO jobs(job_id,message_id,conversation_key,state,input_digest,input_json,created_at) VALUES (?,?,?,?,?,?,?)",
+            (job_id, "legacy-artifact-message", conversation_key, "completed", "b" * 64, "{}", now),
+        )
+        secret = b"s" * 32
+        expires_at = "2099-01-01T00:00:00+00:00"
+        token = base64.urlsafe_b64encode(
+            hmac.new(
+                secret,
+                f"artifact-download\n{artifact_id}\n{expires_at}".encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode("ascii").rstrip("=")
+        connection.execute(
+            "INSERT INTO controller_meta VALUES (?,?,?)",
+            (1, secret, now),
+        )
+        connection.execute(
+            "INSERT INTO job_artifacts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                artifact_id,
+                job_id,
+                "image",
+                "image/png",
+                storage_name,
+                len(content),
+                hashlib.sha256(content).hexdigest(),
+                1280,
+                960,
+                json.dumps({"transaction_count": 1, "net_amount": "1.00"}),
+                hashlib.sha256(token.encode("ascii")).hexdigest(),
+                expires_at,
+                now,
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        store = ControllerStore(database)
+        with sqlite3.connect(database) as check_connection:
+            columns = {row[1] for row in check_connection.execute("PRAGMA table_info(job_artifacts)")}
+            tables = {
+                row[0]
+                for row in check_connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertIn("filename", columns)
+        self.assertNotIn("job_artifacts_legacy", tables)
+        public = store.get_public_job(job_id)
+        self.assertEqual(public["artifacts"][0]["filename"], "artifact.png")
+        metadata, loaded = store.read_job_artifact(job_id, artifact_id)
+        self.assertEqual(metadata["type"], "image")
+        self.assertEqual(loaded, content)
+
     def test_chart_artifact_rejects_invalid_reference_size_digest_and_quota(self) -> None:
         store = ControllerStore(
             self.root / "limited.sqlite3",
@@ -292,6 +471,30 @@ class ControllerStoreTests(unittest.TestCase):
                 oversized,
             )
         self.assertEqual(context.exception.code, "artifact_size_invalid")
+
+    def test_file_artifact_is_persisted_with_filename_and_zip_mime(self) -> None:
+        self.store.create_job(fixture_job("file-artifact"))
+        running = self.store.claim_next()
+        assert running is not None
+        content = b"PK\x03\x04fixture-ledger-export"
+        artifact = {
+            "type": "file",
+            "filename": "kanhuwan-renovation-ledger.zip",
+            "mime_type": "application/zip",
+            "size_bytes": len(content),
+            "sha256": f"sha256:{hashlib.sha256(content).hexdigest()}",
+            "width": None,
+            "height": None,
+            "summary": {"format_version": 2},
+            "result_summary": "已生成装修账本文件：kanhuwan-renovation-ledger.zip。",
+        }
+        captured = self.store.capture_artifact(running["job_id"], artifact, content)
+        self.assertEqual(captured["type"], "file")
+        self.assertEqual(captured["filename"], artifact["filename"])
+        self.assertEqual(captured["mime_type"], "application/zip")
+        loaded_meta, loaded = self.store.read_job_artifact(running["job_id"], captured["artifact_id"])
+        self.assertEqual(loaded, content)
+        self.assertEqual(loaded_meta["filename"], artifact["filename"])
 
     def test_chart_artifact_rejects_tampered_download_token_hash(self) -> None:
         self.store.create_job(fixture_job("artifact-token-tamper"))
@@ -1310,7 +1513,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.4.0"
+        expected = "0.4.2"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1640,6 +1843,42 @@ class ToolRouterTests(unittest.TestCase):
         self.assertFalse(has_explicit_media_archive_intent("把这张装修图片保存到相册", attachment))
         self.assertFalse(has_explicit_media_archive_intent("把这份施工文件保存一下", attachment))
         self.assertFalse(has_explicit_media_archive_intent("这不是装修图片，不要归档", attachment))
+        cross_message = {
+            "version": 1,
+            "source": "image_first",
+            "status": "authorized",
+            "authorized": True,
+            "idempotency_scope": "sha256:" + "c" * 64,
+        }
+        self.assertTrue(has_explicit_media_archive_intent("六张图片，全部归档", attachment, cross_message))
+        self.assertFalse(
+            has_explicit_media_archive_intent(
+                "六张图片，全部归档",
+                attachment,
+                {**cross_message, "authorized": False, "status": "attachment_count_mismatch"},
+            )
+        )
+
+    def test_cross_message_context_enriches_prompt_without_exposing_unselected_files(self) -> None:
+        media_context = {
+            "version": 1,
+            "source": "intent_first",
+            "status": "authorized",
+            "authorized": True,
+            "intent_message_id": "future-intent",
+            "intent_text": "接下来两张图片归档到水电施工档案",
+            "expected_count": 2,
+            "selected_count": 2,
+            "source_attachments": [
+                {"message_id": "image-1", "sha256": "sha256:" + "1" * 64},
+                {"message_id": "image-2", "sha256": "sha256:" + "2" * 64},
+            ],
+            "idempotency_scope": "sha256:" + "3" * 64,
+        }
+        prompt = text_with_media_archive_context("", media_context)
+        self.assertIn("接下来两张图片归档到水电施工档案", prompt)
+        self.assertIn("已严格关联 2 个附件", prompt)
+        self.assertNotIn("attachment_ref", prompt)
 
     def test_media_archive_tool_is_hidden_and_rejected_without_explicit_intent(self) -> None:
         router = ToolRouter(
@@ -2407,6 +2646,67 @@ class ToolRouterTests(unittest.TestCase):
         forwarded = observed[0][5]
         self.assertNotIn("attachment_ref", forwarded)
         self.assertNotIn("content_base64", forwarded)
+
+    def test_media_tool_idempotency_includes_gateway_archive_scope(self) -> None:
+        observed: list[dict] = []
+
+        def fake_stream(*args: object) -> dict:
+            observed.append(args[5])
+            return {"version": 1, "result": {"media": {"id": "fixture-media"}}}
+
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            gateway_base_url="http://weixin-gateway:8103",
+            gateway_token="g" * 32,
+            stream_media=fake_stream,
+        )
+        arguments = {"attachment_ref": "a" * 43, "project_id": "fixture-project"}
+        router.begin_job(
+            "fixture-scoped-job-1",
+            "fixture-scoped-message",
+            media_archive_authorized=True,
+            media_archive_idempotency_scope="sha256:" + "1" * 64,
+        )
+        router.call("renovation_media_ingest", arguments)
+        router.clear_job("fixture-scoped-job-1")
+        router.begin_job(
+            "fixture-scoped-job-2",
+            "fixture-scoped-message",
+            media_archive_authorized=True,
+            media_archive_idempotency_scope="sha256:" + "2" * 64,
+        )
+        router.call("renovation_media_ingest", arguments)
+        router.clear_job("fixture-scoped-job-2")
+
+        self.assertRegex(observed[0]["idempotency_key"], r"^sha256:[a-f0-9]{64}$")
+        self.assertNotEqual(observed[0]["idempotency_key"], observed[1]["idempotency_key"])
+
+    def test_media_tool_without_archive_scope_keeps_legacy_idempotency_key(self) -> None:
+        observed: list[dict] = []
+
+        def fake_stream(*args: object) -> dict:
+            observed.append(args[5])
+            return {"version": 1, "result": {"media": {"id": "fixture-media"}}}
+
+        router = ToolRouter(
+            ledger_base_url="http://renovation-hub:8101",
+            ledger_token="l" * 32,
+            gateway_base_url="http://weixin-gateway:8103",
+            gateway_token="g" * 32,
+            stream_media=fake_stream,
+        )
+        message_id = "fixture-legacy-media-message"
+        arguments = {"attachment_ref": "a" * 43, "project_id": "fixture-project"}
+        canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        expected = "sha256:" + hashlib.sha256(
+            f"codex-controller-tool-v1\n{message_id}\nrenovation_media_ingest\n{canonical}".encode("utf-8")
+        ).hexdigest()
+
+        router.begin_job("fixture-legacy-media-job", message_id)
+        router.call("renovation_media_ingest", arguments)
+
+        self.assertEqual(observed[0]["idempotency_key"], expected)
 
     def test_media_stream_failure_keeps_attachment_retryable_until_hub_success(self) -> None:
         content = b"retryable-media"

@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.2.9
+
+- 补齐历史账单项目、阶段、空间归属编辑与批量修改能力；预览摘要、确认、乐观版本、单 writer、幂等和审计保持在同一 Ledger 边界内。
+- 增加独立 `category`、`subcategory`、`expense_type` 字段和稳定 catalog，并增加付款计划及订金/尾款节点管理。
+- `ledger_export` 统一输出受控 ZIP artifact DTO；不再向模型或下游暴露 Hub 内部文件路径，Controller/Gateway 负责校验和微信原生文件投递。
+- 本版本只完成本地源码、合成测试和候选构建；不部署、不重启、不修改正式账本。
+
 ## 0.2.8
 
 - 新增 `renovation_mutate` 统一业务工具，支持项目、阶段、空间、时间线和付款的声明字段修改。

@@ -1,6 +1,6 @@
 # Codex Controller 使用说明
 
-当前版本：`0.4.0`。
+当前版本：`0.4.2`。
 
 ## 通用微信会话
 
@@ -16,6 +16,7 @@
 - `/new` 确认和内部作业状态会返回稳定 `TH-*` 短标识，便于排查旧 Thread；完整 Thread、Turn 和 conversation key 不进入页面 DTO。
 - Renovation Hub 工具已配置时，账本是否连接、当前支出、汇总和明细问题必须先调用 `renovation_dashboard`、`ledger_summary`、`ledger_query` 等只读工具；用户自然语言提出查询、查看、核验、汇总或明细请求，即授权本次无副作用只读调用，不需要 Passkey、写入确认或额外征求授权。不得仅凭历史回复声称“未连接”，也不得要求用户重新发送已有账目。
 - 对 owner，清晰的图表、导出、记账、退款、更正、撤销、导入检查和装修媒体/事件归档请求也视为本次匹配工具调用授权，不再询问“是否确认/授权”。只有缺少必填字段或语义确有多种合理解释时才澄清；讨论、假设、举例和方案比较不能推断为写入命令。收到图片、视频或文件本身不构成装修归档授权；只有文本明确包含装修/施工/工地档案目标和正向归档动作时，Controller 才向本轮 Codex 暴露媒体归档工具。
+- Gateway `0.4.1` 可以把图片与明确归档指令关联为 `media_archive_context@1`。Controller 会严格校验来源、状态、数量、指令消息、每个来源消息与附件 SHA-256，并重算幂等摘要；任一字段缺失、篡改或未授权都不会开放媒体写工具。经校验的历史指令只作为本轮受控提示，不会暴露未选中的附件。
 - app-server 启动时显式禁用 `goals`。普通微信 Turn 不得创建 Codex Goal，也不得承诺后台持续监控或稍后主动跟进；需要持续监控时应建立独立 automation/monitor 服务、生命周期和通知通道。
 - bootstrap `ledger_add_payment` 与 Hub manifest 一致，只发布 canonical v2 金额分、日期和九维 `grouped_tags`。Hub 的白名单结构化校验错误会在长度、JSON 形态、错误码和消息控制字符检查后保留；非结构化、超长、未知或敏感错误继续返回通用上游拒绝。
 
@@ -133,18 +134,21 @@ MCP 目录会按实际配置过滤：Renovation Hub 或 Operations Broker 的 UR
 
 当前 `localImage` 只接受 JPEG、PNG 和 WebP。其他附件仍以受控引用元数据进入 Turn，正文只允许由已配置的确定性工具读取；不把 bearer、内部 URL 或任意宿主路径交给模型。
 
-### 装修统计图 artifact
+### 装修 artifact
 
 - `ledger_generate_chart` 只能在活动 Controller 作业上下文中用于自动微信交付。Hub 返回后，Controller 只接受 `summary-<32 hex>.png` 固定引用，并从受认证 `/internal/v1/downloads/chart/<ref>` 读取。
 - Controller 同时核验 HTTP `image/png`、声明长度、20 MiB 上限、PNG 文件签名、Hub `size_bytes` 和 SHA-256。任一不一致都会让工具调用失败，不把未校验图片交给 Gateway。
-- 通过校验的图片原子写入 `/data/job-artifacts`，目录 `0700`、文件 `0600`；默认 TTL 24 小时、总配额 100 MiB、每作业最多 4 个。同一 job + SHA-256 幂等复用，过期与孤立文件自动清理。
+- 图片和账本导出 ZIP 都原子写入 `/data/job-artifacts`，目录 `0700`、文件 `0600`；默认 TTL 24 小时、总配额 100 MiB、每作业最多 4 个。同一 job + SHA-256 幂等复用，过期与孤立文件自动清理。旧 PNG-only 表在启动时 additive 迁移，既有图片不丢失。
 - completed job 新增 `result_summary` 和 `artifacts[]`。DTO 不含 Hub 引用、bearer 或 Controller 路径；Gateway 内部读取使用既有 Controller bearer，失败下载使用 `/downloads/artifacts/<opaque-token>`。
+- `image` artifact 必须是 PNG；`file` artifact 当前只允许 `application/zip`，Controller 与 Gateway 均校验 ZIP magic、声明长度和 SHA-256。
 - opaque token 由 Controller 私有 HMAC 密钥和 artifact/到期时间派生，SQLite 只保存 token SHA-256。该路径只应经 HA Ingress 暴露；不新增宿主端口、匿名对象存储或 NPM 路由。
 - 模型工具结果不含 `fallback_path`，developer instructions 明确禁止输出 `download_ref`、内部 URL、路径、Bearer 或 Base64。图片、摘要和失败链接的最终顺序由 Gateway 决定。
 
 `ledger_attach` 保留 Legacy Ledger v1 桥接：模型只能提交 Gateway 生成的 `attachment_ref`。Controller 主进程使用独立 bearer 一次性读取附件，校验文件名、MIME、大小和 SHA-256，再转换为旧账本需要的 Base64 内容；第一版 Legacy 单附件限制为 20 MiB。
 
 `renovation_media_ingest` 用于新图片/视频档案。收到附件默认只用于本轮识别，不自动归档；Controller 只有在作业文本明确请求归档到装修/施工/工地档案时才暴露该工具，并在调用时再次执行服务端门禁。Controller 先使用幂等键和引用摘要查询 Hub 是否已有结果；未命中时从 Gateway 的非消费流式接口读取正文，直接转发到 Renovation Hub，Hub 成功后再 ACK 消费 Gateway 引用。Hub 失败时原引用保持可重试，不要求用户重新发送。该链路不会构造 Base64 JSON，不把 `attachment_ref`、bearer、内部 URL、路径或媒体正文交给 app-server 和模型，单文件上限由 `max_media_bytes` 控制。
+
+跨消息归档由 Gateway 唯一拥有 pending/bound/completed/failed/cancelled/expired 状态，Controller 不自行搜索微信历史或猜测图片。授权上下文的幂等 scope 绑定归档指令 message ID、每个来源图片 message ID 和附件摘要，并叠加具体工具参数；失败后可由新的明确指令重试。没有跨消息 scope 的旧同消息请求继续使用 `codex-controller-tool-v1 + message_id + tool + canonical arguments` 原公式，升级不会改变已有 Hub 幂等键。
 
 Broker 工具固定为重启提案、Passkey 授权请求/状态、执行和执行状态查询。它们不依赖 Codex UI 审批，但是否允许真正执行仍由 Broker 的不可变提案、Passkey、固定 allowlist、一次性收据、状态机和默认关闭的 `execution_enabled` 决定；Controller 不能绕过这些门禁或提交任意 Supervisor 动作。
 
@@ -160,6 +164,8 @@ Codex 版本在 `package.json` 与锁文件中固定。候选更新必须重新�
 2. 停止 Controller，保留 `/data/controller.sqlite3` 与 `/data/codex-home` 冷备份。
 3. 恢复上一镜像与对应数据备份。
 4. 核对账户类型、Thread 数、队列、已完成结果和未执行写操作。
+
+从 `0.4.1` 回退到 `0.4.0` 前先停止 Gateway Poller、关闭 Controller intake，并排空或人工核对携带 `media_archive_context` 的 queued/running/recovery 作业。该 job 字段为 additive，旧 Controller 会忽略；但 intent-first 作业会因没有受控历史指令而失败关闭。应成对回退 Gateway 和 Controller，不删除 Controller SQLite、Gateway pending 表或附件 spool。
 
 从 `0.4.0` 回退到 `0.3.1` 前先关闭新增 enrollment 和任务入口，停止外部 Relay 流量，并核对没有活动 lease 或 `recovery_required` 任务。`0.3.1` 不识别 enrollment 的 `revoked_at`，因此必须等待所有已发出但未领取命令超过 15 分钟有效期，或把对应 Runner 吊销归档后再回退；只设置 `runner_center_v2_enabled=false` 不能让旧版理解撤销状态。旧版会忽略新增 options 和 additive `revoked_at` 列，不要删除数据库、Runner 审计或服务器上的 worktree/Session。
 

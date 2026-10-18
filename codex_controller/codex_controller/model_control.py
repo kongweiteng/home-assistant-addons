@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 DEFAULT_CODEX_MODEL = "gpt-6.1-sol"
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 MAX_CATALOG_BYTES = 256 * 1024
+MAX_PROBE_BYTES = 128 * 1024
 
 
 class ModelControlError(RuntimeError):
@@ -61,6 +62,49 @@ def backend_catalog_provider(base_url: str, api_key: str) -> Callable[[], dict[s
     return fetch
 
 
+def backend_stream_probe(base_url: str, api_key: str) -> Callable[[str], None]:
+    """Verify the streaming Responses path required by Codex before saving a model."""
+    endpoint = base_url.rstrip("/") + "/responses"
+
+    def verify(model: str) -> None:
+        body = json.dumps({"model": model, "input": "Reply OK.", "stream": True,
+                           "store": False, "max_output_tokens": 16}).encode()
+        request = Request(endpoint, data=body, headers={
+            "Authorization": "Bearer " + api_key, "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        })
+        try:
+            with build_opener(_NoRedirect()).open(request, timeout=45) as response:
+                if response.status != 200:
+                    raise ValueError("probe status")
+                remaining = MAX_PROBE_BYTES
+                completed = False
+                while remaining > 0:
+                    line = response.readline(min(remaining, 8192) + 1)
+                    if not line:
+                        break
+                    remaining -= len(line)
+                    if not line.startswith(b"data: "):
+                        continue
+                    event = json.loads(line[6:])
+                    if event.get("type") == "response.failed" or event.get("type") == "error":
+                        break
+                    if event.get("type") == "response.completed":
+                        result = event.get("response") or {}
+                        completed = (result.get("status") == "completed"
+                                     and result.get("model") == model
+                                     and bool(result.get("output")))
+                        break
+                if not completed:
+                    raise ValueError("stream not completed")
+        except Exception as error:
+            if isinstance(error, HTTPError):
+                error.close()
+            raise ModelControlError("model_not_available", "该模型当前无法完成 Codex 所需的流式调用，未修改默认模型") from None
+
+    return verify
+
+
 class ModelManager:
     def __init__(
         self,
@@ -69,6 +113,7 @@ class ModelManager:
         *,
         configured_model: str = "",
         catalog_provider: Callable[[], dict[str, Any]] | None = None,
+        availability_probe: Callable[[str], None] | None = None,
         fallback_model: str = DEFAULT_CODEX_MODEL,
     ):
         self.database_path = str(database_path)
@@ -76,6 +121,7 @@ class ModelManager:
         self.configured_model = configured_model
         self.fallback_model = fallback_model
         self.catalog_provider = catalog_provider
+        self.availability_probe = availability_probe
         with self._connect() as connection:
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS controller_model_setting (
@@ -196,6 +242,8 @@ class ModelManager:
             catalog = self.list_models()
             if model not in catalog["models"]:
                 raise ModelControlError("model_not_available", "当前后端目录未列出该精确型号，未修改默认模型")
+            if self.availability_probe is not None:
+                self.availability_probe(model)
             now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
             with authorized():
                 with self._connect() as connection:

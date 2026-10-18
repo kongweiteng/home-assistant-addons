@@ -300,3 +300,7 @@ The Skill and private HOME live under persistent `/data`; back them up securely 
 所有者可以说“有哪些模型可用”“当前默认模型是什么”“把默认模型切换为 gpt-6.1-sol”。模型工具查询实际后端目录，精确验证后将默认模型持久保存在 Controller 私有数据库。切换从后续新一轮生效，活动轮模型不变；成员不能修改。自定义端点的目录不可用或没有指定型号时明确拒绝，不猜测替代型号。持久设置优先于 options 初始值，重启保留；API Key 配置为空时初始默认为 gpt-6.1-sol。
 
 升级前先排空在途消息并备份 Controller 与 Gateway 私有数据、options、原源码和镜像。旧版本忽略 additive 关联与模型表；回退前核对追加 attempt/unknown 和所有活动任务，禁止把未知执行自动重放。
+
+## 模型切换可用性（0.5.61）
+
+自定义后端的模型目录仅供选择；保存默认模型前还会做一次有界的流式 Responses 调用。调用失败、响应型号不一致或未完成时不修改默认模型，并返回固定错误。探测不执行家庭工具。

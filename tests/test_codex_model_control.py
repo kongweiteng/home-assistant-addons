@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from codex_controller.model_control import (
     DEFAULT_CODEX_MODEL, MAX_CATALOG_BYTES, ModelControlError, ModelManager, backend_catalog_provider,
+    backend_stream_probe,
 )
 from codex_controller.tool_catalog import TOOL_BY_NAME
 
@@ -145,6 +146,34 @@ class ModelControlTests(unittest.TestCase):
         serialized = json.dumps(self.manager.list_models())
         self.assertNotIn("example-only-key", serialized)
         self.assertNotIn("example.invalid", serialized)
+
+    def test_stream_probe_rejects_listed_but_unusable_model_without_persisting(self):
+        self.manager.availability_probe = Mock(side_effect=ModelControlError(
+            "model_not_available", "该模型当前无法完成 Codex 所需的流式调用，未修改默认模型"))
+        self.assert_code("model_not_available", self.call)
+        self.manager.availability_probe.assert_called_once_with("gpt-6.1-sol")
+        self.assertEqual(self.manager.get_default(), DEFAULT_CODEX_MODEL)
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM controller_model_changes").fetchone()[0], 0)
+
+    def test_backend_stream_probe_requires_exact_completed_model(self):
+        response = Mock(status=200)
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        probe = backend_stream_probe("https://api.example.invalid/v1", "example-only-key")
+        with patch("codex_controller.model_control.build_opener") as opener:
+            opener.return_value.open.return_value = response
+            response.readline.side_effect = [
+                b'data: {"type":"response.completed","response":{"status":"completed","model":"gpt-6.1-sol","output":[{}]}}\n'
+            ]
+            probe("gpt-6.1-sol")
+            request = opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, "https://api.example.invalid/v1/responses")
+            self.assertEqual(json.loads(request.data)["stream"], True)
+            response.readline.side_effect = [
+                b'data: {"type":"response.completed","response":{"status":"completed","model":"gpt-5.6-sol","output":[{}]}}\n'
+            ]
+            self.assert_code("model_not_available", lambda: probe("gpt-6.1-sol"))
 
     def test_real_http_redirect_is_rejected_without_forwarding_credentials(self):
         seen = []

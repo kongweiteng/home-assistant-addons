@@ -17,7 +17,7 @@ from .app_server import AppServerClient
 from .desktop_service import DesktopControllerService
 from .desktop_store import DesktopStore
 from .media_input import TurnMediaManager
-from .model_control import DEFAULT_CODEX_MODEL, ModelManager, backend_catalog_provider
+from .model_control import DEFAULT_CODEX_MODEL, ModelManager, backend_catalog_provider, backend_stream_probe
 from .runner_relay import RelayPublisher, RunnerInstallerCatalog, validate_relay_auth_config
 from .runner_service import RunnerManagerService, desktop_runner_authorized
 from .runner_store import RunnerStore
@@ -355,6 +355,7 @@ def main() -> None:
         app_server,
         configured_model=codex_model,
         catalog_provider=(backend_catalog_provider(openai_base_url, api_key) if openai_base_url else None),
+        availability_probe=(backend_stream_probe(openai_base_url, api_key) if openai_base_url else None),
     )
     service = ControllerService(
         store,

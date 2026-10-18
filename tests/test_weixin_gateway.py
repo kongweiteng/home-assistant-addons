@@ -243,7 +243,7 @@ class StubHttpSession:
 class ProtocolTests(unittest.TestCase):
     def test_http_server_version_matches_addon_version(self) -> None:
         api_source = (ROOT / "weixin_gateway" / "weixin_gateway" / "api.py").read_text(encoding="utf-8")
-        self.assertIn('server_version = "WeixinGateway/0.4.12"', api_source)
+        self.assertIn('server_version = "WeixinGateway/0.4.13"', api_source)
 
     def test_typing_protocol_uses_ticket_and_status_contract(self) -> None:
         class TypingClient(IlinkClient):
@@ -3559,7 +3559,7 @@ class AdminApiTests(unittest.TestCase):
                 frame = json.loads(fields["data"])
                 self.assertEqual(fields["event"], "status")
                 self.assertEqual(fields["id"], str(frame["revision"]))
-                self.assertEqual(frame["status"]["version"], "0.4.12")
+                self.assertEqual(frame["status"]["version"], "0.4.13")
                 self.assertIn("csrf_token", frame["status"])
                 self.assertNotIn("fixture-owner", json.dumps(frame, ensure_ascii=False))
             finally:

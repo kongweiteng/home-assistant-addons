@@ -3131,7 +3131,7 @@ class GatewayService:
         identities["limits"]["max_active_identities"] = self.max_active_identities
         poller_control = self.store.poller_control()
         return {
-            "version": "0.4.12",
+            "version": "0.4.13",
             "details_revision": self._status_details_revision,
             "poller_enabled": self.poller_enabled,
             "poller_default_enabled": self.poller_default_enabled,

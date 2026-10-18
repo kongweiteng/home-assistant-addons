@@ -227,3 +227,9 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 ## 连续消息回执（0.4.12）
 
 普通消息持久保存后唤醒 Controller 投递，无固定十秒等待。同一活动任务接受的补充由 Controller 返回 followup_parent_job_id、followup_state 和 reply_suppressed；仅明确成功关联的 completed 追加不重复回执。安全中断并建立续接的 cancelled 原轮也不额外发送取消提示；失败、恢复核对和未知投递不能被成功抑制字段隐藏。父任务或续接任务仍负责完整回复，已发送消息不撤回。
+
+## 跨消息媒体归档与文件发送（0.4.13）
+
+图片与归档指令可以分成连续微信消息。Gateway 按 identity、principal、conversation 持久关联，支持 image-first、intent-first、精确数量、取消、15 分钟过期和最多 16 个附件。关联失败或作业失败不会静默消费附件；成功上下文绑定指令消息、图片消息和附件摘要。
+
+Controller 返回图片或 ZIP 制品时，Gateway 预取后再次校验 DTO、MIME、PNG/ZIP 签名、长度和 SHA-256，再用微信原生 image/file item 发送。发送沿用持久 client ID、`sent`、`failed` 和 `delivery_state_unknown` 状态；内部路径不写入微信正文。

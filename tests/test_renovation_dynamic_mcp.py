@@ -52,7 +52,7 @@ class BusinessManifestTests(unittest.TestCase):
         self.assertEqual(manifest["service"], "renovation_hub")
         self.assertEqual(manifest["scope"], "business")
         self.assertGreater(manifest["catalog_revision"], 0)
-        self.assertEqual(len(manifest["tools"]), 40)
+        self.assertEqual(len(manifest["tools"]), 46)
         names = [tool["name"] for tool in manifest["tools"]]
         self.assertEqual(names, sorted(names))
         self.assertEqual(

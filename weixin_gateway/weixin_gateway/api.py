@@ -51,7 +51,7 @@ def create_server(
         ).decode("ascii").rstrip("=")
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "WeixinGateway/0.4.12"
+        server_version = "WeixinGateway/0.4.13"
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return None

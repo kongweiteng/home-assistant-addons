@@ -304,3 +304,9 @@ The Skill and private HOME live under persistent `/data`; back them up securely 
 ## 模型切换可用性（0.5.61）
 
 自定义后端的模型目录仅供选择；保存默认模型前还会做一次有界的流式 Responses 调用。调用失败、响应型号不一致或未完成时不修改默认模型，并返回固定错误。探测不执行家庭工具。
+
+## 跨消息媒体与文件制品（0.5.62）
+
+Gateway 可以为同一身份、成员和会话中经过严格关联的多条图片消息附带 `media_archive_context@1`。Controller 重算来源消息、附件摘要和幂等范围；只有上下文完整一致时才开放装修媒体写工具。普通图片、模糊指令、跨会话附件和过期附件仍不能触发归档。
+
+`ledger_generate_chart` 与 `ledger_export` 共用受控 artifact DTO。Controller 下载后验证引用、MIME、PNG/ZIP 签名、长度和 SHA-256，只把安全元数据交给模型和 Gateway；内部路径不进入回复。回退前先排空待发制品并核对未知投递状态。

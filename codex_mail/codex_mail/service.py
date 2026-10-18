@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from .config import ConfigError, MailConfig, normalize_email
 from .store import MailStore
+from .attachments import decode_files
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -43,7 +44,7 @@ def validate_context(value: object) -> dict[str, str]:
 
 
 def validated_arguments(value: object, config: MailConfig) -> dict[str, Any]:
-    if not isinstance(value, dict) or not set(value) <= {"to", "cc", "subject", "text_body"} or not {"to", "subject", "text_body"} <= set(value):
+    if not isinstance(value, dict) or not set(value) <= {"to", "cc", "subject", "text_body", "attachments"} or not {"to", "subject", "text_body"} <= set(value):
         raise ValueError("arguments_invalid")
     to = value["to"]
     cc = value.get("cc", [])
@@ -127,22 +128,29 @@ class MailService:
         self.sent_checker = sent_checker
 
     @staticmethod
-    def _result(row: dict[str, Any]) -> dict[str, str]:
+    def _result(row: dict[str, Any]) -> dict[str, Any]:
         return {
             "status": row["state"], "send_id": row["send_id"], "message_id": row["message_id"],
             "verification": row["verification"], "error_code": row["error_code"],
+            "attachments": json.loads(row.get("attachments_json", "[]")),
         }
 
-    def send(self, arguments: object, context: object) -> dict[str, str]:
+    def send(self, arguments: object, context: object, attachments: object = None) -> dict[str, Any]:
         ctx = validate_context(context)
         try:
             args = validated_arguments(arguments, self.config)
+            files = decode_files([] if attachments is None else attachments)
+            references = arguments.get("attachments", [])
+            if not isinstance(references, list) or len(references) != len(files):
+                raise ValueError("attachments_invalid")
+            if files:
+                args["attachments"] = [metadata for metadata, _content in files]
         except PermissionError:
             return {"status": "failed", "send_id": "not-created", "message_id": "not-created",
-                    "verification": "not_sent", "error_code": "recipient_not_allowed"}
+                    "verification": "not_sent", "error_code": "recipient_not_allowed", "attachments": []}
         except ValueError:
             return {"status": "failed", "send_id": "not-created", "message_id": "not-created",
-                    "verification": "not_sent", "error_code": "arguments_invalid"}
+                    "verification": "not_sent", "error_code": "arguments_invalid", "attachments": []}
         message_id = make_msgid(domain="qq.com")
         existing = self.store.claim(ctx["idempotency_key"], args, message_id, now_iso())
         if existing is not None:
@@ -159,6 +167,9 @@ class MailService:
         message["Subject"] = args["subject"]
         message["Message-ID"] = message_id
         message.set_content(args["text_body"], charset="utf-8")
+        for metadata, content in files:
+            maintype, subtype = metadata["mime_type"].split("/", 1)
+            message.add_attachment(content, maintype=maintype, subtype=subtype, filename=metadata["filename"])
         try:
             self.sender(self.config, message)
         except DeliveryError as exc:
@@ -186,5 +197,6 @@ class MailService:
                 "send_id": row["send_id"], "status": row["state"], "verification": row["verification"],
                 "error_code": row["error_code"], "recipients": json.loads(row["recipients_json"]),
                 "subject": row["subject"], "created_at": row["created_at"], "updated_at": row["updated_at"],
+                "attachments": json.loads(row.get("attachments_json", "[]")),
             })
         return {"items": items}

@@ -4,38 +4,171 @@
     {
       "name": "send",
       "display_name": "发送邮件",
-      "description": "通过管理员固定配置的 QQ 邮箱发送纯文本邮件。仅允许预先登记的收件地址；完整用户请求已明确要求发送且收件人、主题、正文齐全时调用。草拟、讨论或翻译邮件不代表发送授权。结果 unknown 时不得自动重发，应先调用 ext_mail_recent_status 核对。当前不支持附件。",
+      "description": "通过管理员固定配置的 QQ 邮箱发送文本正文和真正的文件附件。仅允许预先登记的收件地址；完整对话明确要求发送且收件人、主题和正文可确定时调用。附件引用来自当前会话生成的 artifact_id 或当前消息 attachment_ref，不能传入路径、URL 或 Base64。支持 Excel/PDF/图片/ZIP/Word/PPT/CSV/TXT；单个 5 MiB，总计 10 MiB，最多10个。账本 Excel 请先调用 ledger_export，再引用返回的 artifact_id 并设置 format=ledger_xlsx，将完整导出快照转换成含汇总和全部明细的 XLSX。草拟和讨论不代表发送授权。结果 unknown 时不得自动重发，先调用 ext_mail_recent_status。",
       "risk_type": "write",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "to": {"type": "array", "items": {"type": "string", "maxLength": 254}, "minItems": 1, "maxItems": 10},
-          "cc": {"type": "array", "items": {"type": "string", "maxLength": 254}, "maxItems": 10},
-          "subject": {"type": "string", "minLength": 1, "maxLength": 200},
-          "text_body": {"type": "string", "minLength": 1, "maxLength": 20000}
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254
+            },
+            "minItems": 1,
+            "maxItems": 10
+          },
+          "cc": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 254
+            },
+            "maxItems": 10
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "text_body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "attachments": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "maxLength": 8,
+                  "enum": [
+                    "artifact",
+                    "upload"
+                  ]
+                },
+                "reference": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "format": {
+                  "type": "string",
+                  "maxLength": 16,
+                  "enum": [
+                    "original",
+                    "ledger_xlsx"
+                  ]
+                }
+              },
+              "required": [
+                "source",
+                "reference"
+              ],
+              "additionalProperties": false
+            }
+          }
         },
-        "required": ["to", "subject", "text_body"],
+        "required": [
+          "to",
+          "subject",
+          "text_body"
+        ],
         "additionalProperties": false
       },
       "outputSchema": {
         "type": "object",
         "properties": {
-          "status": {"type": "string", "maxLength": 16, "enum": ["sent", "failed", "unknown"]},
-          "send_id": {"type": "string", "maxLength": 64},
-          "message_id": {"type": "string", "maxLength": 320},
-          "verification": {"type": "string", "maxLength": 32, "enum": ["smtp_accepted", "sent_folder_confirmed", "not_sent", "unresolved"]},
-          "error_code": {"type": "string", "maxLength": 64}
+          "status": {
+            "type": "string",
+            "maxLength": 16,
+            "enum": [
+              "sent",
+              "failed",
+              "unknown"
+            ]
+          },
+          "send_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "message_id": {
+            "type": "string",
+            "maxLength": 320
+          },
+          "verification": {
+            "type": "string",
+            "maxLength": 32,
+            "enum": [
+              "smtp_accepted",
+              "sent_folder_confirmed",
+              "not_sent",
+              "unresolved"
+            ]
+          },
+          "error_code": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "attachments": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "object",
+              "properties": {
+                "filename": {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                "mime_type": {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                "size_bytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5242880
+                },
+                "sha256": {
+                  "type": "string",
+                  "maxLength": 71
+                }
+              },
+              "required": [
+                "filename",
+                "mime_type",
+                "size_bytes",
+                "sha256"
+              ],
+              "additionalProperties": false
+            }
+          }
         },
-        "required": ["status", "send_id", "message_id", "verification", "error_code"],
+        "required": [
+          "status",
+          "send_id",
+          "message_id",
+          "verification",
+          "error_code",
+          "attachments"
+        ],
         "additionalProperties": false
-      }
+      },
+      "attachment_input": true
     },
     {
       "name": "recent_status",
       "display_name": "核对最近邮件",
       "description": "读取最近十次邮件发送记录，并用 QQ 邮箱 Sent 文件夹核对结果未知的记录。不发送或重发邮件。",
       "risk_type": "read_only",
-      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false},
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
       "outputSchema": {
         "type": "object",
         "properties": {
@@ -45,21 +178,105 @@
             "items": {
               "type": "object",
               "properties": {
-                "send_id": {"type": "string", "maxLength": 64},
-                "status": {"type": "string", "maxLength": 16, "enum": ["sent", "failed", "unknown"]},
-                "verification": {"type": "string", "maxLength": 32, "enum": ["smtp_accepted", "sent_folder_confirmed", "not_sent", "unresolved"]},
-                "error_code": {"type": "string", "maxLength": 64},
-                "recipients": {"type": "array", "items": {"type": "string", "maxLength": 254}, "maxItems": 20},
-                "subject": {"type": "string", "maxLength": 200},
-                "created_at": {"type": "string", "maxLength": 40},
-                "updated_at": {"type": "string", "maxLength": 40}
+                "send_id": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "status": {
+                  "type": "string",
+                  "maxLength": 16,
+                  "enum": [
+                    "sent",
+                    "failed",
+                    "unknown"
+                  ]
+                },
+                "verification": {
+                  "type": "string",
+                  "maxLength": 32,
+                  "enum": [
+                    "smtp_accepted",
+                    "sent_folder_confirmed",
+                    "not_sent",
+                    "unresolved"
+                  ]
+                },
+                "error_code": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "recipients": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 254
+                  },
+                  "maxItems": 20
+                },
+                "subject": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "created_at": {
+                  "type": "string",
+                  "maxLength": 40
+                },
+                "updated_at": {
+                  "type": "string",
+                  "maxLength": 40
+                },
+                "attachments": {
+                  "type": "array",
+                  "maxItems": 10,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "filename": {
+                        "type": "string",
+                        "maxLength": 255
+                      },
+                      "mime_type": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "size_bytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5242880
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "maxLength": 71
+                      }
+                    },
+                    "required": [
+                      "filename",
+                      "mime_type",
+                      "size_bytes",
+                      "sha256"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
               },
-              "required": ["send_id", "status", "verification", "error_code", "recipients", "subject", "created_at", "updated_at"],
+              "required": [
+                "send_id",
+                "status",
+                "verification",
+                "error_code",
+                "recipients",
+                "subject",
+                "created_at",
+                "updated_at",
+                "attachments"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["items"],
+        "required": [
+          "items"
+        ],
         "additionalProperties": false
       }
     }

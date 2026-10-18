@@ -172,7 +172,7 @@ class TurnMediaManager:
                     digest=attachment.get("sha256", ""),
                 )
             )
-        lines.append("图片已通过受控 localImage 输入提供；需要归档时仅把对应 attachment_ref 交给已配置工具。")
+        lines.append("图片已通过受控 localImage 输入提供；仅把对应 attachment_ref 交给与用户明确意图匹配的已配置工具。")
         return "\n".join(lines)
 
     @staticmethod

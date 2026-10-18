@@ -13,6 +13,7 @@ import socketserver
 import sqlite3
 import threading
 import time
+import zipfile
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
@@ -26,6 +27,8 @@ from .hub_manifest import (
 )
 from .store import ControllerStore, StoreError
 from .extensions import ExtensionRegistry, ExtensionError
+from .extension_attachments import encode_file, MAX_FILE_BYTES, MAX_TOTAL_BYTES, MAX_ATTACHMENTS, MIME_SUFFIXES
+from .ledger_workbook import ledger_workbook, XLSX_MIME
 from .skills import SkillCatalog, SkillError, SKILL_NAMES
 from .extension_schema import validate_value, bounded_json, SchemaError
 from .fnos_skill import FNOS_DEFINITIONS, FNOS_TOOLS, FnosSkillClient, FnosSkillError
@@ -769,6 +772,11 @@ class ToolRouter:
         try:
             bounded_json(arguments)
             validate_value(arguments, definition.input_schema)
+            entry = self.extensions.tools.get(definition.name)
+            attachments = (
+                self._resolve_extension_attachments(arguments.get("attachments", []), context)
+                if entry is not None and entry.attachment_input else None
+            )
             key = "sha256:" + hashlib.sha256(bounded_json([context.get("conversation_key", ""), context["message_id"], definition.name, arguments])).hexdigest()
             if definition.idempotent_write:
                 replay = self.store.claim_extension_write(key)
@@ -777,7 +785,10 @@ class ToolRouter:
             call_context = {"job_hash": hashlib.sha256(context["job_id"].encode()).hexdigest(),
                             "turn_hash": hashlib.sha256(context["turn_id"].encode()).hexdigest(),
                             "idempotency_key": key}
-            result = self.extensions.call(definition.name, arguments, call_context)
+            result = self.extensions.call(
+                definition.name, arguments, call_context,
+                **({"attachments": attachments} if attachments is not None else {}),
+            )
             if definition.idempotent_write:
                 self.store.confirm_extension_write(key, result)
             return result
@@ -790,6 +801,49 @@ class ToolRouter:
             raise ToolProxyError(exc.code, "扩展执行记录不可用或结果未知") from None
         except (sqlite3.DatabaseError, OSError):
             raise ToolProxyError("extension_write_unknown" if definition.idempotent_write else "extension_unavailable", "扩展执行记录不可用，禁止重复写入") from None
+
+    def _resolve_extension_attachments(self, references: list[dict[str, Any]], context: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(references, list) or len(references) > MAX_ATTACHMENTS or self.store is None:
+            raise ToolProxyError("attachments_invalid", "附件数量无效")
+        resolved = []
+        seen = set()
+        total = 0
+        for item in references:
+            identity = (item.get("source"), item.get("reference"), item.get("format", "original"))
+            if identity in seen:
+                raise ToolProxyError("attachment_duplicate", "同一附件不能重复发送")
+            seen.add(identity)
+            try:
+                if item["source"] == "artifact":
+                    metadata, content = self.store.read_conversation_artifact(context["conversation_key"], item["reference"])
+                    if item.get("format", "original") == "ledger_xlsx":
+                        if metadata["mime_type"] != "application/zip":
+                            raise ValueError("ledger_snapshot_invalid")
+                        content = ledger_workbook(content)
+                        metadata = {"filename": "装修全部账单.xlsx", "mime_type": XLSX_MIME,
+                                    "size_bytes": len(content), "sha256": "sha256:" + hashlib.sha256(content).hexdigest()}
+                elif item["source"] == "upload" and item.get("format", "original") == "original":
+                    if not self._gateway_configured() or not ATTACHMENT_REF_RE.fullmatch(item["reference"]):
+                        raise ValueError("attachment_reference_invalid")
+                    expected = self.store.job_attachment(context["job_id"], item["reference"])
+                    metadata, content = _request_bytes(
+                        "GET", f"{self.gateway_base_url}/internal/v1/attachments/{quote(item['reference'], safe='')}/stream",
+                        self.gateway_token, MAX_FILE_BYTES, allowed_mime_types=set(MIME_SUFFIXES),
+                    )
+                    if expected.get("sha256") != metadata.get("sha256") or expected.get("size_bytes") != len(content):
+                        raise ValueError("attachment_integrity_invalid")
+                else:
+                    raise ValueError("attachment_reference_invalid")
+                encoded = encode_file(metadata, content)
+            except StoreError as exc:
+                raise ToolProxyError(exc.code, "附件不存在、已过期或不属于当前会话") from None
+            except (ValueError, KeyError, TypeError, zipfile.BadZipFile, RuntimeError):
+                raise ToolProxyError("attachment_invalid", "附件类型、大小、内容或账本快照无效，未发送") from None
+            total += len(content)
+            if total > MAX_TOTAL_BYTES:
+                raise ToolProxyError("attachments_too_large", "附件总大小超过 10 MiB，未发送")
+            resolved.append(encoded)
+        return resolved
 
     def _capture_artifact_result(self, result: dict[str, Any]) -> dict[str, Any]:
         if self.store is None:
@@ -1475,7 +1529,8 @@ def _safe_structured_http_error(exc: HTTPError) -> ToolProxyError | None:
     return ToolProxyError(code, message)
 
 
-def _request_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[dict[str, Any], bytes]:
+def _request_bytes(method: str, url: str, token: str, max_bytes: int,
+                   *, allowed_mime_types: set[str] | None = None) -> tuple[dict[str, Any], bytes]:
     request = Request(
         url,
         method=method,
@@ -1508,7 +1563,7 @@ def _request_bytes(method: str, url: str, token: str, max_bytes: int) -> tuple[d
         raise ToolProxyError("attachment_invalid", "Gateway 附件文件名无效") from exc
     if not filename or len(filename) > 255 or Path(filename).name != filename:
         raise ToolProxyError("attachment_invalid", "Gateway 附件文件名越界")
-    if mime_type not in ATTACHMENT_MIME_TYPES:
+    if mime_type not in (ATTACHMENT_MIME_TYPES if allowed_mime_types is None else allowed_mime_types):
         raise ToolProxyError("attachment_invalid", "Gateway 附件类型不在 Ledger 白名单")
     digest = hashlib.sha256(data).hexdigest()
     if digest_header != f"sha256:{digest}":

@@ -536,7 +536,7 @@ class ControllerService:
         if self._account_matches(app):
             self.pending_login = None
         return {
-            "version": "0.5.63",
+            "version": "0.5.64",
             "source_identity": runtime_source_identity(),
             "codex_version": "0.146.0",
             "configured_auth_mode": self.configured_auth_mode,
@@ -827,6 +827,8 @@ class ControllerService:
                 result = f"{NEW_THREAD_RESULT}\nThread：{thread_short}"
                 self.store.complete_new_thread(job["job_id"], thread_id, result)
                 return
+            if hasattr(self.app_server, "refresh_mcp_catalog"):
+                self.app_server.refresh_mcp_catalog(effective_tools)
             if self.tool_context is not None:
                 self.tool_context.begin_job(
                     job["job_id"],

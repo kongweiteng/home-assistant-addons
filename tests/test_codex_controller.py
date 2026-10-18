@@ -162,6 +162,8 @@ for line in sys.stdin:
     elif method == "account/logout":
         account_type = None
         result = {}
+    elif method == "mcpServerStatus/list":
+        result = {"data":[{"name":"home_assistant_tools","tools":{}}]}
     elif method == "thread/start":
         thread_loaded = True
         result = {"thread":{"id":thread_id,"turns":[]}}
@@ -1571,7 +1573,7 @@ class ControllerAuthenticationTests(unittest.TestCase):
 
     def test_addon_version_is_consistent_across_runtime_surfaces(self) -> None:
         root = Path(__file__).resolve().parents[1] / "codex_controller"
-        expected = "0.5.63"
+        expected = "0.5.64"
         self.assertIn(f'version: "{expected}"', (root / "config.yaml").read_text(encoding="utf-8"))
         for relative in (
             "codex_controller/api.py",
@@ -1640,6 +1642,103 @@ class ControllerAuthenticationTests(unittest.TestCase):
             self.assertEqual(app.started, [])
             self.assertEqual(app.resumed, ["thread-existing"])
             self.assertEqual(store.get_job(second_running["job_id"])["thread_id"], "thread-existing")
+
+    def test_dispatch_refreshes_current_mcp_catalog_before_starting_first_turn(self) -> None:
+        class ToolContext:
+            model_manager = None
+
+            def sync_extensions(self) -> None:
+                calls.append("sync_extensions")
+
+            def available_tools(self, _profile: str, *, media_archive_authorized: bool) -> list[str]:
+                self.media_archive_authorized = media_archive_authorized
+                return ["ext_mail_send", "ext_mail_recent_status"]
+
+            def begin_job(self, *_args: object, **_kwargs: object) -> None:
+                calls.append("begin_job")
+
+            def bind_turn(self, _job_id: str, _turn_id: str) -> None:
+                calls.append("bind_turn")
+
+            def clear_job(self, _job_id: str) -> None:
+                pass
+
+        class App:
+            notification_handler = None
+            supports_dynamic_tool_definitions = False
+            turn_counter = 0
+
+            def configure_developer_context(self, tools: list[str], profile: str) -> None:
+                calls.append(("configure", tuple(tools), profile))
+
+            def refresh_mcp_catalog(self, tools: list[str]) -> list[str]:
+                calls.append(("refresh", tuple(tools)))
+                return list(tools)
+
+            def start_thread(self) -> str:
+                calls.append("start_thread")
+                return "thread-mail"
+
+            def resume_thread(self, thread_id: str) -> str:
+                calls.append("resume_thread")
+                return thread_id
+
+            def start_turn(
+                self,
+                thread_id: str,
+                _text: str,
+                _message_id: str,
+                *,
+                input_items: object = None,
+            ) -> str:
+                calls.append(("start_turn", thread_id, input_items))
+                self.turn_counter += 1
+                return f"turn-mail-{self.turn_counter}"
+
+        calls: list[object] = []
+        with tempfile.TemporaryDirectory() as temporary:
+            store = ControllerStore(Path(temporary) / "controller.sqlite3")
+            store.create_job(fixture_job("fixture-mail-catalog"))
+            running = store.claim_next()
+            assert running is not None
+            service = ControllerService(
+                store,
+                App(),
+                intake_enabled=False,
+                tool_context=ToolContext(),  # type: ignore[arg-type]
+            )
+
+            service._dispatch(running)
+
+            refresh = ("refresh", ("ext_mail_send", "ext_mail_recent_status"))
+            started = ("start_turn", "thread-mail", None)
+            self.assertLess(calls.index(refresh), calls.index("start_thread"))
+            self.assertLess(calls.index(refresh), calls.index(started))
+            self.assertEqual(store.get_job(running["job_id"])["turn_id"], "turn-mail-1")
+            self.assertLess(calls.index(("configure", refresh[1], "owner_legacy")), calls.index(refresh))
+
+            store.complete_turn("turn-mail-1", "completed")
+            store.create_job(fixture_job("fixture-mail-catalog-resume"))
+            resumed = store.claim_next()
+            assert resumed is not None
+            calls.clear()
+            service._dispatch(resumed)
+            self.assertLess(calls.index(refresh), calls.index("resume_thread"))
+            self.assertLess(calls.index(refresh), calls.index(started))
+
+            store.complete_turn("turn-mail-2", "completed")
+            store.create_job(fixture_job("fixture-mail-catalog-incomplete"))
+            blocked = store.claim_next()
+            assert blocked is not None
+            def incomplete(_tools: list[str]) -> list[str]:
+                raise AppServerError("mcp_catalog_incomplete", "fixture", definitive=True)
+            service.app_server.refresh_mcp_catalog = incomplete
+            calls.clear()
+            service._dispatch(blocked)
+            self.assertNotIn("start_thread", calls)
+            self.assertNotIn("resume_thread", calls)
+            self.assertNotIn(started, calls)
+            self.assertEqual(store.get_job(blocked["job_id"])["error_code"], "mcp_catalog_incomplete")
 
     def test_new_thread_command_is_exact_and_attachment_free(self) -> None:
         self.assertTrue(is_new_thread_command(fixture_job(text="打开新会话")))

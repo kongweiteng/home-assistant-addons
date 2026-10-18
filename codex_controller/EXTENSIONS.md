@@ -1,5 +1,7 @@
 # 通用扩展与 skill
 
+`0.5.64` 增加可选 `attachment_input: true`（仅写工具可声明）。闭合输入 Schema 中的 `attachments` 使用 `{source: artifact|upload, reference, format?: original|ledger_xlsx}` 引用；Controller 只读取同一 owner 会话未过期的生成制品，或当前活动作业及已接受追加消息的上传附件。内部请求另带经类型、文件名、长度和 SHA-256 核验的 `attachments` 数组（`filename/mime_type/size_bytes/sha256/content_base64`）；文件字节不进入模型上下文。单个 5 MiB、总计 10 MiB、最多 10 个，内部 HTTP 请求上限 14 MiB；其余模型输入/响应仍为 128 KiB。`ledger_xlsx` 只对完整导出 ZIP 的固定 `transactions.csv` 做有界内存转换，不解压到磁盘，不执行公式。变更 manifest 摘要仍会撤销旧启用状态，须管理员核对后重新启用。
+
 Controller 0.5.59 提供稳定的扩展入口。以后符合本契约的新能力只改插件自身、安装目录和注册配置，微信 Gateway 与 Controller 核心不变。新增微信消息格式或变更公共契约仍可能需要通道升级。
 
 ## 流程 skill

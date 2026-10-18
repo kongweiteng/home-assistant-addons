@@ -41,6 +41,9 @@ class MailStore:
                 );
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(sends)")}
+            if "attachments_json" not in columns:
+                connection.execute("ALTER TABLE sends ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
         try:
             path.chmod(0o600)
         except OSError:
@@ -65,9 +68,9 @@ class MailStore:
                     raise RuntimeError("idempotency_conflict")
                 return dict(row)
             connection.execute(
-                "INSERT INTO sends VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO sends(idempotency_key,send_id,payload_digest,message_id,recipients_json,subject,state,verification,error_code,created_at,updated_at,attachments_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (key, send_id, digest, message_id, canonical_json(recipients), arguments["subject"],
-                 "unknown", "unresolved", "delivery_uncertain", now, now),
+                 "unknown", "unresolved", "delivery_uncertain", now, now, canonical_json(arguments.get("attachments", []))),
             )
             connection.execute("COMMIT")
         return None

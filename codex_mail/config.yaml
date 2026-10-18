@@ -1,5 +1,5 @@
 name: Codex Mail Provider
-version: "0.1.0"
+version: "0.2.0"
 slug: codex_mail
 description: "为 Codex Controller 提供受控、可审计且防重复的 QQ 邮箱发信能力。"
 url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_mail"

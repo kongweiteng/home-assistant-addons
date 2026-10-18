@@ -13,7 +13,7 @@ from .service import MailService, validate_context
 from .store import MailStore
 
 
-MAX_BODY = 131072
+MAX_BODY = 14 * 1024 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -45,12 +45,13 @@ class Handler(BaseHTTPRequestHandler):
             if not 1 <= size <= MAX_BODY:
                 raise ValueError("body_invalid")
             payload = json.loads(self.rfile.read(size))
-            if not isinstance(payload, dict) or set(payload) != {"version", "name", "arguments", "context"} or payload["version"] != 1:
+            required = {"version", "name", "arguments", "context"}
+            if not isinstance(payload, dict) or not required <= set(payload) or set(payload) - required - {"attachments"} or payload["version"] != 1:
                 raise ValueError("request_invalid")
             validate_context(payload["context"])
             if payload["name"] == "send":
-                result = self.service.send(payload["arguments"], payload["context"])
-            elif payload["name"] == "recent_status" and payload["arguments"] == {}:
+                result = self.service.send(payload["arguments"], payload["context"], payload.get("attachments"))
+            elif payload["name"] == "recent_status" and payload["arguments"] == {} and "attachments" not in payload:
                 result = self.service.recent_status()
             else:
                 raise ValueError("tool_invalid")

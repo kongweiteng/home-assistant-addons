@@ -36,6 +36,7 @@ class ExtensionTool:
     extension_id: str
     output_schema: dict[str, Any]
     manifest_digest: str
+    attachment_input: bool = False
 
 
 def base_url(value: Any) -> str:
@@ -60,7 +61,8 @@ def request_extension(url: str, token: str, payload: dict[str, Any]) -> dict[str
     parsed = urlsplit(url)
     connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=15)
     try:
-        connection.request("POST", "/internal/v1/tools/call", body=bounded_json(payload),
+        limit = 14 * 1024 * 1024 if "attachments" in payload else 131072
+        connection.request("POST", "/internal/v1/tools/call", body=bounded_json(payload, limit),
                            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
         response = connection.getresponse()
         if response.status != 200:  # Deliberately do not follow 3xx or expose error bodies.
@@ -161,7 +163,11 @@ class ExtensionRegistry:
 
     @staticmethod
     def _tool(extension_id: str, url: str, digest: str, value: Any, allow_write: bool) -> ExtensionTool:
-        if not isinstance(value, dict) or set(value) != {"name", "display_name", "description", "risk_type", "inputSchema", "outputSchema"}:
+        required = {"name", "display_name", "description", "risk_type", "inputSchema", "outputSchema"}
+        if not isinstance(value, dict) or not required <= set(value) or set(value) - required - {"attachment_input"}:
+            raise ExtensionError("extension_manifest_invalid")
+        attachment_input = value.get("attachment_input", False)
+        if type(attachment_input) is not bool or (attachment_input and value["risk_type"] != "write"):
             raise ExtensionError("extension_manifest_invalid")
         name = value["name"]
         if not isinstance(name, str) or not LOCAL_NAME_RE.fullmatch(name):
@@ -182,7 +188,7 @@ class ExtensionRegistry:
             intent_examples=(), input_schema=value["inputSchema"], requires_job_context=True,
             idempotent_write=risk == "write", transport="extension_json",
         )
-        return ExtensionTool(definition, name, url, extension_id, value["outputSchema"], digest)
+        return ExtensionTool(definition, name, url, extension_id, value["outputSchema"], digest, attachment_input)
 
     def _token(self, extension_id: str) -> str:
         try:
@@ -204,7 +210,8 @@ class ExtensionRegistry:
         return {name: hashlib.sha256(bounded_json({"manifest": entry.manifest_digest, "base_url": entry.base_url})).hexdigest()
                 for name, entry in self.tools.items()}
 
-    def call(self, name: str, arguments: dict[str, Any], context: dict[str, str]) -> dict[str, Any]:
+    def call(self, name: str, arguments: dict[str, Any], context: dict[str, str],
+             *, attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         entry = self.tools.get(name)
         if entry is None:
             raise ExtensionError("extension_unavailable")
@@ -214,7 +221,12 @@ class ExtensionRegistry:
         except SchemaError as exc:
             raise ExtensionError("extension_arguments_invalid") from exc
         token = self._token(entry.extension_id)
-        result = self.request(entry.base_url, token, {"version": 1, "name": entry.local_name, "arguments": arguments, "context": context})
+        payload = {"version": 1, "name": entry.local_name, "arguments": arguments, "context": context}
+        if attachments is not None:
+            if not entry.attachment_input:
+                raise ExtensionError("extension_attachments_not_allowed")
+            payload["attachments"] = attachments
+        result = self.request(entry.base_url, token, payload)
         try:
             bounded_json(result)
             validate_value(result, entry.output_schema)

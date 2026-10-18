@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 from email.message import EmailMessage
+from email import policy
+from email.parser import BytesParser
+import base64
+import hashlib
 import json
 from pathlib import Path
 import tempfile
+import threading
+from http.server import ThreadingHTTPServer
 import unittest
 
 from codex_mail.codex_mail.config import ConfigError, MailConfig
 from codex_mail.codex_mail.service import DeliveryError, MailService
 from codex_mail.codex_mail.store import MailStore
-from codex_controller.extensions import ExtensionRegistry
+from codex_mail.codex_mail.main import Handler
+from codex_controller.extensions import ExtensionRegistry, request_extension
 from codex_controller.skills import metadata
+from codex_controller.extension_attachments import encode_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,7 +67,7 @@ class ConfigTests(unittest.TestCase):
 class PackagingTests(unittest.TestCase):
     def test_addon_is_internal_only_and_marks_credentials_as_passwords(self):
         config = (ADDON / "config.yaml").read_text(encoding="utf-8")
-        self.assertIn('version: "0.1.0"', config)
+        self.assertIn('version: "0.2.0"', config)
         self.assertIn("8129/tcp: null", config)
         self.assertNotIn("8129/tcp: 8129", config)
         self.assertIn("smtp_authorization_code: password", config)
@@ -157,6 +165,73 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(item["recipients"], ["owner@example.com", "family@example.com"])
         self.assertNotIn("text_body", item)
         self.assertNotIn("秘密正文", json.dumps(item, ensure_ascii=False))
+
+    def test_mime_attachments_round_trip_and_persist_without_payload(self):
+        content = b'%PDF-1.7\nattachment-test-content'
+        meta = {"filename": "装修明细.pdf", "mime_type": "application/pdf", "size_bytes": len(content),
+                "sha256": "sha256:" + hashlib.sha256(content).hexdigest()}
+        transport = [encode_file(meta, content)]
+        args = {"to": ["owner@example.com"], "subject": "账单附件", "text_body": "请查看附件。",
+                "attachments": [{"source": "upload", "reference": "r" * 43}]}
+        first = self.service().send(args, context("e"), transport)
+        self.assertEqual(first["status"], "sent")
+        self.assertEqual(first["attachments"], [meta])
+        message = BytesParser(policy=policy.default).parsebytes(self.sent[0].as_bytes())
+        files = list(message.iter_attachments())
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].get_filename(), "装修明细.pdf")
+        self.assertEqual(files[0].get_content_type(), "application/pdf")
+        self.assertEqual(files[0].get_payload(decode=True), content)
+        restarted = MailService(self.config, MailStore(self.store.path), lambda *_: self.fail("must not resend"))
+        self.assertEqual(restarted.send(args, context("e"), transport), first)
+        self.assertEqual(restarted.recent_status()["items"][0]["attachments"], [meta])
+        self.assertNotIn(content, self.store.path.read_bytes())
+        self.assertNotIn(transport[0]["content_base64"].encode(), self.store.path.read_bytes())
+
+    def test_invalid_attachment_digest_path_and_missing_content_never_send(self):
+        content = b'%PDF-1.7\nbytes'
+        args = {"to": ["owner@example.com"], "subject": "测试", "text_body": "正文",
+                "attachments": [{"source": "upload", "reference": "r" * 43}]}
+        item = {"filename": "a.pdf", "mime_type": "application/pdf", "size_bytes": len(content),
+                "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                "content_base64": base64.b64encode(content).decode()}
+        for changes in ({"sha256": "sha256:" + "0" * 64}, {"filename": "../a.pdf"},
+                        {"mime_type": "application/x-executable"}, {"content_base64": "%%%"}):
+            with self.subTest(changes=list(changes)):
+                self.assertEqual(self.service().send(args, context("f"), [{**item, **changes}])["status"], "failed")
+        self.assertEqual(self.service().send(args, context("f"))["status"], "failed")
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.store.recent(), [])
+
+    def test_attachment_contract_matches_controller(self):
+        self.assertEqual(
+            (ADDON / "codex_mail/attachments.py").read_bytes(),
+            (ROOT / "codex_controller/codex_controller/extension_attachments.py").read_bytes(),
+        )
+
+    def test_http_transport_accepts_real_attachment_larger_than_model_json_limit(self):
+        content = b'attachment content\n' * 12000
+        metadata = {"filename": "notes.txt", "mime_type": "text/plain", "size_bytes": len(content),
+                    "sha256": "sha256:" + hashlib.sha256(content).hexdigest()}
+        class TestHandler(Handler):
+            service = self.service()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), TestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = request_extension(f'http://127.0.0.1:{server.server_port}', self.config.extension_bearer, {
+                'version': 1, 'name': 'send', 'context': context('9'),
+                'arguments': {'to': ['owner@example.com'], 'subject': '附件测试', 'text_body': '文件见附件',
+                              'attachments': [{'source': 'upload', 'reference': 'r' * 43}]},
+                'attachments': [encode_file(metadata, content)],
+            })
+            self.assertEqual(result['status'], 'sent')
+            self.assertEqual(result['attachments'], [metadata])
+            self.assertEqual(list(self.sent[0].iter_attachments())[0].get_payload(decode=True), content)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
 
 
 if __name__ == "__main__":

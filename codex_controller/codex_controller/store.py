@@ -847,6 +847,18 @@ class ControllerStore(FollowupStoreMixin):
                 raise StoreError("job_not_found", "作业不存在", status=404)
             return self._job_document(connection, row)
 
+    def job_attachment(self, job_id: str, reference: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT input_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            raise StoreError("attachment_not_found", "附件不属于当前作业", status=404)
+        payload = self.continuation_input(job_id, json.loads(row["input_json"]))
+        attachments = self.related_attachments(job_id, payload["attachments"])
+        matches = [item for item in attachments if item.get("attachment_ref") == reference]
+        if len(matches) != 1:
+            raise StoreError("attachment_not_found", "附件不属于当前作业", status=404)
+        return matches[0]
+
     def claim_next(self) -> dict[str, Any] | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1352,6 +1364,21 @@ class ControllerStore(FollowupStoreMixin):
             ).fetchone()
             if row is None:
                 raise StoreError("artifact_not_found", "下载链接不存在或已过期", status=404)
+            return self._read_artifact_row(connection, row)
+
+    def read_conversation_artifact(self, conversation_key: str, artifact_id: str) -> tuple[dict[str, Any], bytes]:
+        """Resolve generated files only within the same verified owner conversation."""
+        if not conversation_key or not isinstance(artifact_id, str) or not ARTIFACT_ID_RE.fullmatch(artifact_id):
+            raise StoreError("artifact_not_found", "附件引用无效", status=404)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT a.* FROM job_artifacts a JOIN jobs j ON j.job_id=a.job_id "
+                "WHERE j.conversation_key=? AND j.capability_profile='owner' "
+                "AND a.artifact_id=? AND a.expires_at>?",
+                (conversation_key, artifact_id, utc_now()),
+            ).fetchone()
+            if row is None:
+                raise StoreError("artifact_not_found", "附件不存在、已过期或不属于当前会话", status=404)
             return self._read_artifact_row(connection, row)
 
     def cleanup_artifacts(self) -> int:

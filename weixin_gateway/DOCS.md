@@ -1,6 +1,6 @@
 # Weixin Gateway 使用说明
 
-当前版本：`0.4.10`。
+当前源码候选版本：`0.4.14`；正式运行版本须以部署后实时核验为准。
 
 `0.4.10` 修复旧失败记录的来源识别：只要已有 Controller 作业短引用，即使记录来自结构化状态字段加入前，也按 Controller 故障展示其稳定错误码，不会误报为微信投递失败。管理状态 SSE、断线重连、单 Poller 与唯一 notification consumer 保持不变。
 
@@ -233,3 +233,7 @@ SQLite additive 表只保存 task、outbox、状态序号、Agent 摘要和受�
 图片与归档指令可以分成连续微信消息。Gateway 按 identity、principal、conversation 持久关联，支持 image-first、intent-first、精确数量、取消、15 分钟过期和最多 16 个附件。关联失败或作业失败不会静默消费附件；成功上下文绑定指令消息、图片消息和附件摘要。
 
 Controller 返回图片或 ZIP 制品时，Gateway 预取后再次校验 DTO、MIME、PNG/ZIP 签名、长度和 SHA-256，再用微信原生 image/file item 发送。发送沿用持久 client ID、`sent`、`failed` 和 `delivery_state_unknown` 状态；内部路径不写入微信正文。
+
+## 装修进度采集（0.4.14）
+
+Gateway 持久保存进度采集请求与附件映射，只在相同 identity、principal、conversation 和明确项目范围内形成采集上下文。重启、失败和未知投递继续按原状态恢复，不把普通图片自动写入装修档案。

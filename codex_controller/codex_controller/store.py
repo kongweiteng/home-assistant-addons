@@ -1527,7 +1527,6 @@ class ControllerStore(FollowupStoreMixin):
             "reply_suppressed": document.get("reply_suppressed", False),
             "result": document.get("result"),
             "result_summary": document.get("result_summary") if completed else None,
-            "reply_suppressed": bool(document.get("reply_suppressed")) if completed else False,
             "artifacts": self._public_artifacts(str(document.get("job_id") or "")) if completed else [],
             "error_code": document.get("error_code"),
             "attempt": document.get("attempt"),

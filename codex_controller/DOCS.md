@@ -3,7 +3,7 @@
 
 `0.5.59` 增加通用扩展注册与 skill 发现。符合 [EXTENSIONS.md](EXTENSIONS.md) 契约的新能力通过安装、配置和工具启用接入微信，不修改 Gateway 或 Controller 核心；正式部署与手机验收另行记录。
 
-当前源码候选版本：`0.5.59`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
+当前源码候选版本：`0.5.63`。Runner `0.3.38` 的四平台 manifest 与摘要在正式构建后固定；正式运行版本仍须以部署后实时核验为准。
 
 ## 瞬态 Turn 安全重试
 
@@ -299,6 +299,8 @@ The Skill and private HOME live under persistent `/data`; back them up securely 
 
 所有者可以说“有哪些模型可用”“当前默认模型是什么”“把默认模型切换为 gpt-6.1-sol”。模型工具查询实际后端目录，精确验证后将默认模型持久保存在 Controller 私有数据库。切换从后续新一轮生效，活动轮模型不变；成员不能修改。自定义端点的目录不可用或没有指定型号时明确拒绝，不猜测替代型号。持久设置优先于 options 初始值，重启保留；API Key 配置为空时初始默认为 gpt-6.1-sol。
 
+维护者的优先顺序为 `gpt-6.1-sol`、`gpt-6-sol`、`gpt-5.6-sol`。降级仍通过所有者明确的微信切换请求执行，并逐个通过当前后端目录和真实流式调用门禁；Controller 不会在失败后静默换模型或自动重放 Turn。当前正式默认值必须以部署时的原生 Codex Turn 验证结果为准。
+
 升级前先排空在途消息并备份 Controller 与 Gateway 私有数据、options、原源码和镜像。旧版本忽略 additive 关联与模型表；回退前核对追加 attempt/unknown 和所有活动任务，禁止把未知执行自动重放。
 
 ## 模型切换可用性（0.5.61）
@@ -310,3 +312,7 @@ The Skill and private HOME live under persistent `/data`; back them up securely 
 Gateway 可以为同一身份、成员和会话中经过严格关联的多条图片消息附带 `media_archive_context@1`。Controller 重算来源消息、附件摘要和幂等范围；只有上下文完整一致时才开放装修媒体写工具。普通图片、模糊指令、跨会话附件和过期附件仍不能触发归档。
 
 `ledger_generate_chart` 与 `ledger_export` 共用受控 artifact DTO。Controller 下载后验证引用、MIME、PNG/ZIP 签名、长度和 SHA-256，只把安全元数据交给模型和 Gateway；内部路径不进入回复。回退前先排空待发制品并核对未知投递状态。
+
+## 装修进度采集（0.5.63）
+
+确定性进度采集协调器只接受经过 Gateway 绑定的所有者附件与明确项目上下文，生成稳定的采集键并核对 Hub 持久化结果。它与连续消息追加、跨消息归档和询价报价共享现有写入证据与未知结果保护。

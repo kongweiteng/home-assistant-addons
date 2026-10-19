@@ -76,4 +76,22 @@ CREATE TRIGGER IF NOT EXISTS versions_no_update BEFORE UPDATE ON project_version
  BEGIN SELECT RAISE(ABORT,'append_only'); END;
 CREATE TRIGGER IF NOT EXISTS versions_no_delete BEFORE DELETE ON project_versions
  BEGIN SELECT RAISE(ABORT,'append_only'); END;
-PRAGMA user_version=1;
+-- provider journal v2
+CREATE TABLE IF NOT EXISTS input_journal (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_id TEXT NOT NULL UNIQUE,
+ owner_ref TEXT NOT NULL, conversation_ref TEXT NOT NULL, source_event_ref TEXT NOT NULL,
+ input_revision INTEGER NOT NULL CHECK(input_revision>0), name TEXT NOT NULL,
+ resource_ref TEXT NOT NULL, call_digest TEXT NOT NULL, payload_json TEXT NOT NULL,
+ origin_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('queued','running','durability_pending','accepted','rejected')),
+ result_json TEXT NOT NULL,
+ UNIQUE(owner_ref,source_event_ref,input_revision,name,resource_ref)
+);
+CREATE INDEX IF NOT EXISTS journal_pending ON input_journal(state,sequence);
+CREATE TRIGGER IF NOT EXISTS journal_no_rewrite BEFORE UPDATE OF
+ operation_id,owner_ref,conversation_ref,source_event_ref,input_revision,name,
+ resource_ref,call_digest,payload_json,origin_json,created_at ON input_journal
+ BEGIN SELECT RAISE(ABORT,'append_only_input'); END;
+CREATE TRIGGER IF NOT EXISTS journal_no_delete BEFORE DELETE ON input_journal
+ BEGIN SELECT RAISE(ABORT,'append_only_input'); END;
+PRAGMA user_version=2;

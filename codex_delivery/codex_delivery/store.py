@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from .durability import Replica, ReplicaReceipt, Snapshot, digest, verify_receipt
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 
@@ -66,7 +66,8 @@ def identifier(prefix: str) -> str:
 
 class DeliveryStore:
     def __init__(self, path: Path, *, local_domain: str, replica_domain: str = "",
-                 replica: Replica | None = None, recovery_mode: bool = False):
+                 replica: Replica | None = None, recovery_mode: bool = False,
+                 upgrade_schema: bool = False):
         self.path = Path(path)
         self.local_domain = reference(local_domain)
         self.replica_domain = reference(replica_domain) if replica_domain else ""
@@ -74,6 +75,7 @@ class DeliveryStore:
         self.recovery_mode = recovery_mode
         self._lock = threading.RLock()
         self._writer_depth = 0
+        self.schema_backup: Path | None = None
         if self.path.is_symlink() or self.path.parent.is_symlink():
             raise DeliveryError("storage_path_invalid")
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -87,6 +89,11 @@ class DeliveryStore:
             os.close(fd)
         with closing(self._connect()) as c:
             version = c.execute("PRAGMA user_version").fetchone()[0]
+            if version == 1:
+                if not upgrade_schema:
+                    raise DeliveryError("schema_upgrade_required")
+                self._upgrade_v1(c)
+                version = SCHEMA_VERSION
             if version not in (0, SCHEMA_VERSION):
                 raise DeliveryError("schema_version_unsupported")
             if version == 0:
@@ -97,6 +104,34 @@ class DeliveryStore:
             if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                 raise DeliveryError("database_corrupt")
         self._fsync_parent()
+
+    def _upgrade_v1(self, c: sqlite3.Connection) -> None:
+        """Explicit administrator opt-in, immutable pre-upgrade backup first."""
+        with self._writer_guard():
+            if c.execute("PRAGMA user_version").fetchone()[0] != 1:
+                raise DeliveryError("schema_version_changed")
+            if (c.execute("PRAGMA quick_check").fetchone()[0] != "ok"
+                    or c.execute("PRAGMA foreign_key_check").fetchone() is not None):
+                raise DeliveryError("database_corrupt")
+            path = self.path.parent / (self.path.name + ".v1-" + identifier("backup") + ".sqlite3")
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+            with closing(sqlite3.connect(path)) as backup:
+                c.backup(backup)
+                backup.execute("PRAGMA journal_mode=DELETE")
+                if backup.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                    raise DeliveryError("schema_backup_invalid")
+            with path.open("rb") as source:
+                os.fsync(source.fileno())
+            self._fsync_parent()
+            self.schema_backup = path
+            sql = Path(__file__).with_name("schema.sql").read_text().split("-- provider journal v2\n", 1)[1]
+            try:
+                c.executescript("BEGIN IMMEDIATE;\n" + sql + "\nCOMMIT;")
+            except BaseException:
+                if c.in_transaction:
+                    c.execute("ROLLBACK")
+                raise
 
     def _fsync_parent(self) -> None:
         fd = os.open(self.path.parent, os.O_RDONLY)
@@ -505,7 +540,8 @@ class DeliveryStore:
 
     @classmethod
     def restore(cls, path: Path, snapshot: Snapshot, receipt: ReplicaReceipt, *,
-                local_domain: str, replica_domain: str) -> "DeliveryStore":
+                local_domain: str, replica_domain: str,
+                upgrade_schema: bool = False) -> "DeliveryStore":
         """Offline restore into a new private namespace; execution stays disabled.
 
         A restored outbox is frozen until an operator establishes one active
@@ -522,7 +558,10 @@ class DeliveryStore:
         with closing(sqlite3.connect(":memory:")) as c:
             c.deserialize(snapshot.content)
             c.execute("PRAGMA trusted_schema=OFF")
-            if (c.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION
+            version = c.execute("PRAGMA user_version").fetchone()[0]
+            if version == 1 and not upgrade_schema:
+                raise DeliveryError("schema_upgrade_required")
+            if (version not in (1, SCHEMA_VERSION)
                     or c.execute("PRAGMA quick_check").fetchone()[0] != "ok"
                     or c.execute("PRAGMA foreign_key_check").fetchone() is not None):
                 raise DeliveryError("snapshot_database_invalid")
@@ -532,6 +571,7 @@ class DeliveryStore:
         with closing(sqlite3.connect(path, isolation_level=None)) as c:
             c.execute("PRAGMA synchronous=FULL")
             c.execute("UPDATE runtime_guard SET recovery_required=1 WHERE singleton=1")
-        restored = cls(path, local_domain=local_domain, replica_domain=replica_domain, recovery_mode=True)
+        restored = cls(path, local_domain=local_domain, replica_domain=replica_domain,
+                       recovery_mode=True, upgrade_schema=upgrade_schema)
         restored.verify_event_chain()
         return restored

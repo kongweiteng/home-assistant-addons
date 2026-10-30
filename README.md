@@ -12,6 +12,7 @@ Canonical Home Assistant add-on repository for every application maintained and 
 | [DrawIO](drawio/) | Browser-based diagram editor through Home Assistant Ingress | `amd64`, `aarch64` | [jgraph/docker-drawio](https://github.com/jgraph/docker-drawio) |
 | [ESLink Gas](eslink_gas/) | Read-only multi-account gas balance and meter status through Ingress and MQTT Discovery | `amd64`, `aarch64` | Undocumented ESLink mobile service hall |
 | [HA Manager Executor](ha_manager_executor/) | Read-only shadow for the isolated Supervisor manager execution domain | `amd64`, `aarch64` | Self-maintained |
+| [HA Artifact Observer](ha_artifact_observer/) | Default-off, fixed-target Docker image observation with separate instance authorization | `amd64`, `aarch64` | Self-maintained |
 | [HA Operations Broker](ha_operations_broker/) | Passkey authorization broker with a default-off, exact allowlist Add-on restart executor | `amd64`, `aarch64` | Self-maintained |
 | [Hermes Agent](hermes_agent/) | Persistent AI agent, dashboard, terminal and API | `amd64`, `aarch64` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) |
 | [Huaxin Water](huaxin_water/) | Read-only multi-account water history, statistics and MQTT Discovery through Ingress | `amd64`, `aarch64` | Undocumented Tianjin Huaxin Water H5 API |

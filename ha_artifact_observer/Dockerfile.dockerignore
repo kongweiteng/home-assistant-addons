@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!Dockerfile.dockerignore
+!run.sh
+!ha_artifact_observer/
+ha_artifact_observer/**
+!ha_artifact_observer/__init__.py
+!ha_artifact_observer/api.py
+!ha_artifact_observer/contract.py
+!ha_artifact_observer/docker.py
+!ha_artifact_observer/main.py
+!ha_artifact_observer/service.py
+!ha_artifact_observer/settings.py

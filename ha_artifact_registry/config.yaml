@@ -1,0 +1,15 @@
+name: HA Immutable Artifact Registry Candidate
+version: "0.0.1"
+slug: ha_artifact_registry
+description: "Disabled immutable canary registry; host networking requires separate approval."
+arch: [amd64, aarch64]
+init: false
+startup: application
+boot: manual
+stage: experimental
+host_network: false
+docker_api: false
+hassio_api: false
+homeassistant_api: false
+options: {}
+schema: {}

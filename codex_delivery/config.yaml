@@ -1,0 +1,89 @@
+name: Codex Delivery
+version: "0.0.3"
+slug: codex_delivery
+description: "持久任务与通用工作元数据候选；执行资格默认关闭。"
+url: "https://github.com/kongweiteng/home-assistant-addons/tree/main/codex_delivery"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: manual
+stage: experimental
+backup: cold
+watchdog: "http://[HOST]:[PORT:8131]/healthz"
+ports:
+  8131/tcp: null
+ports_description:
+  8131/tcp: "仅供已登记 Controller 内部认证调用；不映射宿主端口"
+options:
+  extension_bearer: ""
+  origin_key: ""
+  allowed_actors: []
+  local_domain: ha-delivery
+  replica_domain: ""
+  upgrade_schema: false
+  worker_enabled: true
+  worker_interval_seconds: 1
+  journal_capacity: 128
+  execution_enabled: false
+  runner:
+    enabled: false
+    controller_url: ""
+    runner_ref: ""
+    runner_bearer: ""
+    callback_bearer: ""
+    policy_revision: 1
+    policy_digest: ""
+  replica:
+    enabled: false
+    root: ""
+    fstype: nfs4
+    source: ""
+    mountpoint: ""
+    key_ref: ""
+    key: ""
+    timeout_seconds: 10
+  fnos_file_replica:
+    enabled: false
+schema:
+  extension_bearer: password
+  origin_key: password
+  allowed_actors:
+    - str
+  local_domain: str
+  replica_domain: str
+  upgrade_schema: bool
+  worker_enabled: bool
+  worker_interval_seconds: "int(1,30)"
+  journal_capacity: "int(1,1024)"
+  execution_enabled: bool
+  runner:
+    enabled: bool
+    controller_url: str
+    runner_ref: str
+    runner_bearer: password
+    callback_bearer: password
+    policy_revision: "int(1,2147483647)"
+    policy_digest: str
+  replica:
+    enabled: bool
+    root: str
+    fstype: "list(nfs|nfs4|cifs)"
+    source: str
+    mountpoint: str
+    key_ref: str
+    key: password
+    timeout_seconds: "int(1,30)"
+  fnos_file_replica:
+    enabled: bool
+    policy: "str?"
+    endpoint: "str?"
+    directory: "str?"
+    store_ref: "str?"
+    namespace_ref: "str?"
+    qualification_ref: "str?"
+    credential_ref: "str?"
+    key_ref: "str?"
+    timeout_seconds: "int(1,30)?"
+    maxbytes: "int(1,536870912)?"

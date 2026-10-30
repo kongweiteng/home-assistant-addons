@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!run.sh
+!ha_artifact_registry/
+ha_artifact_registry/**
+!ha_artifact_registry/__init__.py
+!ha_artifact_registry/image.py
+!ha_artifact_registry/service.py
+!ha_artifact_registry/http.py
+!ha_artifact_registry/main.py
+!ha_artifact_registry/tls.py

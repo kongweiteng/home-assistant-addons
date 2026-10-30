@@ -1,0 +1,16 @@
+name: Codex Work Canary
+version: "0.2.0"
+slug: codex_work_canary
+description: "Independent immutable-registry canary fixture only."
+image: "127.0.0.1:5079/codex-work/{arch}-canary"
+arch: [amd64, aarch64]
+init: false
+startup: application
+boot: manual
+stage: experimental
+backup: cold
+watchdog: "http://[HOST]:[PORT:8769]/healthz"
+ports:
+  8769/tcp: null
+options: {}
+schema: {}

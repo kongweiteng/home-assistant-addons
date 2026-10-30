@@ -1,0 +1,7 @@
+# Independent canary source template, not an installed Add-on
+
+Use only for the existing disposable `codex_work_canary` target under an administrator-fixed `ha-canary-python-v1` recipe with its exact `target_ref`. `config.yaml.example` is review material and is not active Supervisor metadata. The template retains the original independent canary's root UID to read/write its private 0600 marker and reproduce the intentional C data fault; it adds no Docker, HA API, network, device or host capabilities. General Python/Node recipes remain UID 65532.
+
+`main.py` retains the original marker/config/health behavior. Its reported source identity comes from the original sealed software manifest injected by the fixed builder; independent source reconstruction, repository graph readback and actual runtime image observation establish the binding. The service's own health field is not source proof. The variant file is part of the frozen Git candidate: B is `0.2.0`/healthy, C is `0.3.0`/expected failure. The fixed builder supplies Supervisor image labels for the exact original version and architecture. The base must contain `/usr/bin/python3` and be qualified independently.
+
+Installing/updating the actual canary metadata, publishing artifacts, enabling this registry's host network, runtime Observer target enrollment and running the B→C→restore drill all remain separate real acceptance steps under the parent task. Do not apply this template to a business Add-on or enable broad root execution for ordinary tasks.

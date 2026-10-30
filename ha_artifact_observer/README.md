@@ -1,8 +1,17 @@
 # HA Artifact Observer
 
-Independent fixed-target Docker artifact observation. Version `0.0.4` is an
+Independent fixed-target Docker artifact observation. Version `0.0.5` is an
 artifact-only delivery slice, implemented using the Python standard library.
 It can run without Delivery, Registry, Controller or a task executor.
+
+The Dockerfile pins separate Debian base digests for Docker `amd64` and `arm64`;
+BuildKit's `TARGETARCH` selects the actual platform. It does not consume
+Supervisor's `BUILD_FROM` argument or use `build.yaml` image entries. Version
+`0.0.4` built locally but failed installation on Supervisor `2026.10.5`: its
+build configuration rejected digest-form images and fell back to an Alpine
+base, where Debian package installation failed. That failed install produced
+no installed version or running service. The `0.0.5` build correction still
+needs its own image and HA acceptance results.
 
 The default Add-on requests no Docker API, Supervisor API, host network,
 privileged mode, Ingress or published host port. Its observation switches are

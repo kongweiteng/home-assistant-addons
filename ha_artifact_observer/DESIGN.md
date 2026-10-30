@@ -1,6 +1,6 @@
 # Fixed-target artifact observation
 
-Version `0.0.4` is a standalone artifact-only delivery slice. It has no Delivery,
+Version `0.0.5` is a standalone artifact-only delivery slice. It has no Delivery,
 Registry, Controller or task-execution dependency. Source completion, local
 verification, image builds and actual HA acceptance are separate evidence.
 The slice must not be described as deployed until instance acceptance completes.

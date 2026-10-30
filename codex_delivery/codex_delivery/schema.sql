@@ -116,7 +116,51 @@ CREATE TABLE IF NOT EXISTS ha_release_steps(
  step TEXT NOT NULL,operation_ref TEXT NOT NULL UNIQUE,state TEXT NOT NULL,
  result_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
  PRIMARY KEY(deployment_ref,step));
+-- delivery groups v6
+CREATE TABLE IF NOT EXISTS delivery_groups (
+ group_id TEXT PRIMARY KEY, owner_ref TEXT NOT NULL,
+ revision INTEGER NOT NULL CHECK(revision>0),
+ control TEXT NOT NULL CHECK(control IN ('active','paused','cancelled')),
+ acceptance_ref TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN (0,1)),
+ UNIQUE(owner_ref,group_id)
+);
+CREATE TABLE IF NOT EXISTS delivery_group_members (
+ group_id TEXT NOT NULL, member_ref TEXT NOT NULL, owner_ref TEXT NOT NULL,
+ project_id TEXT NOT NULL, task_id TEXT NOT NULL,
+ task_revision INTEGER NOT NULL CHECK(task_revision>0), document_json TEXT NOT NULL,
+ PRIMARY KEY(group_id,member_ref), UNIQUE(group_id,task_id),
+ FOREIGN KEY(owner_ref,group_id) REFERENCES delivery_groups(owner_ref,group_id),
+ FOREIGN KEY(owner_ref,project_id,task_id) REFERENCES tasks(owner_ref,project_id,task_id)
+);
+CREATE TABLE IF NOT EXISTS delivery_group_edges (
+ group_id TEXT NOT NULL, before_ref TEXT NOT NULL, after_ref TEXT NOT NULL,
+ CHECK(before_ref<>after_ref), PRIMARY KEY(group_id,before_ref,after_ref),
+ FOREIGN KEY(group_id,before_ref) REFERENCES delivery_group_members(group_id,member_ref),
+ FOREIGN KEY(group_id,after_ref) REFERENCES delivery_group_members(group_id,member_ref)
+);
+CREATE TRIGGER IF NOT EXISTS delivery_group_members_no_update BEFORE UPDATE ON delivery_group_members
+ BEGIN SELECT RAISE(ABORT,'immutable_group_members'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_group_members_no_delete BEFORE DELETE ON delivery_group_members
+ BEGIN SELECT RAISE(ABORT,'retained_group_members'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_group_edges_no_update BEFORE UPDATE ON delivery_group_edges
+ BEGIN SELECT RAISE(ABORT,'immutable_group_edges'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_group_edges_no_delete BEFORE DELETE ON delivery_group_edges
+ BEGIN SELECT RAISE(ABORT,'retained_group_edges'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_group_members_no_late_insert BEFORE INSERT ON delivery_group_members
+ WHEN (SELECT sealed FROM delivery_groups WHERE group_id=NEW.group_id)<>0
+ BEGIN SELECT RAISE(ABORT,'sealed_group_members'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_group_edges_no_late_insert BEFORE INSERT ON delivery_group_edges
+ WHEN (SELECT sealed FROM delivery_groups WHERE group_id=NEW.group_id)<>0
+ BEGIN SELECT RAISE(ABORT,'sealed_group_edges'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_groups_seal BEFORE UPDATE OF sealed ON delivery_groups
+ WHEN OLD.sealed=1 OR NEW.sealed<>1
+ BEGIN SELECT RAISE(ABORT,'sealed_group'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_groups_no_rewrite BEFORE UPDATE OF group_id,owner_ref,acceptance_ref,created_at ON delivery_groups
+ BEGIN SELECT RAISE(ABORT,'immutable_group_identity'); END;
+CREATE TRIGGER IF NOT EXISTS delivery_groups_no_delete BEFORE DELETE ON delivery_groups
+ BEGIN SELECT RAISE(ABORT,'retained_group'); END;
 -- schema version
 -- Repository evidence is installed from repo_manager in this same transaction.
--- DeliveryStore validates every required schema before committing version 5.
-PRAGMA user_version=5;
+-- DeliveryStore validates every required schema before committing version 6.
+PRAGMA user_version=6;

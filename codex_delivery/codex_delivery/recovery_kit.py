@@ -28,13 +28,14 @@ from .durability import ReplicaReceipt, Snapshot, digest, verify_receipt
 from .encrypted_replica import EncryptedReplica, OVERHEAD, SHA
 from .fnos_file_settings import FnosFileSettings
 from .object_archive import ArchiveReceipt, ObjectArchive, _scope, _json as archive_json
-from .store import (DeliveryStore, SCHEMA_VERSION, _verify_task_schema,
-    _verify_repository_schema, _verify_release_schema)
+from .store import (DeliveryError, DeliveryStore, SCHEMA_VERSION, _verify_task_schema,
+    _verify_repository_schema, _verify_release_schema, _verify_group_schema)
 
 MAX_DESCRIPTOR=4*1024*1024
 MAX_ARCHIVES=128
 MAX_EVENTS=100000
 ADMIN_OBJECT_READ_SECONDS=120
+DATABASE_SCHEMAS=(5,6)
 SHANGHAI=ZoneInfo('Asia/Shanghai')
 
 
@@ -174,10 +175,14 @@ def database_facts(snapshot,receipt,*,primary_domain,replica_domain):
     with closing(sqlite3.connect(':memory:')) as connection:
         connection.deserialize(snapshot.content);connection.row_factory=sqlite3.Row
         connection.execute('PRAGMA trusted_schema=OFF');connection.execute('PRAGMA query_only=ON')
-        if (connection.execute('PRAGMA user_version').fetchone()[0]!=SCHEMA_VERSION
+        version=connection.execute('PRAGMA user_version').fetchone()[0]
+        if (version not in DATABASE_SCHEMAS
                 or connection.execute('PRAGMA quick_check').fetchone()[0]!='ok'
                 or connection.execute('PRAGMA foreign_key_check').fetchone() is not None):fail()
-        _verify_task_schema(connection);_verify_repository_schema(connection);_verify_release_schema(connection)
+        try:
+            _verify_task_schema(connection);_verify_repository_schema(connection);_verify_release_schema(connection)
+            if version==6:_verify_group_schema(connection)
+        except DeliveryError as error:fail(error.code)
         previous='';count=0;events={};archives={};tip=None
         for row in connection.execute('SELECT * FROM events ORDER BY sequence'):
             count+=1
@@ -200,7 +205,7 @@ def database_facts(snapshot,receipt,*,primary_domain,replica_domain):
         pending=connection.execute("SELECT event_id FROM durability WHERE state!='confirmed'").fetchall()
         # Frozen snapshots normally contain their own not-yet-confirmed row.
         if any(row[0]!=receipt.event_id for row in pending):fail('recovery_kit_unconfirmed_history')
-        return {'schema_version':SCHEMA_VERSION,'chain_tip':tip},events,archives
+        return {'schema_version':version,'chain_tip':tip},events,archives
 
 
 def _inventory(replica,scope,receipt,destination,*,local_domain):
@@ -298,7 +303,7 @@ def verify_descriptor(raw,*,anchor):
         settings=FnosFileSettings(**value['fnos_file_settings'])
         if settings.key_ref!=value['key_ref']:fail()
         db=closed(value['database'],{'schema_version','chain_tip','receipt'})
-        if type(db['schema_version']) is not int or db['schema_version']!=SCHEMA_VERSION:fail()
+        if type(db['schema_version']) is not int or db['schema_version'] not in DATABASE_SCHEMAS:fail()
         _receipt(db['receipt'],value['replica_domain'])
         tip=closed(db['chain_tip'],{'event_id','event_digest','sequence','event_count'})
         reference(tip['event_id'])
@@ -329,10 +334,16 @@ def verify_descriptor(raw,*,anchor):
     except Exception:fail('recovery_kit_signature_or_binding_invalid')
 
 
-def recover_descriptor(raw,*,anchor,replica,destination,local_domain):
+def _require_upgrade(version,upgrade_schema):
+    if type(upgrade_schema) is not bool:fail()
+    if version!=SCHEMA_VERSION and not upgrade_schema:fail('schema_upgrade_required')
+
+
+def recover_descriptor(raw,*,anchor,replica,destination,local_domain,upgrade_schema=False):
     """Read all listed objects into a brand-new read-only tree, then publish it."""
     try:
         value,settings=verify_descriptor(raw,anchor=anchor);reference(local_domain)
+        _require_upgrade(value['database']['schema_version'],upgrade_schema)
         if (type(replica) is not ReadOnlyReplica or replica.settings!=settings or replica.domain!=value['replica_domain']
                 or local_domain in {value['primary_domain'],value['replica_domain']}):fail('recovery_kit_binding_invalid')
         destination=Path(destination);parent=private_directory(destination.parent)
@@ -355,11 +366,14 @@ def recover_descriptor(raw,*,anchor,replica,destination,local_domain):
             expected=[entry for key,entry in sorted(known.items()) if key not in included]
             if canonical(value['coverage']['uncovered_archives'])!=canonical(expected):fail('recovery_kit_coverage_invalid')
             store=DeliveryStore.restore(stage/'delivery.sqlite3',snapshot,receipt,
-                local_domain=local_domain,replica_domain=replica.domain)
+                local_domain=local_domain,replica_domain=replica.domain,upgrade_schema=upgrade_schema)
             if not store.recovery_mode:fail()
             summary={'version':1,'descriptor_sha256':digest(raw),'checkpoint_ref':value['checkpoint_ref'],
                 'recovery_read_only':True,'event_count':store.verify_event_chain(),'archives_restored':len(included),
-                'uncovered_archives':len(expected),'uncovered_items':value['coverage']['uncovered_items']}
+                'uncovered_archives':len(expected),'uncovered_items':value['coverage']['uncovered_items'],
+                'source_schema_version':db['schema_version'],'schema_version':SCHEMA_VERSION,
+                'schema_upgraded':db['schema_version']!=SCHEMA_VERSION,
+                'schema_backup':store.schema_backup.name if store.schema_backup is not None else None}
             descriptor=os.open(stage/'recovery-summary.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
             with os.fdopen(descriptor,'wb') as output:
                 output.write(canonical(summary));output.flush();os.fsync(output.fileno())
@@ -375,6 +389,7 @@ def recover_descriptor(raw,*,anchor,replica,destination,local_domain):
             finally:os.close(directory)
         return summary
     except RecoveryKitError:raise
+    except DeliveryError as error:fail(error.code)
     except Exception:fail('recovery_kit_recovery_unavailable')
 
 
@@ -422,6 +437,7 @@ def main(argv=None):
     export=sub.add_parser('export');export.add_argument('--request',required=True);export.add_argument('--retention-root',required=True);export.add_argument('--scratch-root',required=True)
     recover=sub.add_parser('recover');recover.add_argument('--descriptor',required=True);recover.add_argument('--anchor',required=True)
     recover.add_argument('--destination',required=True);recover.add_argument('--local-domain',required=True)
+    recover.add_argument('--upgrade-schema',action='store_true',help='Explicitly migrate a verified schema5 recovery into the current schema; retains a private pre-upgrade backup')
     arguments=parser.parse_args(argv)
     if arguments.action=='export':
         request=closed(decode(read_private(arguments.request)),{'version','checkpoint_ref','signer_ref','primary_domain','replica_domain',
@@ -431,6 +447,7 @@ def main(argv=None):
     else:
         raw=read_private(arguments.descriptor);anchor=decode(read_private(arguments.anchor))
         value,settings=verify_descriptor(raw,anchor=anchor);domain=value['replica_domain']
+        _require_upgrade(value['database']['schema_version'],arguments.upgrade_schema)
     key,token,signer=_secrets(sys.stdin.buffer,key_ref=settings.key_ref,failure_domain=domain,
         signer_ref=request['signer_ref'] if arguments.action=='export' else None,export=arguments.action=='export')
     port=FnosHTTPFilePort(settings.binding,settings.endpoint,settings.directory,
@@ -445,7 +462,8 @@ def main(argv=None):
         raw=build_descriptor(replica=replica,signing_key=signer,scratch_root=arguments.scratch_root,**fields)
         retain_descriptor(raw,root=arguments.retention_root)
         summary={'version':1,'descriptor_sha256':digest(raw),'checkpoint_ref':request['checkpoint_ref'],'retained':True}
-    else:summary=recover_descriptor(raw,anchor=anchor,replica=replica,destination=arguments.destination,local_domain=arguments.local_domain)
+    else:summary=recover_descriptor(raw,anchor=anchor,replica=replica,destination=arguments.destination,
+        local_domain=arguments.local_domain,upgrade_schema=arguments.upgrade_schema)
     print(canonical(summary).decode());return 0
 
 

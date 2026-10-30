@@ -24,8 +24,8 @@ from .contracts import DeliveryError, REF, reference
 from .durability import Replica, ReplicaReceipt, Snapshot, digest, verify_receipt
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-SCHEMA_VERSION = 5
-LEGACY_SCHEMA_VERSIONS = (1, 2, 3, 4)
+SCHEMA_VERSION = 6
+LEGACY_SCHEMA_VERSIONS = (1, 2, 3, 4, 5)
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 LEGACY_TASK_COLUMNS = ('task_id', 'owner_ref', 'project_id', 'conversation_ref', 'source_event_ref',
                        'mode', 'requirement', 'project_revision', 'revision', 'phase', 'state',
@@ -101,7 +101,7 @@ def _verify_task_schema(connection: sqlite3.Connection) -> None:
 def _release_schema_source() -> str:
     source = Path(__file__).with_name('schema.sql').read_text()
     try:
-        return source.split('-- HA release journal v5\n', 1)[1].split('-- schema version\n', 1)[0]
+        return source.split('-- HA release journal v5\n', 1)[1].split('-- delivery groups v6\n', 1)[0]
     except IndexError:
         raise DeliveryError('schema_definition_invalid') from None
 
@@ -135,6 +135,31 @@ def _verify_release_schema(connection: sqlite3.Connection) -> None:
             raise DeliveryError('schema_release_invalid')
         if connection.execute("SELECT 1 FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL", (name,)).fetchone():
             raise DeliveryError('schema_release_invalid')
+
+
+def _group_schema_source() -> str:
+    source = Path(__file__).with_name('schema.sql').read_text()
+    try:
+        return source.split('-- delivery groups v6\n', 1)[1].split('-- schema version\n', 1)[0]
+    except IndexError:
+        raise DeliveryError('schema_definition_invalid') from None
+
+
+def _install_group_schema(connection: sqlite3.Connection) -> None:
+    if not connection.in_transaction:
+        raise DeliveryError('group_migration_transaction_required')
+    _execute_schema(connection, _group_schema_source())
+
+
+def _verify_group_schema(connection: sqlite3.Connection) -> None:
+    def objects(c):
+        return {row[0]: (row[1], re.sub(r'\s+', '', row[2]).lower()) for row in c.execute(
+            "SELECT name,type,sql FROM sqlite_master WHERE tbl_name IN "
+            "('delivery_groups','delivery_group_members','delivery_group_edges') AND sql IS NOT NULL")}
+    with closing(sqlite3.connect(':memory:')) as expected:
+        _execute_schema(expected, _group_schema_source())
+        if objects(connection) != objects(expected):
+            raise DeliveryError('schema_group_invalid')
 
 
 class DeliveryStore:
@@ -183,6 +208,7 @@ class DeliveryStore:
                         _install_repository_schema(c)
                         _verify_repository_schema(c)
                         _verify_release_schema(c)
+                        _verify_group_schema(c)
                         if c.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                             raise DeliveryError('database_corrupt')
                         if c.execute('PRAGMA foreign_key_check').fetchone() is not None:
@@ -196,6 +222,7 @@ class DeliveryStore:
             _verify_task_schema(c)
             _verify_repository_schema(c)
             _verify_release_schema(c)
+            _verify_group_schema(c)
             self.recovery_mode = recovery_mode or bool(c.execute("SELECT recovery_required FROM runtime_guard WHERE singleton=1").fetchone()[0])
             if (c.execute("PRAGMA quick_check").fetchone()[0] != "ok"
                     or c.execute('PRAGMA foreign_key_check').fetchone() is not None):
@@ -210,11 +237,13 @@ class DeliveryStore:
             if (c.execute("PRAGMA quick_check").fetchone()[0] != "ok"
                     or c.execute("PRAGMA foreign_key_check").fetchone() is not None):
                 raise DeliveryError("database_corrupt")
-            # v4 already promises the task/repository schemas. A v5 upgrade
-            # must not repair unrelated v4 damage while installing release DDL.
-            if source_version == 4:
+            # Existing v4/v5 promise the task/repository schemas; v5 also
+            # promises release DDL. Group migration must not repair their damage.
+            if source_version in (4, 5):
                 _verify_task_schema(c)
                 _verify_repository_schema(c)
+            if source_version == 5:
+                _verify_release_schema(c)
             path = self.path.parent / (self.path.name + f".v{source_version}-" + identifier("backup") + ".sqlite3")
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             os.close(fd)
@@ -252,6 +281,8 @@ class DeliveryStore:
                 _verify_repository_schema(c)
                 _install_release_schema(c)
                 _verify_release_schema(c)
+                _install_group_schema(c)
+                _verify_group_schema(c)
                 if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise DeliveryError("database_corrupt")
                 if c.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -729,6 +760,11 @@ class DeliveryStore:
                     or c.execute("PRAGMA foreign_key_check").fetchone() is not None):
                 raise DeliveryError("snapshot_database_invalid")
             if version == SCHEMA_VERSION:
+                _verify_task_schema(c)
+                _verify_repository_schema(c)
+                _verify_release_schema(c)
+                _verify_group_schema(c)
+            elif version == 5:
                 _verify_task_schema(c)
                 _verify_repository_schema(c)
                 _verify_release_schema(c)

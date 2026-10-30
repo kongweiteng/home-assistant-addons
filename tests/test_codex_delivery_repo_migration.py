@@ -10,7 +10,7 @@ from unittest.mock import patch
 from codex_delivery.codex_delivery.durability import ReplicaReceipt, Snapshot, digest
 from codex_delivery.codex_delivery.journal import InputJournal
 from codex_delivery.codex_delivery.repo_manager import install_repository_schema
-from codex_delivery.codex_delivery.store import DeliveryError, DeliveryStore, LEGACY_TASK_COLUMNS
+from codex_delivery.codex_delivery.store import DeliveryError, DeliveryStore, LEGACY_TASK_COLUMNS, SCHEMA_VERSION
 from test_codex_delivery_store import ReplicaFixture
 
 
@@ -87,7 +87,7 @@ class RepositoryMigrationTests(unittest.TestCase):
 
     def test_new_schema_v5_installs_repo_objects_and_installer_requires_transaction(self):
         with closing(self.store._connect()) as c:
-            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], 5)
+            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
             for table in REPO_TABLES:
                 self.assertIsNotNone(c.execute('SELECT sql FROM sqlite_master WHERE name=?', (table,)).fetchone())
             with self.assertRaisesRegex(DeliveryError, 'repository_migration_transaction_required'):

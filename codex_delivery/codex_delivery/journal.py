@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from .store import DeliveryError, DeliveryStore, canonical, now, reference
 
-WRITES = frozenset({'plan', 'revise', 'control', 'project_control', 'work_submit', 'work_revise', 'work_control', 'work_prepare', 'software_bind'})
+WRITES = frozenset({'plan', 'revise', 'control', 'project_control', 'work_submit', 'work_revise', 'work_control', 'work_prepare', 'software_bind', 'group_create', 'group_control'})
 # Only errors known to precede the metadata commit are terminal rejections.
 # Snapshot/storage/commit failures can follow a successful local transaction.
 REJECTIONS = frozenset({'reference_invalid', 'text_invalid', 'mode_invalid',
@@ -27,7 +27,13 @@ REJECTIONS = frozenset({'reference_invalid', 'text_invalid', 'mode_invalid',
                         'profile_invalid', 'output_names_invalid', 'input_refs_invalid',
                         'outbound_grant_required', 'project_binding_invalid', 'input_revision_invalid',
                         'input_revision_conflict', 'cancel_pending', 'software_scope_invalid',
-                        'software_request_conflict'})
+                        'software_request_conflict', 'group_arguments_invalid', 'group_goal_unavailable',
+                        'group_dependency_invalid', 'group_scope_invalid',
+                        # Group create/control verify member facts only before
+                        # _mutation or inside its rollback-protected apply.
+                        # Replica/commit failures retain the original unknown
+                        # handling and never use this metadata validation code.
+                        'group_evidence_unavailable'})
 
 
 class InputJournal:
@@ -62,7 +68,7 @@ class InputJournal:
             raise DeliveryError('recovery_read_only')
         if name not in WRITES:
             raise DeliveryError('tool_unavailable')
-        resource = arguments.get('task_ref') or arguments.get('project_ref') or origin['conversation_ref']
+        resource = arguments.get('group_ref') or arguments.get('task_ref') or arguments.get('project_ref') or origin['conversation_ref']
         owner = origin['actor_ref']
         identity = {k: origin[k] for k in ('actor_ref', 'source_event_ref', 'input_revision')}
         identity.update(name=name, resource_ref=reference(resource))
@@ -102,7 +108,8 @@ class InputJournal:
                             code='recovery_read_only' if self.store.recovery_mode else
                             'durability_pending' if row['state'] == 'durability_pending' else 'awaiting_processing')
         for original, exposed in (('task_id', 'task_ref'), ('project_id', 'project_ref'),
-                                  ('event_id', 'event_ref'), ('revision', 'revision'), ('request_ref', 'request_ref')):
+                                  ('event_id', 'event_ref'), ('revision', 'revision'), ('request_ref', 'request_ref'),
+                                  ('group_ref', 'group_ref')):
             if original in result and result[original] is not None:
                 response[exposed] = result[original]
         return response
@@ -114,6 +121,7 @@ class MetadataWorker:
         self.journal = journal
         self.store = journal.store
         self.software_management = None
+        self.groups = None
 
     def run_once(self) -> bool:
         if self.store.recovery_mode:
@@ -163,6 +171,15 @@ class MetadataWorker:
         origin = json.loads(row['origin_json'])
         owner, key = row['owner_ref'], row['operation_id']
         name = row['name']
+        if name in {'group_create', 'group_control'} and self.groups is None:
+            from .delivery_groups import DeliveryGroups
+            self.groups = DeliveryGroups(self.store)
+        if name == 'group_create':
+            return self.groups.create(owner, key, members=args['members'],
+                edges=args['edges'], acceptance_ref=args['acceptance_ref'])
+        if name == 'group_control':
+            return self.groups.control(owner, key, group_ref=args['group_ref'],
+                expected_revision=args['expected_revision'], action=args['action'])
         if name == 'software_bind':
             if self.software_management is None:
                 raise DeliveryError('tool_unavailable')

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from codex_delivery.codex_delivery.durability import Snapshot, ReplicaReceipt, digest
 from codex_delivery.codex_delivery.ha_release import HAReleaseCoordinator
 from codex_delivery.codex_delivery.store import (
-    DeliveryError, DeliveryStore, _install_release_schema,
+    DeliveryError, DeliveryStore, SCHEMA_VERSION, _install_release_schema,
 )
 
 # Frozen v4 candidate schema, originally owned by Coordinator construction.
@@ -82,7 +82,7 @@ class ReleaseMigrationTests(unittest.TestCase):
 
     def test_fresh_v5_has_every_release_table_and_installer_requires_transaction(self):
         with closing(self.store._connect()) as c:
-            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], 5)
+            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
             self.assertEqual(set(self.rows()), set(TABLES))
             with self.assertRaisesRegex(DeliveryError, 'release_migration_transaction_required'):
                 _install_release_schema(c)
@@ -111,7 +111,7 @@ class ReleaseMigrationTests(unittest.TestCase):
         self.assertEqual(self.rows(upgraded.schema_backup), before)
         self.assertEqual(upgraded.schema_backup.stat().st_mode & 0o777, 0o600)
         with closing(upgraded._connect()) as c:
-            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], 5)
+            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
             self.assertIsNone(c.execute('PRAGMA foreign_key_check').fetchone())
 
     def test_partial_compatible_v4_schema_is_adopted_without_rewriting_existing_rows(self):

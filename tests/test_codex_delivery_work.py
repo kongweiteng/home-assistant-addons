@@ -12,7 +12,7 @@ from codex_delivery.codex_delivery.durability import ReplicaReceipt
 from codex_delivery.codex_delivery.journal import InputJournal, MetadataWorker
 from codex_delivery.codex_delivery.origin import issue_origin
 from codex_delivery.codex_delivery.provider import DeliveryProvider
-from codex_delivery.codex_delivery.store import DeliveryError, DeliveryStore, SHANGHAI
+from codex_delivery.codex_delivery.store import DeliveryError, DeliveryStore, SHANGHAI, SCHEMA_VERSION
 from codex_delivery.codex_delivery.work import WorkStore
 
 
@@ -251,7 +251,7 @@ class WorkTests(unittest.TestCase):
         upgraded.verify_event_chain()
         with closing(upgraded._connect()) as c:
             self.assertIsNone(c.execute('PRAGMA foreign_key_check').fetchone())
-            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], 5)
+            self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
         self.store = upgraded
         self.assertEqual(self.create()['status'], 'accepted')
 

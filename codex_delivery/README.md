@@ -51,9 +51,11 @@ HTTP 请求体上限 64KiB、输出上限 128KiB、同时处理上限 8，读取
 
 ## schema 迁移与恢复
 
-数据库 schema 当前为 5。打开 v1～v4 数据库默认返回 `schema_upgrade_required`；受信管理员显式传入 `DeliveryStore(..., upgrade_schema=True)`，才会先生成 `0600`、fsync 的升级前 SQLite 副本，再事务性迁移。失败回滚，保留副本；不要在活动旧写者仍运行时升级。兼容的 v4 发布候选表保留原证据和锁，结构漂移拒绝；详见 [SCHEMA_MIGRATION.md](SCHEMA_MIGRATION.md)。升级前副本包含私有元数据，不可提交 Git。
+数据库 schema 当前为 6，增加同库跨项目交付组。打开 v1～v5 数据库默认返回 `schema_upgrade_required`；受信管理员显式传入 `DeliveryStore(..., upgrade_schema=True)`，才会先生成 `0600`、fsync 的升级前 SQLite 副本，再事务性迁移。失败回滚，保留副本；不要在活动旧写者仍运行时升级。兼容的 v4 发布候选表保留原证据和锁，v5 原结构及当前组结构漂移均拒绝；详见 [SCHEMA_MIGRATION.md](SCHEMA_MIGRATION.md)。升级前副本包含私有元数据，不可提交 Git。
 
-恢复 v1～v4 快照默认同样拒绝，且不创建目标文件；显式 `DeliveryStore.restore(..., upgrade_schema=True)` 才允许升级。恢复保护在转换之前写入并持久保留，转换、重启均不恢复执行或通知权限。原快照和升级前副本应留存；后续版本降级不能直接打开已迁移的数据库。
+恢复 v1～v5 快照默认同样拒绝，且不创建目标文件；显式 `DeliveryStore.restore(..., upgrade_schema=True)` 才允许升级。恢复保护在转换之前写入并持久保留，转换、重启均不恢复执行或通知权限。原快照和升级前副本应留存；后续版本降级不能直接打开已迁移的数据库。
+
+`group_create/status/list/events/control` 通过原签名来源与 journal 管理固定跨项目组，只观察本地历史推送事实；不执行成员任务或部署，不签发组合验收。详见 [GROUP_TOOLS.md](GROUP_TOOLS.md)。单 Runner 的项目轮转与等待提升见 [PROJECT_SCHEDULING.md](PROJECT_SCHEDULING.md)。这些本地候选均不代替真实运行资格。
 
 ## 验证
 

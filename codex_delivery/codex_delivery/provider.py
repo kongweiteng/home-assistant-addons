@@ -36,6 +36,14 @@ def closed(fields: dict[str, Any], required: tuple[str, ...] | None = None) -> d
 
 
 PAGE = {'offset': integer(0), 'limit': integer(1, 100)}
+GROUP_MEMBER = closed({
+    **{key: string() for key in ('member_ref', 'project_ref', 'task_ref', 'release_ref',
+                                  'authorization_ref', 'deployment_ref', 'target_ref')},
+    'task_revision': integer(), 'version': string(64), 'release_digest': string(71),
+    'goal': string(16, values=('published', 'deployed')),
+}, ('member_ref', 'project_ref', 'task_ref', 'task_revision', 'release_ref',
+    'version', 'release_digest', 'goal'))
+GROUP_EDGE = closed({'before': string(), 'after': string()})
 INPUTS = {
     'capabilities': closed({}),
     'work_submit': closed({'requirement': string(16000),
@@ -57,6 +65,17 @@ INPUTS = {
         'version': string(64), 'publish_alias': string(32)},
         ('task_ref', 'expected_revision', 'code_task_ref', 'expected_code_revision', 'release_ref', 'version')),
     'software_status': closed({'task_ref': string()}),
+    'group_create': closed({
+        'members': {'type': 'array', 'items': GROUP_MEMBER, 'minItems': 2, 'maxItems': 32},
+        'edges': {'type': 'array', 'items': GROUP_EDGE, 'maxItems': 128},
+        'acceptance_ref': string(),
+    }),
+    'group_status': closed({'group_ref': string()}),
+    'group_list': closed(PAGE, ()),
+    'group_events': closed({'group_ref': string(), 'after': integer(0),
+                            'limit': integer(1, 100)}, ('group_ref',)),
+    'group_control': closed({'group_ref': string(), 'expected_revision': integer(),
+                            'action': string(16, values=('pause', 'resume', 'cancel'))}),
     'projects': closed(PAGE, ()), 'repositories': closed(PAGE, ()), 'list': closed(PAGE, ()),
     'status': closed({'project_ref': string(), 'task_ref': string()}),
     'events': closed({'project_ref': string(), 'task_ref': string(), 'after': integer(0), 'limit': integer(1, 100)}, ('project_ref',)),
@@ -80,13 +99,39 @@ ITEM = closed({
     'control_pending': string(16), 'available': {'type': 'boolean'},
     'verified_at': string(64), 'reason': string(128),
 }, ())
+GROUP_MEMBER_STATUS = closed({
+    **GROUP_MEMBER['properties'],
+    'state': string(32), 'reason': string(128),
+    'authorization_state': string(32), 'historical_success': {'type': 'boolean'},
+    'dependency_blocked': {'type': 'boolean'},
+    'fact_count': integer(0), 'facts_truncated': {'type': 'boolean'},
+    'facts': {'type': 'array', 'items': closed({
+        'event_ref': string(), 'kind': string(64), 'digest': string(71),
+        'publication_ref': string(),
+    }, ('event_ref', 'kind', 'digest')), 'maxItems': 3},
+    'published': {'type': 'boolean'}, 'deployed': {'type': 'boolean'},
+}, ('member_ref', 'project_ref', 'task_ref', 'task_revision', 'release_ref',
+    'version', 'release_digest', 'goal'))
+GROUP_STATUS = closed({
+    'group_ref': string(), 'revision': integer(), 'control': string(32),
+    'state': string(32), 'acceptance_ref': string(),
+    'durability': string(16, values=('replicated', 'local_only')),
+    'observation_ref': string(),
+    **{key: {'type': 'boolean'} for key in ('requires_reconciliation',
+        'recovery_read_only', 'combination_accepted')},
+    'members': {'type': 'array', 'items': GROUP_MEMBER_STATUS, 'maxItems': 32},
+    'edges': {'type': 'array', 'items': GROUP_EDGE, 'maxItems': 128},
+    'created_at': string(64), 'updated_at': string(64),
+}, ('group_ref', 'revision'))
 OUTPUT = closed({
     'status': string(32, values=('ok', 'accepted', 'rejected', 'durability_pending')),
     'execution_enabled': {'type': 'boolean'}, 'code': string(128), 'durability': string(32),
-    **{k: string() for k in ('project_ref', 'task_ref', 'operation_ref', 'event_ref', 'request_ref')},
+    **{k: string() for k in ('project_ref', 'task_ref', 'operation_ref', 'event_ref', 'request_ref', 'group_ref')},
     'revision': integer(), 'total': integer(0), 'has_more': {'type': 'boolean'},
     'next_offset': integer(0), 'next_after': integer(0),
     'items': {'type': 'array', 'items': ITEM, 'maxItems': 100}, 'item': ITEM,
+    'group': GROUP_STATUS,
+    'groups': {'type': 'array', 'items': GROUP_STATUS, 'maxItems': 100},
 }, ('status', 'execution_enabled'))
 
 
@@ -149,6 +194,7 @@ class DeliveryProvider:
         self.clock = clock or (lambda: datetime.now(SHANGHAI))
         self.capabilities = capabilities or (lambda: [])
         self.software_management = None  # Trusted lifecycle only; no options flag.
+        self.groups = None
 
     def authenticated(self, authorization: str) -> bool:
         if not isinstance(authorization, str) or not authorization.startswith('Bearer ') or len(authorization) > 4103:
@@ -189,13 +235,15 @@ class DeliveryProvider:
     @staticmethod
     def _item(row: dict[str, Any]) -> dict[str, Any]:
         fields = {'project_id': 'project_ref', 'task_id': 'task_ref', 'repo_id': 'repo_ref',
-                  'event_id': 'event_ref', 'alias': 'alias', 'name': 'name', 'state': 'state',
+                  'event_id': 'event_ref', 'event_ref': 'event_ref', 'alias': 'alias', 'name': 'name', 'state': 'state',
                   'phase': 'phase', 'mode': 'mode', 'revision': 'revision', 'project_revision': 'project_revision',
                   'sequence': 'sequence', 'kind': 'kind', 'created_at': 'created_at', 'updated_at': 'updated_at',
                   'durability': 'durability', 'status': 'state'}
         return {fields[key]: value for key, value in row.items() if key in fields and value is not None}
 
     def _read(self, owner: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name.startswith('group_'):
+            return self._read_group(owner, name, args)
         if name == 'software_status':
             return self.software_management.status(owner, args['task_ref'])
         if name == 'operation_status':
@@ -233,4 +281,50 @@ class DeliveryProvider:
             row = c.execute('SELECT d.state FROM events e JOIN durability d USING(event_id) WHERE e.owner_ref=? AND e.task_id=? ORDER BY e.sequence DESC LIMIT 1',
                             (owner, args['task_ref'])).fetchone()
         result['durability'] = 'replicated' if row and row[0] == 'confirmed' else 'local_only'
+        return result
+
+    @staticmethod
+    def _group_item(row: dict[str, Any], *, detail: bool = True) -> dict[str, Any]:
+        # Expose a closed metadata projection, never raw event/request bodies.
+        result = {key: value for key, value in row.items()
+                  if key in GROUP_STATUS['properties'] and key not in {'members', 'edges'}}
+        if detail and 'members' in row:
+            result['members'] = [{key: value for key, value in member.items()
+                if key in GROUP_MEMBER_STATUS['properties'] and value is not None}
+                for member in row['members']]
+            for member in result['members']:
+                if 'facts' in member:
+                    allowed = GROUP_MEMBER_STATUS['properties']['facts']['items']['properties']
+                    member['fact_count'] = len(member['facts'])
+                    member['facts_truncated'] = len(member['facts']) > 3
+                    member['facts'] = [{key: value for key, value in fact.items() if key in allowed}
+                                       for fact in member['facts'][:3]]
+        if detail and 'edges' in row:
+            result['edges'] = [{key: edge[key] for key in ('before', 'after')}
+                               for edge in row['edges']]
+        return result
+
+    def _read_group(self, owner: str, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self.groups is None:
+            from .delivery_groups import DeliveryGroups
+            self.groups = DeliveryGroups(self.store)
+        result: dict[str, Any] = {'status': 'ok', 'execution_enabled': False}
+        if name == 'group_status':
+            result['group'] = self._group_item(self.groups.status(owner, args['group_ref']))
+        elif name == 'group_list':
+            page = self.groups.list(owner, **args)
+            result.update(groups=[self._group_item(row, detail=False) for row in page['items']],
+                total=page['total'], has_more=page['has_more'])
+            if page.get('next_offset') is not None:
+                result['next_offset'] = page['next_offset']
+        elif name == 'group_events':
+            page = self.groups.events(owner, args['group_ref'],
+                after=args.get('after', 0), limit=args.get('limit', 20))
+            items = [self._item(row) for row in page['items']]
+            for item in items:
+                item['durability'] = 'replicated' if item.get('durability') == 'confirmed' else 'local_only'
+            result.update(items=items,
+                total=page['total'], has_more=page['has_more'], next_after=page['next_after'])
+        else:
+            raise DeliveryError('tool_unavailable')
         return result

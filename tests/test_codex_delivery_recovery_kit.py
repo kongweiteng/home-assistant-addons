@@ -1,5 +1,6 @@
 """Signed external kits, real SQLite/AES and new OS process; NAS is a fixture."""
 from copy import deepcopy
+from contextlib import closing
 from dataclasses import asdict
 import base64
 import io
@@ -7,12 +8,14 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -22,8 +25,8 @@ from codex_delivery.codex_delivery.fnos_file_replica import FnosFileReplica
 from codex_delivery.codex_delivery.fnos_file_settings import FnosFileSettings
 from codex_delivery.codex_delivery.object_archive import ObjectArchive
 from codex_delivery.codex_delivery.recovery_kit import (ReadOnlyReplica,RecoveryKitError,_secrets,
-    build_descriptor,canonical,decode,recover_descriptor,retain_descriptor,verify_descriptor)
-from codex_delivery.codex_delivery.store import DeliveryStore,DeliveryError
+    build_descriptor,canonical,database_facts,decode,recover_descriptor,retain_descriptor,verify_descriptor)
+from codex_delivery.codex_delivery.store import DeliveryStore,DeliveryError,SCHEMA_VERSION
 from test_codex_delivery_fnos_file_replica import BINDING,DiskFilePort,FIXTURE_KEY
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -80,6 +83,149 @@ class RecoveryKitTests(unittest.TestCase):
     def resign(self,value):
         value={k:v for k,v in value.items() if k!='signature'}
         value['signature']=base64.b64encode(self.signer.sign(canonical(value))).decode();return canonical(value)
+
+    def database_fixture(self,change):
+        """Create authenticated historical/corrupt fixture bytes, not a live migration."""
+        original=self.reader().get(ReplicaReceipt(**self.database))
+        with closing(sqlite3.connect(':memory:')) as connection:
+            connection.deserialize(original.content)
+            change(connection)
+            raw=connection.serialize()
+        snapshot=Snapshot(original.event_id,raw,digest(raw))
+        self.database=asdict(self.writer.save(snapshot))
+        return snapshot,ReplicaReceipt(**self.database)
+
+    def legacy_descriptor(self):
+        def schema5(connection):
+            for name in ('delivery_group_edges','delivery_group_members','delivery_groups'):
+                connection.execute('DROP TABLE '+name)
+            connection.execute('PRAGMA user_version=5')
+        self.database_fixture(schema5)
+        return self.build()
+
+    def cli_recover(self,raw,*,upgrade=False,empty_stdin=False):
+        descriptor=retain_descriptor(raw,root=self.external)
+        anchor=self.external/'anchor.json';anchor.write_bytes(canonical(self.anchor));anchor.chmod(0o600)
+        script='''import sys,time,runpy
+from pathlib import Path
+from codex_delivery.codex_delivery import fnos_file_port
+nas=Path(sys.argv.pop(1))
+class Port:
+ def __init__(self,binding,*args,**kwargs):self.binding=binding
+ def get_exact(self,ref,*,deadline):
+  assert time.monotonic()<deadline
+  try:return (nas/ref).read_bytes()
+  except FileNotFoundError:return None
+fnos_file_port.FnosHTTPFilePort=Port
+runpy.run_module('codex_delivery.codex_delivery.recovery_kit',run_name='__main__')
+'''
+        payload={'version':1,'replica_key':{'version':1,'key_ref':'fixture-key','failure_domain':DOMAIN,
+            'key':base64.b64encode(FIXTURE_KEY).decode()},'access_token':TOKEN}
+        args=[sys.executable,'-B','-c',script,str(self.nas),'recover','--descriptor',str(descriptor),
+              '--anchor',str(anchor),'--destination',str(self.recovery/'cli-fresh'),'--local-domain','cli-recovery-domain']
+        if upgrade:args.append('--upgrade-schema')
+        return subprocess.run(args,input=b'' if empty_stdin else canonical(payload),stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,cwd=ROOT,timeout=20,check=False)
+
+    def test_schema5_original_signed_descriptor_verifies_without_resigning_or_mutation(self):
+        raw=self.legacy_descriptor();original=bytes(raw);anchor=deepcopy(self.anchor)
+        with patch('codex_delivery.codex_delivery.recovery_kit.build_descriptor',side_effect=AssertionError('must not resign')):
+            value,settings=verify_descriptor(raw,anchor=anchor)
+        self.assertEqual(value['database']['schema_version'],5)
+        self.assertEqual(settings,self.settings);self.assertEqual(raw,original);self.assertEqual(anchor,self.anchor)
+
+    def test_schema5_default_recovery_refuses_before_reads_or_target_creation(self):
+        raw=self.legacy_descriptor();reads=len(self.port.reads);writes=len(self.port.writes)
+        before={p.name for p in self.recovery.iterdir()}
+        with self.assertRaisesRegex(RecoveryKitError,'schema_upgrade_required'):
+            self.recover(raw)
+        self.assertEqual(len(self.port.reads),reads);self.assertEqual(len(self.port.writes),writes)
+        self.assertEqual({p.name for p in self.recovery.iterdir()},before)
+
+    def test_schema5_explicit_recovery_migrates_with_private_backup_and_persistent_read_only_guard(self):
+        raw=self.legacy_descriptor();original=bytes(raw);writes=len(self.port.writes)
+        summary=self.recover(raw,upgrade_schema=True)
+        self.assertEqual(raw,original);self.assertEqual(summary['source_schema_version'],5)
+        self.assertEqual(summary['schema_version'],SCHEMA_VERSION);self.assertTrue(summary['schema_upgraded'])
+        root=self.recovery/'restored';backup=root/summary['schema_backup']
+        self.assertTrue(backup.is_file());self.assertEqual(backup.stat().st_mode&0o777,0o600)
+        with closing(sqlite3.connect(backup)) as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0],5)
+            self.assertEqual(connection.execute('SELECT recovery_required FROM runtime_guard').fetchone()[0],1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='delivery_groups'").fetchone()[0],0)
+        restored=DeliveryStore(root/'delivery.sqlite3',local_domain='new-recovery-domain',replica_domain=DOMAIN)
+        self.assertTrue(restored.recovery_mode)
+        with self.assertRaisesRegex(DeliveryError,'recovery_read_only'):
+            restored.create_project('owner-fixture','new-after-recovery',project_alias='new',name='blocked')
+        self.assertEqual(restored.verify_event_chain(),2)
+        for name,content in self.files.items():self.assertEqual((root/'archives/source-fixture'/name).read_bytes(),content)
+        self.assertEqual(len(self.port.writes),writes)
+
+    def test_schema5_cli_default_reports_upgrade_required_without_reading_secrets(self):
+        raw=self.legacy_descriptor();before={p.name:digest(p.read_bytes()) for p in self.nas.iterdir()}
+        result=self.cli_recover(raw,empty_stdin=True)
+        self.assertEqual(result.returncode,1);self.assertEqual(result.stdout,b'')
+        self.assertEqual(result.stderr,b'schema_upgrade_required\n')
+        self.assertEqual(list(self.recovery.iterdir()),[])
+        self.assertEqual({p.name:digest(p.read_bytes()) for p in self.nas.iterdir()},before)
+
+    def test_schema5_cli_explicit_upgrade_survives_total_primary_loss(self):
+        raw=self.legacy_descriptor();before={p.name:digest(p.read_bytes()) for p in self.nas.iterdir()}
+        shutil.rmtree(self.primary)
+        result=self.cli_recover(raw,upgrade=True)
+        self.assertEqual(result.returncode,0,result.stderr.decode())
+        summary=decode(result.stdout);self.assertEqual(summary['source_schema_version'],5)
+        self.assertEqual(summary['schema_version'],6);self.assertTrue(summary['recovery_read_only'])
+        self.assertTrue((self.recovery/'cli-fresh'/summary['schema_backup']).is_file())
+        restored=DeliveryStore(self.recovery/'cli-fresh/delivery.sqlite3',local_domain='cli-recovery-domain',replica_domain=DOMAIN)
+        self.assertTrue(restored.recovery_mode);self.assertFalse(self.primary.exists())
+        self.assertEqual({p.name:digest(p.read_bytes()) for p in self.nas.iterdir()},before)
+        for secret in (TOKEN.encode(),FIXTURE_KEY):self.assertNotIn(secret,result.stdout+result.stderr)
+
+    def test_schema6_database_facts_rejects_damaged_group_definition(self):
+        original=self.build()
+        snapshot,receipt=self.database_fixture(lambda connection:connection.execute('ALTER TABLE delivery_groups ADD COLUMN extra TEXT'))
+        with self.assertRaisesRegex(RecoveryKitError,'schema_group_invalid'):
+            database_facts(snapshot,receipt,primary_domain='primary-domain',replica_domain=DOMAIN)
+        with self.assertRaisesRegex(RecoveryKitError,'schema_group_invalid'):self.build()
+        value=decode(original);value['database']['receipt']=self.database
+        with self.assertRaisesRegex(RecoveryKitError,'schema_group_invalid'):
+            self.recover(self.resign(value),upgrade_schema=True)
+        self.assertFalse((self.recovery/'restored').exists())
+
+    def test_schema5_database_still_requires_original_task_repository_and_release_schema(self):
+        self.legacy_descriptor()
+        snapshot,receipt=self.database_fixture(lambda connection:connection.execute('ALTER TABLE repository_artifacts ADD COLUMN extra TEXT'))
+        with self.assertRaisesRegex(RecoveryKitError,'schema_repository_invalid'):
+            database_facts(snapshot,receipt,primary_domain='primary-domain',replica_domain=DOMAIN)
+
+    def test_unknown_signed_database_versions_and_boolean_upgrade_are_rejected(self):
+        raw=self.build()
+        for version in (True,1,4,7):
+            with self.subTest(version=version):
+                value=decode(raw);value['database']['schema_version']=version
+                with self.assertRaises(RecoveryKitError):verify_descriptor(self.resign(value),anchor=self.anchor)
+        for upgrade in (1,'true',None):
+            with self.subTest(upgrade=upgrade):
+                with self.assertRaises(RecoveryKitError):self.recover(raw,upgrade_schema=upgrade)
+        self.assertFalse((self.recovery/'restored').exists())
+
+    def test_signed_schema_must_match_authenticated_database_before_migration(self):
+        raw=self.legacy_descriptor();value=decode(raw);value['database']['schema_version']=6
+        with self.assertRaisesRegex(RecoveryKitError,'recovery_kit_database_binding_invalid'):
+            self.recover(self.resign(value),upgrade_schema=True)
+        self.assertFalse((self.recovery/'restored').exists())
+
+    def test_cli_reports_group_schema_error_without_publishing_or_uploading(self):
+        raw=self.build();value=decode(raw)
+        self.database_fixture(lambda connection:connection.execute('ALTER TABLE delivery_groups ADD COLUMN extra TEXT'))
+        value['database']['receipt']=self.database
+        before={p.name:digest(p.read_bytes()) for p in self.nas.iterdir()}
+        result=self.cli_recover(self.resign(value),upgrade=True)
+        self.assertEqual(result.returncode,1);self.assertEqual(result.stdout,b'')
+        self.assertEqual(result.stderr,b'schema_group_invalid\n')
+        self.assertEqual(list(self.recovery.iterdir()),[])
+        self.assertEqual({p.name:digest(p.read_bytes()) for p in self.nas.iterdir()},before)
 
     def test_external_descriptor_has_exact_tip_full_inventory_no_key_token_or_plaintext(self):
         writes=len(self.port.writes);raw=self.build();value,settings=verify_descriptor(raw,anchor=self.anchor)

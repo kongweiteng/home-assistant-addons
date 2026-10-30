@@ -1,10 +1,34 @@
-# Delivery schema v5
+# Delivery schema v6
 
 This is a local database migration and candidate adapter correction. It does not
 enable deployment, supply Supervisor credentials, qualify a backup restore, or
 change a running Home Assistant instance.
 
-## Scope and explicit upgrade
+## Current v6 scope and explicit upgrade
+
+Schema v6 adds `delivery_groups`, immutable `delivery_group_members` and
+`delivery_group_edges` to this same database. Their original group events,
+commands, durability receipts and notifications use the existing Store. A group
+contains fixed references to its original project-bound tasks and Releases;
+it is not another task queue or deployment authority. The bounded metadata
+interfaces and remaining execution limits are described in
+[GROUP_TOOLS.md](GROUP_TOOLS.md) and [DELIVERY_GROUP_PLAN.md](DELIVERY_GROUP_PLAN.md).
+
+Opening any v1–v5 database requires explicit `upgrade_schema=true`. An existing
+v5 database must first pass the task, repository and release schema checks;
+migration must not repair missing or altered old objects. The original private
+backup, transaction, foreign-key and rollback rules below also apply to v5→v6.
+Current v6 databases must contain the exact group definitions and immutable
+membership guards; missing or changed objects return `schema_group_invalid`.
+Constructing a group helper verifies these objects and never installs DDL.
+
+Restored databases remain read-only `recovery_required`, including after an
+explicit schema upgrade. Migration does not resolve unknown publications,
+unlock resources, accept a combination result or enable execution. Signed
+recovery descriptors retain their original schema and signature; see
+[RECOVERY_KIT.md](RECOVERY_KIT.md) for explicit historical-kit recovery.
+
+## Historical v5 release scope
 
 Schema v5 owns `ha_release_operations`, `ha_release_locks`, and
 `ha_release_steps` in the existing Delivery SQLite database. A fresh database

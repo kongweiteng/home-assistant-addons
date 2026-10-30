@@ -19,7 +19,7 @@ descriptor 也含私有 NAS 定位、文件名和项目引用，只能留在批�
 ## 创建停写检查点
 
 1. 由拥有持续授权的管理端停止该检查点范围内的写者，完成未确认事件的精确对账；保留原始 journal 和所有已有快照。工具不会自行停止服务，也不读取生产 SQLite 路径。
-2. 冻结一个已有 SQLite snapshot 的精确 receipt；snapshot 必须绑定事件链末端。除快照自身尚未确认的 durability 行外，任何历史 pending 都拒绝导出。schema 必须为当前 schema5，完整性、外键与事件链均须通过。
+2. 冻结一个已有 SQLite snapshot 的精确 receipt；snapshot 必须绑定事件链末端。除快照自身尚未确认的 durability 行外，任何历史 pending 都拒绝导出。仅支持已审查的 schema5 和 schema6，完整性、外键与事件链均须通过。两版本均验证原 task/repository/release schema；schema6 另验证完整 group 表、索引与触发器定义，schema5 不要求尚未引入的 group schema。
 3. 从同一 snapshot 的事件取得要保留的 archive，填写完整 scope 与 receipt。管理员提供以下闭合 request（实际值仅写私有文件）：
 
 ```text
@@ -72,12 +72,27 @@ python3 -m codex_delivery.codex_delivery.recovery_kit recover \
 
 恢复 stdin 为 `{version:1, replica_key:<完整AES登记JSON>, access_token:<短期token>}`，不允许 `signing_key`。destination 必须不存在，父目录必须为私有 `0700`；同一父目录不能有其他并发管理写者。先验签和闭合协议、再读取精确对象；事件链末端、scope、完整 inventory、全部 chunk 摘要及未覆盖清单都重新从 NAS 字节核对。布尔值不能冒充协议整数，时间必须带 `+08:00`。
 
+历史 schema5 descriptor 可按其原始字节、公钥和签名只读验证；不改写或重新签名，
+也不创建新 anchor。当前恢复目标为 schema6，恢复 schema5 默认返回
+`schema_upgrade_required`，在读取 stdin 凭据、连接 NAS 或创建恢复临时树之前停止。
+管理员明确选择迁移时，在上述 `recover` 命令追加 `--upgrade-schema`；仅此选项允许
+沿原 `DeliveryStore.restore(upgrade_schema=True)` 迁移。它先在新私有树内写入持久
+恢复保护，再保存 `0600` 的 schema5 升级前数据库副本并迁移到 schema6。该副本已含
+恢复保护；外部原 descriptor、签名及 NAS 密文对象保持原样。恢复数据库重启后仍只读，
+选项不授予执行、通知或上传权限；未知版本仍拒绝，不能借迁移修补损坏的 schema6。
+
+恢复摘要增加 `source_schema_version`、`schema_version`、`schema_upgraded` 和
+`schema_backup`（目标树内的升级前副本文件名；无需迁移时为 null）。CLI 仅返回稳定
+错误码，例如 `schema_upgrade_required` 或 `schema_group_invalid`；失败不发布目标，
+不把缺少恢复数据或错误定义当作可以重新上传、补签或自动修复的理由。
+
 全部验证成功才将同一父目录内的临时树 rename 至 destination，父目录 fsync；这是无并发管理写者前提下的发布，不宣称内核级 no-replace 原语。结果包括：
 
 ```text
 new-tree/delivery.sqlite3             恢复保护持久存在
 new-tree/archives/<archive_ref>/      全部校验后的原始文件及空目录
 new-tree/recovery-summary.json        摘要、事件数、覆盖和明确只读状态
+new-tree/delivery.sqlite3.v5-*.sqlite3 显式迁移时的私有升级前副本，保留恢复保护
 ```
 
 恢复不连接原数据库或 writer journal，不取得写对象能力，不修改 NAS 对象，也不启用执行器。成功后应逐项核对恢复摘要和业务缺口，后续接管唯一写者、重新部署、发消息、恢复业务卷均是另外的操作与验收。

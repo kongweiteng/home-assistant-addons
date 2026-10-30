@@ -27,7 +27,7 @@ class _Server(ThreadingHTTPServer):
 def create_server(host,port,*,service=None,preview_qualification=None):
     preview_slots=threading.BoundedSemaphore(2)
     class Handler(BaseHTTPRequestHandler):
-        server_version='HAArtifactObserver/0.0.4'
+        server_version='HAArtifactObserver/0.0.5'
         def setup(self):
             super().setup();self._started=time.monotonic();self.connection.settimeout(5)
             # A socket timeout alone restarts on each received byte. Bound both

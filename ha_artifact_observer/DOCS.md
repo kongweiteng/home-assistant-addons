@@ -1,5 +1,23 @@
 # Configuration and acceptance
 
+## Build compatibility
+
+Use BuildKit with the intended Docker platform (`linux/amd64` or `linux/arm64`).
+The Dockerfile contains two independently digest-pinned Debian base stages and
+selects `base-${TARGETARCH}`. Home Assistant's `aarch64` metadata corresponds to
+Docker's automatic `arm64` architecture. Unsupported architecture names have no
+base stage and fail the build. No caller-supplied base image or runtime module
+can replace these stages, and Supervisor's `BUILD_FROM` argument is unused.
+
+There is deliberately no `build.yaml`. Supervisor `2026.10.5` rejected the
+`0.0.4` digest-form `build_from` entries, fell back to its default Alpine image,
+and failed the Debian `apt-get` step. The real installation therefore ended in
+failure with no installed version or running observer. Earlier successful
+local builds did not establish compatibility with Supervisor's build path.
+Version `0.0.5` moves digest pins into the Dockerfile; record new dual-platform
+image checks and the real Supervisor install/start/observation results before
+claiming this correction is deployed.
+
 ## Instance authorization
 
 The published metadata has `docker_api:false`, `hassio_api:false`, manual boot,

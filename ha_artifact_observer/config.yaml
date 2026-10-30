@@ -1,5 +1,5 @@
 name: HA Artifact Observer
-version: "0.0.4"
+version: "0.0.5"
 slug: ha_artifact_observer
 description: "Default-off fixed-target artifact observer; explicit instance authorization required."
 arch: [amd64, aarch64]

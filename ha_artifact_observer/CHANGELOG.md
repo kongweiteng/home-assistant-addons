@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.5 — 2026-10-31
+
+- Correct the actual Supervisor build path: remove digest-form `build.yaml`
+  entries, which Supervisor `2026.10.5` rejected. The failed `0.0.4` install
+  fell back to Alpine and could not run Debian package installation; it did not
+  produce an installed version or start the observer.
+- Pin both Debian bases directly in separate Dockerfile stages and select the
+  final stage using BuildKit's automatic Docker `TARGETARCH`. Ignore
+  Supervisor's `BUILD_FROM` override so it cannot silently replace Debian.
+- Add build-contract regressions for supported architecture selection,
+  immutable base pins and removal of the incompatible build configuration.
+  Prior local image success is not HA build acceptance; the corrected version
+  requires new image and real-instance verification.
+
 ## 0.0.4 — 2026-10-31
 
 - Deliver the completed standalone artifact observer without unfinished

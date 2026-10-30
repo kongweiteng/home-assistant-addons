@@ -20,6 +20,7 @@ from typing import Any, Callable, Iterator, Protocol
 from .callback import CallbackError, CallbackUnknown, ControllerCallback
 from .object_archive import ArchiveError, ObjectArchive
 from .source_archive import WorkSourceArchive
+from .scheduling import confirmed_turns, ordered_tasks
 from .store import DeliveryError, canonical
 from .work import OUTPUT_NAME, WorkStore
 
@@ -103,7 +104,6 @@ class WorkCoordinator:
                     return False
                 running = c.execute("SELECT * FROM tasks WHERE mode='work' AND state='running' AND assigned_runner_ref=? ORDER BY updated_at,task_id",
                                     (self.runner_ref,)).fetchall()
-                rows = c.execute("SELECT * FROM tasks WHERE mode='work' AND state='queued' ORDER BY created_at,task_id").fetchall()
             for row in running:
                 task = dict(row)
                 if task['phase'] == 'delivery_wait':
@@ -139,6 +139,16 @@ class WorkCoordinator:
                 except Exception:
                     pass
                 return self._finish(task, self._claim(task), 'recovery_required', {'error_code': 'execution_outcome_unknown'})
+            # Fairness parsing must never block original running/unknown
+            # reconciliation. Only now read queue and turns in one snapshot.
+            with closing(self.store._connect()) as c:
+                c.execute('BEGIN')
+                if c.execute("SELECT 1 FROM durability WHERE state='pending' LIMIT 1").fetchone():
+                    return False
+                queued = c.execute("SELECT * FROM tasks WHERE mode='work' AND state='queued' ORDER BY created_at,task_id").fetchall()
+                if not queued:
+                    return False
+                rows = ordered_tasks(queued, confirmed_turns(c, self.runner_ref))
             # An unavailable profile must not starve other queued tasks.
             for row in rows:
                 task = dict(row)
